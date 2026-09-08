@@ -143,6 +143,17 @@ class TestReviewCommandsReferenceUnifiedScript:
         content = read_command("pr-review.md")
         assert "--mode pr" in content
 
+    def test_pr_review_without_an_argument_resolves_the_branch_pr(self):
+        """Two orchestrators on 2026-09-07 read the bare "If empty: STOP"
+        differently: one reviewed the current branch's open PR, the other
+        printed usage and waited. The command decides it."""
+        content = read_command("pr-review.md")
+        assert "If empty: STOP" not in content
+        # `gh pr view` also returns a merged or closed PR for the branch;
+        # the command must ask for the state and require OPEN.
+        assert "pr view --json number,url,state" in content
+        assert "`state` is `OPEN`" in content
+
     def test_full_code_review_uses_full_mode(self):
         content = read_command("full-code-review.md")
         assert "--mode full" in content

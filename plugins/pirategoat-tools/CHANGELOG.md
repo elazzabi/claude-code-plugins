@@ -5,6 +5,12 @@ All notable changes to the pirategoat-tools plugin will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.119.0] - UNRELEASED
+
+### Changed
+
+- `/pr-review` with no argument reviews the current branch's PR when there is exactly one and it is open; a merged or closed PR stops with usage.
+
 ## [1.118.0] - 2026-09-04
 
 ### Added

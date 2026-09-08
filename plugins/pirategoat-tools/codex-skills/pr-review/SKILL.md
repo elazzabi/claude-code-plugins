@@ -40,8 +40,8 @@ the file, verify it exists, then move on. Do not skip verification.
 ## Starting the Workflow
 
 **Parse arguments:** `${CODEX_SKILL_ARGUMENTS}`
-- Required: PR URL or PR number
-- If empty: STOP. "Usage: `$pirategoat-tools:pr-review <PR_URL_or_number>`"
+- A PR URL or PR number selects the PR.
+- If empty, resolve the current branch's PR: run `gh pr view --json number,url,state` (`ghe` for an a8c remote). When that yields exactly one open PR (`state` is `OPEN`) → review it and say so in one line ("No PR given; reviewing #3817 for the current branch"). A closed or merged PR, no PR, or the command fails → STOP with "Usage: `$pirategoat-tools:pr-review <PR_URL_or_number>`" (gh returns the branch's merged PR just as readily as an open one). Never guess a PR from anything else.
 - Extract PR number from URL if needed (`.../pull/3817` → `3817`)
 
 **Detect quick review mode:** If the user's input clearly indicates they want
