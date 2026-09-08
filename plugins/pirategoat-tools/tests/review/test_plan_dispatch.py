@@ -933,9 +933,9 @@ class TestTriageConditionalAgent:
         assert status == "DISPATCH"
         assert "auth" in reason
 
-    def test_commit_keyword_partial_match(self):
-        """Partial keyword match (substring) → DISPATCH."""
-        config = self._make_config(triage_keywords=["sanitiz"])
+    def test_commit_prefix_keyword_match(self):
+        """An explicitly marked prefix keyword → DISPATCH."""
+        config = self._make_config(triage_keywords=["sanitiz*"])
         status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config,
             ["src/Form.php"],
@@ -943,7 +943,7 @@ class TestTriageConditionalAgent:
             {},
         )
         assert status == "DISPATCH"
-        assert "sanitiz" in reason
+        assert "sanitiz*" in reason
 
     def test_no_keyword_match_still_dispatches_by_default(self):
         """No keyword match → still DISPATCH (conservative default)."""
@@ -1133,6 +1133,18 @@ class TestTriageConditionalAgent:
         )
         assert status == "DISPATCH"
         assert "public API" in reason
+
+    def test_a_changelog_fragment_is_a_documentation_file(self):
+        assert _mod._has_documentation_files(["changelog/fix-thing"]) is True
+        assert _mod._has_documentation_files([
+            "plugins/woocommerce/changelog/35520-fix"
+        ]) is True
+        # Real fragment names carry versions; a dot is not an extension.
+        assert _mod._has_documentation_files(["changelog/bump-phpstan-2.2.2"]) is True
+        # The shared pattern is the whole rule, on both the scope and the
+        # planner side: a file directly under `changelog/` is docs-drift's.
+        assert _mod._has_documentation_files(["src/changelog/helper.php"]) is True
+        assert _mod._has_documentation_files(["changelog/nested/deeper"]) is False
 
     def test_unsupported_triage_check_raises(self):
         """Unknown registry checks should fail fast instead of falling through."""
@@ -1800,12 +1812,12 @@ class TestWpArchitectureReviewerTriage:
 
 
 # =============================================================================
-# Keyword matching precision — word-start anchoring, separator normalization,
+# Keyword matching precision — whole-word anchoring, separator normalization,
 # structural-path stoplist
 # =============================================================================
 
 class TestKeywordMatchingPrecision:
-    """Keywords match at word starts, tolerate -/_ separators, and ignore
+    """Keywords match as whole words, tolerate -/_ separators, and ignore
     repo-structural path segments — the 2026-07-16 false-positive fixes."""
 
     def _make_config(self, **overrides):
@@ -1828,20 +1840,38 @@ class TestKeywordMatchingPrecision:
         assert "keywords matched" not in reason
 
     def test_keyword_still_matches_at_word_start(self):
-        """'move' matches 'move' and 'moved' as standalone word starts."""
+        """'move' matches as a standalone whole word."""
         config = self._make_config(triage_keywords=["move"])
         status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config,
             ["src/Renderer.php"],
-            "moved helper into trait",
+            "move helper into trait",
             {},
         )
         assert status == "DISPATCH"
         assert "keywords matched" in reason and "move" in reason
 
-    def test_prefix_keyword_still_matches_word_continuation(self):
-        """Deliberate prefix keywords ('accessib') keep matching longer words."""
-        config = self._make_config(triage_keywords=["accessib"])
+    @pytest.mark.parametrize("keyword, text", [
+        ("auth", "Co-Authored-By: someone"),
+        ("token", "tokenized-express-checkout--product-page.test.js"),
+        ("config", "Chromium was configured to skip it"),
+        ("ci", "a circular import"),
+        ("address", "the feedback is not addressed"),
+    ])
+    def test_a_keyword_is_a_whole_word(self, keyword, text):
+        """'auth' must not match 'authored' (every audited run dispatched
+        security on the Co-Authored-By trailer), 'token' not 'tokenized',
+        'config' not 'configured', 'ci' not 'circular'."""
+        config = self._make_config(triage_keywords=[keyword])
+        status, reason, _signal = triage_conditional_agent(
+            "dead-code-reviewer", config, ["src/Renderer.php"], text, {},
+        )
+        assert "keywords matched" not in reason, (keyword, text, reason)
+
+    def test_a_star_declares_a_prefix(self):
+        """'accessib*' keeps matching 'accessibility'; the star survives
+        into the reason so the orchestrator sees which entry fired."""
+        config = self._make_config(triage_keywords=["accessib*"])
         status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", config,
             ["src/Renderer.php"],
@@ -1849,7 +1879,47 @@ class TestKeywordMatchingPrecision:
             {},
         )
         assert status == "DISPATCH"
-        assert "accessib" in reason
+        assert "accessib*" in reason
+
+    def test_a_prefix_keyword_still_respects_the_start_boundary(self):
+        """'cach*' opens 'cache' and 'caching' but never 'recache'."""
+        config = self._make_config(triage_keywords=["cach*"])
+        status, reason, _signal = triage_conditional_agent(
+            "performance-reviewer", config, ["src/Renderer.php"],
+            "recache the totals on save", {},
+        )
+        assert "keywords matched" not in reason
+
+    def test_underscore_and_hyphen_bound_a_whole_word_on_both_sides(self):
+        """'register_rest' matches 'register_rest_route' and 'lock' matches
+        'release_cache_lock' — identifier separators are boundaries, so a
+        keyword ending at one is still a whole word."""
+        assert _mod._match_keywords_multi_source(
+            ["register_rest"], [("diff", "+ register_rest_route( 'wc/v3', ... )")],
+        ) == [("register_rest", "diff")]
+        assert _mod._match_keywords_multi_source(
+            ["lock"], [("diff", "+ release_cache_lock();")],
+        ) == [("lock", "diff")]
+        assert _mod._match_keywords_multi_source(
+            ["lock"], [("diff", "+ $lockfile = 'pnpm-lock.yaml';")],
+        ) == [("lock", "diff")]
+
+    def test_a_keyword_ending_in_a_non_word_character_keeps_prefix_meaning(self):
+        assert _mod._match_keywords_multi_source(
+            ["wp_"], [("diff", "+ wp_enqueue_script( 'x' );")],
+        ) == [("wp_", "diff")]
+        assert _mod._match_keywords_multi_source(
+            ["query("], [("diff", "+ $wpdb->query( $sql );")],
+        ) == [("query(", "diff")]
+        assert not _mod._is_prefix_keyword("/**")
+        assert _mod._match_keywords_multi_source(
+            ["/**"], [("diff", "+ /** A docblock. */")],
+        ) == [("/**", "diff")]
+
+    def test_multiword_prefix_keyword(self):
+        assert _mod._match_keywords_multi_source(
+            ["screen reader*"], [("pr", "tested with screen-readers")],
+        ) == [("screen reader*", "pr")]
 
     # --- Identifier boundaries: snake_case and camelCase ---
 
@@ -3133,6 +3203,106 @@ class TestKeywordNormalization:
         assert _mod._normalize_for_matching("HTTPS") == "https"
 
 
+class TestProseSourceHygiene:
+    """The planner matches the author's words: no PR template, no commit
+    trailers, no labels (the three runs' named noise sources)."""
+
+    def _context(self, body, labels=("plugin: woocommerce",)):
+        return {
+            "pr": {"title": "Fix the dropdown", "body": body, "labels": list(labels)},
+            "git": {"head_ref": "fix/53136-dropdown"},
+            "linked_issues_details": [{"title": "Keyboard opens on mobile"}],
+        }
+
+    def test_pr_text_excludes_labels(self):
+        text = _mod._build_pr_text(self._context("prose"))
+        assert "plugin" not in text.lower()
+        assert "Fix the dropdown" in text and "Keyboard opens on mobile" in text
+        assert "fix 53136 dropdown" in text
+
+    def test_pr_text_subtracts_the_template_and_its_comments(self):
+        template = "### Changes proposed in this Pull Request:\n<!-- describe -->\n- [ ] I reviewed for security best practices\n"
+        body = "### Changes proposed in this Pull Request\n<!-- describe -->\nOnly the author wrote this.\n- [x] I reviewed for security best practices\n"
+        text = _mod._build_pr_text(self._context(body), pr_template=template)
+        assert "security" not in text
+        assert "Only the author wrote this." in text
+
+    def test_pr_text_without_a_template_still_drops_comments(self):
+        body = "Prose <!-- template: passwords and user data --> more prose"
+        text = _mod._build_pr_text(self._context(body), pr_template="")
+        assert "password" not in text and "Prose  more prose" in text
+
+    def test_commit_messages_exclude_trailers(self):
+        log = "fix: closed keyboard\nBody.\n\nCo-Authored-By: Claude <x@y>\nClaude-Session: https://s\n\x00"
+        with patch.object(_mod.subprocess, "run") as run:
+            run.return_value = type("R", (), {"returncode": 0, "stdout": log})()
+            text = _mod.get_commit_messages("main..HEAD")
+        assert text == "fix: closed keyboard\nBody."
+        # The contract is per-commit separation, not the exact argv.
+        assert any("%x00" in arg for arg in run.call_args[0][0])
+
+    def test_commit_messages_drop_trailers_from_the_actual_git_subject_body_shape(self):
+        log = "fix: dropdown\nCo-Authored-By: Security Bot <test@example.com>\n\x00"
+        with patch.object(_mod.subprocess, "run") as run:
+            run.return_value = type("R", (), {"returncode": 0, "stdout": log})()
+            text = _mod.get_commit_messages("main..HEAD")
+        assert text == "fix: dropdown"
+
+    @pytest.mark.parametrize("wrapper, args", [
+        ("get_changed_files_from_git", ("main..HEAD",)),
+        ("get_diff_text", ("main..HEAD",)),
+        ("get_diffstat", ("main..HEAD",)),
+        ("get_commit_messages", ("main..HEAD",)),
+        ("get_repository_identity", ()),
+    ])
+    def test_every_git_wrapper_degrades_the_same_way_on_a_permission_error(self, wrapper, args):
+        """One failure shape across the planner: a git the process may not
+        run (PermissionError) degrades exactly like a git that is not
+        installed (FileNotFoundError), so the plan is still built from the
+        conservative defaults instead of aborting in whichever wrapper
+        happens to run first."""
+        fn = getattr(_mod, wrapper)
+        with patch.object(_mod.subprocess, "run", side_effect=FileNotFoundError):
+            missing = fn(*args)
+        with patch.object(_mod.subprocess, "run", side_effect=PermissionError):
+            assert fn(*args) == missing
+
+    def test_toplevel_is_unknown_on_os_error(self, monkeypatch):
+        with patch.object(_mod.subprocess, "run", side_effect=PermissionError):
+            assert _mod._git_toplevel() is None
+
+    def test_plan_looks_the_template_up_from_the_checkout(self, registry, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / ".github").mkdir(parents=True)
+        (repo / ".github" / "PULL_REQUEST_TEMPLATE.md").write_text(
+            "- [ ] I have reviewed my code for security best practices\n"
+        )
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.chdir(repo)
+        body = "- [x] I have reviewed my code for security best practices\nMoves a label.\n"
+        with patch.object(_mod, "get_diff_text", return_value="+ $label = 'x';"):
+            plan = build_dispatch_plan(
+                mode="pr", git_range="main..HEAD", output_dir=str(tmp_path / "out"),
+                changed_files=["src/Renderer.php"], registry=registry,
+                commit_messages="fix: move the label", diffstat={"added": 2, "removed": 1},
+                review_context=self._context(body, labels=()),
+            )
+        security = next(a for a in plan["agents"] if a["name"] == "security-reviewer")
+        assert "pr: security" not in security["reason"]
+
+    def test_an_explicit_empty_template_skips_the_lookup(self, registry, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with patch.object(_mod, "find_pr_template") as lookup, \
+                patch.object(_mod, "get_diff_text", return_value=""):
+            build_dispatch_plan(
+                mode="pr", git_range="main..HEAD", output_dir=str(tmp_path / "out"),
+                changed_files=["src/Renderer.php"], registry=registry,
+                commit_messages="", diffstat={"added": 1, "removed": 0},
+                review_context=self._context("body"), pr_template="",
+            )
+        lookup.assert_not_called()
+
+
 
 
 
@@ -3728,6 +3898,38 @@ class TestRegistryKeywordHygiene:
         assert offenders == {}, (
             f"Generic keywords make conditional agents de-facto always-dispatch: {offenders}"
         )
+
+    def test_prefix_keywords_declare_a_stem_of_at_least_four_characters(self, agents):
+        """A one-letter stem with a star is a wildcard, not a keyword."""
+        short = {
+            name: [kw for kw in config.get("triage_keywords", [])
+                   if _mod._is_prefix_keyword(kw) and len(kw.rstrip("*").strip()) < 4]
+            for name, config in agents.items()
+        }
+        assert {k: v for k, v in short.items() if v} == {}
+
+    def test_every_star_is_a_prefix_marker_or_the_docblock_opener(self, agents):
+        """A star after a non-alphanumeric character is a literal, so an
+        entry such as `wp_*` would match only the text "wp_*" and pass the
+        stem-length hygiene above unseen. Only `/**` earns a literal star."""
+        literal_stars = {
+            name: [kw for kw in config.get("triage_keywords", [])
+                   if kw.endswith("*") and not _mod._is_prefix_keyword(kw) and kw != "/**"]
+            for name, config in agents.items()
+        }
+        assert {k: v for k, v in literal_stars.items() if v} == {}
+
+    def test_no_bare_truncated_stems_remain(self, agents):
+        """The stems the prefix era relied on must now carry their star;
+        a bare stem is a whole word that matches nothing."""
+        stems = {"sanitiz", "escap", "optimiz", "accessib", "deprecat",
+                 "restructur", "idempoten", "schedul", "cach", "migrat",
+                 "architect", "inject", "decoupl", "consolidat", "concurren"}
+        offenders = {
+            name: sorted(stems & set(config.get("triage_keywords", [])))
+            for name, config in agents.items()
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
 
 
 # =============================================================================

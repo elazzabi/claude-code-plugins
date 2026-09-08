@@ -591,6 +591,16 @@ CRITERIA_PROBES = {
             ["includes/class-checkout.php"],
             diff="+do_action( 'wc_after_checkout_processed', $order );",
         ),
+        probe(
+            "Changelog fragments under a `changelog/` directory, whose significance, type, and note must match the diff",
+            ["changelog/fix-stale-coupon-cache"],
+            diff=(
+                "+Significance: patch\n"
+                "+Type: fix\n"
+                "+\n"
+                "+Invalidate the coupon code lookup cache when a coupon is unpublished."
+            ),
+        ),
     ],
     "ecosystem-integration-reviewer": [
         probe(

@@ -280,6 +280,35 @@ class TestFilterNoise:
 class TestFilterDomain:
     """Tests for filter_domain() — domain-specific file matching."""
 
+    def test_docs_drift_owns_changelog_fragments(self):
+        files = [
+            "changelog/fix-woopmnt-6265-ece-stale-click",
+            "plugins/woocommerce/changelog/35520-fix-stale-coupon-code-cache",
+            "changelog/nested/not-a-fragment",
+            "changelog.txt",
+            "src/changelog/helper.php",
+        ]
+        matched, excluded = review_scope.filter_domain(files, "docs-drift")
+        assert matched == [
+            "changelog/fix-woopmnt-6265-ece-stale-click",
+            "plugins/woocommerce/changelog/35520-fix-stale-coupon-code-cache",
+            "changelog.txt",
+            "src/changelog/helper.php",
+        ]
+        assert "changelog/nested/not-a-fragment" in excluded
+
+    def test_changelog_fragments_bypass_the_semantic_filter(self):
+        assert review_scope._SEMANTIC_FILTER_EXEMPT_RE.search("changelog/fix-thing")
+        assert not review_scope._SEMANTIC_FILTER_EXEMPT_RE.search("src/thing.php")
+
+    def test_no_domain_is_a_catch_all(self):
+        """Recorded decision: extensionless files other than changelog
+        fragments still match no domain — a catch-all would absorb
+        binaries and lock files."""
+        for path in ("CODEOWNERS", "LICENSE", "Gemfile", "bin/deploy"):
+            owners = [d for d in review_scope.DOMAIN_CATALOG if review_scope.filter_domain([path], d)[0]]
+            assert owners == [], (path, owners)
+
     def test_code_domain_includes_all_code(self):
         files = ["app.php", "utils.ts", "main.py", "style.css", "query.sql"]
         matched, excluded = review_scope.filter_domain(files, "code")

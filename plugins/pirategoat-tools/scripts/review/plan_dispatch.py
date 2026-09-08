@@ -55,6 +55,7 @@ try:
         SKIPPED_TRIAGE,
     )
     from .run_paths import artifact_path
+    from .triage_sources import find_pr_template, strip_commit_trailers, subtract_template
 except ImportError:
     _scripts_parent = str(Path(__file__).resolve().parent.parent)
     if _scripts_parent not in sys.path:
@@ -81,6 +82,7 @@ except ImportError:
         SKIPPED_TRIAGE,
     )
     from review.run_paths import artifact_path
+    from review.triage_sources import find_pr_template, strip_commit_trailers, subtract_template
 
 # =============================================================================
 # Import DOMAIN_CATALOG from agent/scope.py
@@ -100,6 +102,7 @@ _scope_spec.loader.exec_module(_scope_mod)
 DOMAIN_CATALOG = _scope_mod.DOMAIN_CATALOG
 filter_noise = _scope_mod.filter_noise
 filter_domain = _scope_mod.filter_domain
+_CHANGELOG_FRAGMENT_RE = re.compile(_scope_mod.CHANGELOG_FRAGMENT_PATTERN)
 
 # Repo-contributed reviewer applicability (shared with bootstrap).
 _review_config_spec = importlib.util.spec_from_file_location(
@@ -233,7 +236,7 @@ def get_changed_files_from_git(git_range: str) -> List[str]:
         if not output:
             return []
         return output.splitlines()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return []
 
 
@@ -267,7 +270,7 @@ def get_diff_text(git_range: str, files: Optional[List[str]] = None) -> Optional
         if result.returncode != 0:
             return None
         return result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return None
 
 
@@ -412,18 +415,21 @@ def is_test_file(filepath: str) -> bool:
 
 
 def get_commit_messages(git_range: str) -> str:
-    """Get combined commit messages from a git range, in original case
-    (keyword matching normalizes per-source so camelCase boundaries survive).
+    """Combined commit messages from a git range, in original case, without
+    trailer paragraphs (Co-Authored-By, Claude-Session, Refs …), which are
+    metadata nobody wrote as a review signal — one matched `auth` in every
+    audited run. Commits are NUL-separated in the log so a trailer block is
+    recognised per commit; see triage_sources.strip_commit_trailers.
 
     Returns empty string on failure (fault-tolerant).
     """
-    cmd = ["git", "log", "--format=%s%n%b", git_range]
+    cmd = ["git", "log", "--format=%s%n%b%x00", git_range]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return ""
-        return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return strip_commit_trailers(result.stdout)
+    except (subprocess.TimeoutExpired, OSError):
         return ""
 
 
@@ -439,7 +445,7 @@ def _get_fetch_remote_urls() -> List[str]:
             text=True,
             timeout=5,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, OSError):
         return []
     if result.returncode != 0:
         return []
@@ -452,27 +458,30 @@ def _get_fetch_remote_urls() -> List[str]:
     return list(dict.fromkeys(urls))
 
 
-def get_repository_identity() -> str:
+def _git_toplevel() -> Optional[str]:
+    """The checkout's top-level directory, or None when git cannot say."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def get_repository_identity(top_level: Optional[str] = None) -> str:
     """Return matchable fetch-remote and checkout identity.
 
     Every fetch URL participates because ``origin`` can identify a renamed
     fork while another remote identifies the canonical project. The Git
-    top-level basename remains the offline/no-remote fallback.
+    top-level basename remains the offline/no-remote fallback; a caller
+    that already resolved it passes it in.
     """
     parts = _get_fetch_remote_urls()
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        result = None
-    if result is not None and result.returncode == 0:
-        top_level = result.stdout.strip()
-        if top_level:
-            parts.append(Path(top_level).name)
+    top_level = top_level or _git_toplevel()
+    if top_level:
+        parts.append(Path(top_level).name)
     return "\n".join(dict.fromkeys(parts)).lower()
 
 
@@ -534,7 +543,7 @@ def get_diffstat(git_range: str) -> Dict:
                         }
                     except ValueError:
                         pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return empty
 
     # Get deleted/renamed files
@@ -548,7 +557,7 @@ def get_diffstat(git_range: str) -> Dict:
         )
         if result.returncode == 0 and result.stdout.strip():
             added_files = result.stdout.strip().splitlines()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
     try:
@@ -558,7 +567,7 @@ def get_diffstat(git_range: str) -> Dict:
         )
         if result.returncode == 0 and result.stdout.strip():
             deleted_files = result.stdout.strip().splitlines()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
     try:
@@ -568,7 +577,7 @@ def get_diffstat(git_range: str) -> Dict:
         )
         if result.returncode == 0 and result.stdout.strip():
             renamed_files = result.stdout.strip().splitlines()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
     return {
@@ -644,33 +653,53 @@ def _normalize_for_matching(text: str) -> str:
     return _CAMEL_BOUNDARY_RE.sub(" ", text).lower()
 
 
+KEYWORD_PREFIX_MARKER = "*"
+
+
+def _is_prefix_keyword(keyword: str) -> bool:
+    return (
+        keyword.endswith(KEYWORD_PREFIX_MARKER)
+        and len(keyword) > len(KEYWORD_PREFIX_MARKER)
+        and keyword[-len(KEYWORD_PREFIX_MARKER) - 1].isalnum()
+    )
+
+
 @functools.lru_cache(maxsize=None)
 def _keyword_pattern(keyword: str) -> "re.Pattern":
-    """Compile a keyword into its triage-matching regex.
+    """Compile a registry keyword into its triage-matching regex.
 
-    The keyword itself is normalized like the source text (camelCase split,
-    lowercased) so registry entries like 'allowBuilds' or 'wp-env' work —
-    an uppercase or hyphenated keyword compiled verbatim could never match
-    the normalized text and was silently dead.
+    The keyword is normalized like the source text (camelCase split,
+    lowercased) so registry entries like 'allowBuilds' or 'wp-env' match
+    the normalized text.
 
     Semantics (matched against ``_normalize_for_matching`` output):
-    - Identifier-boundary anchored when the keyword begins with a word
-      character: a keyword starts wherever the preceding character is not
-      [a-z0-9] — so 'lock' matches 'release_cache_lock' (code separators
-      like '_' are word STARTS, unlike \\b) but not 'unlock' inside a word
-      ('move' matches 'move'/'moved', never 'remove'). Keywords are
-      deliberate PREFIXES — no trailing anchor ('accessib' matches
-      'accessibility').
+    - A keyword is a WHOLE WORD: it starts where the preceding character
+      is not [a-z0-9] and ends where the following one is not. Code
+      separators ('_', '-') are boundaries on both sides, so 'lock'
+      matches 'release_cache_lock' and 'register_rest' matches
+      'register_rest_route', while 'auth' does not match 'authored',
+      'token' not 'tokenized', 'move' not 'remove'. Three audited runs
+      dispatched reviewers on exactly those word interiors.
+    - A trailing '*' after an alphanumeric stem declares a PREFIX
+      ('sanitiz*' matches 'sanitization'); punctuation syntax such as
+      '/**' retains its literal star. The marker survives in the reason
+      string.
+    - A keyword ending in a non-word character ('wp_', 'query(', '/**')
+      has no trailing anchor to add — its own last character bounds it.
     - Separators inside a keyword (space/hyphen/underscore) match any of
       space/hyphen/underscore in the text ('screen reader' matches
-      'screen-reader-text'; ' wc ' matches '-wc-' and '_wc_'; 'error_log'
-      matches 'errorLog' via camel normalization).
+      'screen-reader-text'; ' wc ' matches '-wc-' and '_wc_').
     """
-    norm_kw = _normalize_for_matching(keyword)
+    prefix = _is_prefix_keyword(keyword)
+    norm_kw = _normalize_for_matching(
+        keyword[:-len(KEYWORD_PREFIX_MARKER)] if prefix else keyword
+    )
     pieces = [re.escape(p) for p in re.split(r"[-_ ]+", norm_kw)]
     body = r"[-_\s]".join(pieces)
     if re.match(r"\w", norm_kw):
         body = r"(?<![a-z0-9])" + body
+    if not prefix and re.search(r"[a-z0-9]$", norm_kw):
+        body = body + r"(?![a-z0-9])"
     return re.compile(body)
 
 
@@ -1372,6 +1401,8 @@ def _has_documentation_files(domain_files: List[str]) -> bool:
         lower = filepath.lower()
         stem = Path(lower).stem
         suffix = Path(lower).suffix
+        if _CHANGELOG_FRAGMENT_RE.search(lower):
+            return True
         if lower.startswith("docs/") or "/docs/" in lower:
             return True
         if suffix in {".md", ".mdx", ".rst"}:
@@ -1809,18 +1840,14 @@ def decide_agent_dispatch(
     return DISPATCH, "default", SIGNAL_DEFAULT
 
 
-def _build_pr_text(review_context: Optional[dict]) -> str:
-    """Build original-case text from PR metadata for keyword triage.
+def _build_pr_text(review_context: Optional[dict], pr_template: str = "") -> str:
+    """Original-case PR text for keyword triage: the title, the author's own
+    body (the repository's PR template and every HTML comment subtracted),
+    the branch slug, and linked issue titles.
 
-    Combines PR title, body, labels, branch name, and linked issue titles
-    into a single searchable text block.
-
-    Args:
-        review_context: Parsed review-context mapping, or None.
-
-    Returns:
-        Combined text in original case (keyword matching normalizes
-        per-source). Empty string if no context.
+    Labels are deliberately absent: across three audited runs they
+    contributed `plugin: woocommerce` (fires `plugin` on every WooCommerce
+    PR) and `pr: needs review`, never a signal an agent needed.
     """
     if not review_context:
         return ""
@@ -1829,12 +1856,9 @@ def _build_pr_text(review_context: Optional[dict]) -> str:
     if pr.get("title"):
         parts.append(pr["title"])
     if pr.get("body"):
-        parts.append(pr["body"])
-    # Labels are high-signal explicit categorization
-    for label in pr.get("labels", []):
-        if isinstance(label, str):
-            parts.append(label)
-    # Branch name often has descriptive slugs
+        body = subtract_template(pr["body"], pr_template)
+        if body:
+            parts.append(body)
     branch = review_context.get("git", {}).get("head_ref", "")
     if branch:
         # Convert separators so "fix/WOOPLUG-5988-payment-gateway" becomes matchable
@@ -1960,6 +1984,7 @@ def build_dispatch_plan(
     review_context: Optional[dict] = None,
     quick: bool = False,
     host: str = "claude",
+    pr_template: Optional[str] = None,
 ) -> dict:
     """Build the complete dispatch plan.
 
@@ -1975,6 +2000,9 @@ def build_dispatch_plan(
         quick: If True, exclude low-signal agents with SKIPPED_QUICK_MODE status.
         host: Dispatch host. Codex native subagents ignore Claude model
             declarations, so repo-reviewer entries project their effective tier.
+        pr_template: The reviewed repository's PR template text to subtract from
+            the PR body before keyword matching. None looks it up from the current
+            checkout; "" means there is none.
 
     Returns:
         Dispatch plan dict with mode, dispatch array, scope_summary, etc.
@@ -2002,9 +2030,14 @@ def build_dispatch_plan(
     # Build stable context signals for keyword matching (fault-tolerant).
     # Repository identity remains opt-in because it describes the checkout,
     # not the current change.
-    pr_text = _build_pr_text(review_context)
+    # The planner is run from the checkout, so the cwd stands in for its
+    # root (where the PR template lives) when git cannot say.
+    top_level = _git_toplevel()
+    if pr_template is None:
+        pr_template = find_pr_template(top_level or os.getcwd()) if review_context else ""
+    pr_text = _build_pr_text(review_context, pr_template)
     repository_text = (
-        get_repository_identity()
+        get_repository_identity(top_level)
         if any(config.get("triage_repository_keywords") for config in agents.values())
         else ""
     )

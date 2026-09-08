@@ -12,12 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PR and branch reviews fetch the base branch before computing the review range, and a PR review compares its local changed-file list with GitHub's — path for path when GitHub returns the whole list, by count otherwise.
 - The step-3 briefing states the base fetch outcome, any scope mismatch, merge commits that bring in work from other branches, and whether the PR targets a branch other than the default.
 - The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
+- Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
 ### Changed
 
 - `/pr-review` with no argument reviews the current branch's PR when there is exactly one and it is open; a merged or closed PR stops with usage.
 
 ### Fixed
 
+- Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
+- Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
 
 ## [1.118.0] - 2026-09-04
