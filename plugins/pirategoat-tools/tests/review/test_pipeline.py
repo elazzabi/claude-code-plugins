@@ -1,5 +1,6 @@
 """Tests for review/briefings.py through the pipeline.py compatibility facade."""
 
+import copy
 import json
 import os
 import pathlib
@@ -394,6 +395,310 @@ class TestStep3GatherContext:
         assert "${" not in all_text
         assert "<GIT_RANGE>" not in all_text
         assert "<OUTPUT_DIR>" not in all_text
+
+    def test_presents_base_fetch_outcome(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32}},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base:** `origin/trunk` fetched at `56e4e8c2`" in text
+
+    def test_presents_failed_base_fetch_as_a_warning(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "base_fetch": {"ref": "origin/trunk", "status": "failed",
+                                      "sha": "c725aac2" + "0" * 32}},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetch of `origin/trunk` FAILED" in text
+        assert "may be behind the remote" in text
+
+    def test_fetched_base_on_a_shallow_clone_names_the_remedy(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32, "shallow": True}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetched at `56e4e8c2` but merge-base failed, so there is no range." in text
+        assert "The clone is shallow, which is the usual cause" in text
+        assert "git fetch --unshallow origin" in text
+        assert "If merge-base still fails" in text
+
+    def test_fetched_base_with_no_merge_base_on_a_full_clone(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32, "shallow": False}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "but merge-base failed, so there is no range" in text
+        assert "shallow" not in text
+
+    def test_failed_fetch_does_not_claim_a_merge_base_that_failed_too(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "failed",
+                                      "sha": "c725aac2" + "0" * 32}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "merge-base against the local ref at `c725aac2` also failed" in text
+        assert "merge-base was computed" not in text
+
+    def test_presents_failed_fetch_with_no_local_ref(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/feat/parent-pr",
+                                      "status": "failed", "sha": None}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetch of `origin/feat/parent-pr` FAILED and the ref does not exist locally" in text
+        assert "no merge-base could be computed" in text
+
+    def test_presents_scope_mismatch_against_github(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 91, "head_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** GitHub reports 8 changed files; the local range has 91." in text
+        assert "The local range is inflated" in text
+        assert "treat GitHub's file list as the PR's scope" in text
+
+    def test_local_range_short_of_the_pr_is_not_called_inflated(self, mod, tmp_path):
+        """GitHub having more files than the local range means the checkout
+        is behind the PR, the opposite diagnosis from inflation."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 9,
+                                     "local_changed_files": 6, "head_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** GitHub reports 9 changed files; the local range has 6." in text
+        assert "The local range is short of the PR" in text
+        assert "restart the run from workspace setup" in text
+        assert "bring the checkout" not in text
+        assert "inflated" not in text
+        assert "files the PR did not touch" not in text
+        assert "does not match GitHub's headRefOid" in text
+
+    def test_moved_head_with_equal_counts_is_not_called_inflated(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** The reviewed head does not match GitHub's headRefOid" in text
+        assert "inflated" not in text
+        assert "GitHub reports 8 changed files" not in text
+
+    def test_lists_extra_and_missing_files_when_sets_differ(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 3, "local_changed_files": 3,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": ["x.php"], "missing_local_files": ["y.php"],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "the local range has 3, and the file sets differ." in text
+        assert "Local files not in the PR (1): `x.php`. The local range is inflated" in text
+        assert "PR files missing locally (1): `y.php`. The local range is short of the PR: files the PR touches will reach no reviewer" in text
+
+    def test_renders_author_controlled_paths_as_safe_code_spans(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 1, "local_changed_files": 2,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": ["we`ird.php", "multi\nline.php"], "missing_local_files": [],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "``we`ird.php``" in text
+        assert "`multi line.php`" in text
+        assert "multi\nline" not in text
+
+    def test_caps_long_path_lists(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 1, "local_changed_files": 13,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": [f"f{i:02d}.php" for i in range(12)], "missing_local_files": [],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "`f09.php` (+2 more)" in text
+        assert "f10.php" not in text
+
+    def test_count_only_is_not_called_a_match(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "count_only", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": None,
+                                     "base_matches": None}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** file counts agree (8)" in text
+        assert "not proof of matching scope" in text
+        assert "matches GitHub" not in text
+
+    def test_head_mismatch_without_counts_still_renders(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": None, "head_matches": False,
+                                     "base_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** The reviewed head does not match GitHub's headRefOid" in text
+        assert "GitHub reports" not in text
+
+    def test_names_a_base_that_is_not_githubs(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True,
+                                     "base_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert text.count("**Scope check:**") == 1
+        assert "merge base" in text
+        assert "inflated" not in text
+
+    def test_a_base_mismatch_with_agreeing_file_sets_names_the_hunks(self, mod, tmp_path):
+        """Equal file sets do not make the range the PR's: a range from an
+        older base carries the base's own hunks to the same files."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True,
+                                     "base_matches": False, "extra_local_files": [],
+                                     "missing_local_files": []}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert text.count("**Scope check:**") == 1
+        assert "hunks" in text
+        assert "matches GitHub" not in text
+
+    def test_presents_scope_match_briefly(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "match", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** local range matches GitHub (8 files)." in text
+
+    def test_scope_check_unavailable_is_silent(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "unavailable", "github_changed_files": None,
+                                     "local_changed_files": 8, "head_matches": None}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Scope check" not in "\n".join(g["situation"])
+
+    def test_names_a_non_default_base_without_calling_it_stacked(self, mod, tmp_path):
+        """A release line and a stacked PR both have a non-default base; the
+        script states the fact and leaves the reading to the orchestrator."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "release/9.5"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/release/9.5", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = []
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base branch:** `release/9.5` is not the default branch (`trunk`)." in text
+        assert "No merge commit brings other branches' work into the range" in text
+        assert "own work" not in text
+
+    def test_non_default_base_with_no_merge_scan_is_not_certified(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "release/9.5"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/release/9.5", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = None
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "The merge scan could not run" in text
+        assert "holds only this branch's own work" not in text
+        assert "a stacked PR" in text and "release line" in text
+        assert "not yet merged" not in text
+        assert "Stacked on" not in text
+
+    def test_non_default_base_with_foreign_merges_does_not_claim_own_work_only(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/feat/parent-pr", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = [{"sha": "m1" + "0" * 38, "second_parent": "s" * 40}]
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "The range also holds work merged in from other branches" in text
+        assert "holds only this branch's own work" not in text
+        assert "**Merged-in work:** 1 merge commit (`m1000000`)" in text
+
+    def test_non_default_base_after_failed_fetch_does_not_certify_the_range(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/feat/parent-pr", "status": "failed",
+                                    "sha": "s" * 40}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base branch:** `feat/parent-pr` is not the default branch (`trunk`)." in text
+        assert "may also hold newer commits of the base itself" in text
+        assert "holds only this branch's own work" not in text
+
+    def test_default_branch_base_gets_no_base_line(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "trunk"
+        ctx["git"]["default_branch"] = "trunk"
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Base branch" not in "\n".join(g["situation"])
+
+    def test_presents_foreign_merges(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "foreign_merges": [{"sha": "m1" + "0" * 38,
+                                           "second_parent": "sib" + "0" * 37}]},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Merged-in work:** 1 merge commit (`m1000000`)" in text
+        assert "not on the base branch" in text
+
+    def test_unknown_default_branch_is_silent(self, mod, tmp_path):
+        """An unknown default branch is not evidence of a non-default base."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"].pop("default_branch", None)
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Base branch" not in "\n".join(g["situation"])
 
 
 # ===================================================================

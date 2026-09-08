@@ -67,7 +67,7 @@ except ImportError:
     )
     from review.telemetry_share import repo_identity
 
-from git_paths import normalize_repo_paths
+from git_paths import FULL_SHA_RE, normalize_repo_paths
 
 
 LOG_DIR = os.path.expanduser("~/.pirategoat-tools/logs/reviews")
@@ -101,9 +101,10 @@ OPTIONAL_SECTION_AVAILABILITY_KEYS = (
     "reviewer_markdown",
     "findings_markdown",
 )
-# Full SHA-1 (40 hex) or SHA-256 (64 hex) object name — matches the
-# pipeline's _FULL_SHA_RE contract for durable git identity.
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+_BASE_FETCH_STATUSES = frozenset({"fetched", "failed"})
+_SCOPE_CHECK_STATUSES = frozenset({
+    "match", "mismatch", "count_only", "unavailable",
+})
 _STEP_MANIFEST_FIELDS = (
     "schema",
     "run_id",
@@ -137,6 +138,56 @@ _AGENT_COMPLETE_MANIFEST_FIELDS = (
     "review_digest",
 )
 _SEVERITY_FIELDS = VALID_SEVERITIES
+
+
+def _project_base_fetch(value):
+    """Project the step-3 fetch without exposing its base reference."""
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    sha = value.get("sha")
+    shallow = value.get("shallow")
+    return {
+        "status": (
+            status
+            if isinstance(status, str) and status in _BASE_FETCH_STATUSES
+            else None
+        ),
+        "sha": sha if isinstance(sha, str) and FULL_SHA_RE.fullmatch(sha) else None,
+        "shallow": shallow if isinstance(shallow, bool) else None,
+    }
+
+
+def _project_scope_check(value):
+    """Project the local/GitHub range comparison without its file lists."""
+    if not isinstance(value, dict):
+        return None
+
+    def count(name):
+        return manifest_sections.safe_nonnegative_int(value.get(name))
+
+    def flag(name):
+        item = value.get(name)
+        return item if isinstance(item, bool) else None
+
+    def listed(name):
+        item = value.get(name)
+        return len(item) if isinstance(item, list) else None
+
+    status = value.get("status")
+    return {
+        "status": (
+            status
+            if isinstance(status, str) and status in _SCOPE_CHECK_STATUSES
+            else None
+        ),
+        "github_changed_files": count("github_changed_files"),
+        "local_changed_files": count("local_changed_files"),
+        "head_matches": flag("head_matches"),
+        "base_matches": flag("base_matches"),
+        "extra_local_file_count": listed("extra_local_files"),
+        "missing_local_file_count": listed("missing_local_files"),
+    }
 
 
 def _advisory_fields(summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -739,8 +790,17 @@ class ReviewTelemetry:
                 ("head_sha", "head_sha"),
             ):
                 value = resolved_git.get(context_name)
-                if isinstance(value, str) and _FULL_SHA_RE.fullmatch(value):
+                if isinstance(value, str) and FULL_SHA_RE.fullmatch(value):
                     git[manifest_name] = value
+            git["base_fetch"] = _project_base_fetch(
+                resolved_git.get("base_fetch")
+            )
+            git["scope_check"] = _project_scope_check(
+                resolved_git.get("scope_check")
+            )
+        else:
+            git["base_fetch"] = None
+            git["scope_check"] = None
 
         steps = [
             self._manifest_step_event(event)

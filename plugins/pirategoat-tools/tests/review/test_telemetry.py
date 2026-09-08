@@ -1964,7 +1964,63 @@ class TestRunManifest:
             "requested_range": "resolved-base..resolved-head",
             "base_sha": "initial-base",
             "head_sha": resolved_head,
+            "base_fetch": None,
+            "scope_check": None,
         }
+
+    def test_manifest_projects_the_base_fetch_and_scope_check(self, mod, tmp_path):
+        """A dropped range-truth projection would hide a mismatched review range."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        telemetry = mod.ReviewTelemetry(str(output_dir), log_dir=str(tmp_path / "logs"))
+        telemetry.start(
+            pr_number="42", mode="pr", repo_path=str(tmp_path),
+            git_range="main..feature", base_sha="a" * 40, head_sha="b" * 40,
+        )
+        (output_dir / "review-context.json").write_text(json.dumps({
+            "git": {
+                "git_range": "main..feature",
+                "base_fetch": {"ref": "origin/main", "status": "fetched", "sha": "a" * 40, "shallow": False},
+                "scope_check": {
+                    "status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+                    "head_matches": True, "base_matches": False,
+                    "extra_local_files": ["src/a.php", "src/b.php"], "missing_local_files": [],
+                },
+            },
+        }))
+        telemetry.finalize(step=12, phase="done", title="Done")
+
+        git = json.loads(Path(telemetry.manifest_path).read_text())["run"]["git"]
+        assert git["base_fetch"] == {"status": "fetched", "sha": "a" * 40, "shallow": False}
+        assert git["scope_check"] == {
+            "status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+            "head_matches": True, "base_matches": False,
+            "extra_local_file_count": 2, "missing_local_file_count": 0,
+        }
+        assert "origin/main" not in json.dumps(git)
+        assert "src/a.php" not in json.dumps(git)
+
+    def test_a_run_without_the_range_facts_projects_them_as_unmeasured(self, mod, tmp_path):
+        """Pre-fetch runs must remain unmeasured instead of reporting invented zeros."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        telemetry = mod.ReviewTelemetry(str(output_dir), log_dir=str(tmp_path / "logs"))
+        telemetry.start(pr_number="42", mode="pr", repo_path=str(tmp_path))
+        (output_dir / "review-context.json").write_text(json.dumps({"git": {"git_range": "main..HEAD"}}))
+        telemetry.finalize(step=12, phase="done", title="Done")
+
+        git = json.loads(Path(telemetry.manifest_path).read_text())["run"]["git"]
+        assert git["base_fetch"] is None
+        assert git["scope_check"] is None
+
+    @pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+    def test_range_fact_projection_rejects_non_string_status_without_aborting(self, mod, status):
+        """A malformed nested status must not abort manifest finalization."""
+        fetch = mod._project_base_fetch({"status": status, "sha": "a" * 40, "shallow": False})
+        scope = mod._project_scope_check({"status": status, "github_changed_files": 1})
+
+        assert fetch["status"] is None
+        assert scope["status"] is None
 
     def test_manifest_refresh_keeps_resolved_shas_over_symbolic_context_refs(
         self, telemetry, output_dir
@@ -1994,6 +2050,8 @@ class TestRunManifest:
             "requested_range": "main..HEAD",
             "base_sha": resolved_base,
             "head_sha": resolved_head,
+            "base_fetch": None,
+            "scope_check": None,
         }
 
     def test_manifest_compares_planner_and_orchestrator_dispatches(

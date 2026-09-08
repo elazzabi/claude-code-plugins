@@ -342,6 +342,202 @@ def _format_staleness(context):
     return lines
 
 
+def _format_non_default_base(context):
+    """Name the base when it is not the repository's default branch.
+
+    The script can state that the base is not the default branch; it
+    cannot tell a stacked pull request (base still under review) from a
+    long-lived release line. Both readings are given so the orchestrator
+    decides from the PR, and neither is asserted as fact.
+    """
+    git = context.get("git", {})
+    base_ref = git.get("base_ref")
+    default_branch = git.get("default_branch")
+    if not base_ref or not default_branch or base_ref == default_branch:
+        return []
+    # The scan establishes one fact: which merge commits brought other
+    # branches' work into the range. It cannot say every remaining commit
+    # is this branch's own (a branch cut from main and targeting a release
+    # line carries main's commits with no merge at all), so the line never
+    # claims that. Against a stale local ref the range can also carry newer
+    # commits of the base itself.
+    merges = git.get("foreign_merges")
+    if (git.get("base_fetch") or {}).get("status") != "fetched":
+        range_note = (
+            "The base fetch above failed, so the range may also hold newer commits "
+            "of the base itself; do not assume it is only this branch's own work."
+        )
+    elif merges is None:
+        range_note = (
+            "The merge scan could not run, so whether other branches' work was "
+            "merged into this range is unknown; do not assume it is only this "
+            "branch's own work."
+        )
+    elif merges:
+        range_note = (
+            "The range also holds work merged in from other branches; the "
+            "merged-in-work line below names the merge commits."
+        )
+    else:
+        range_note = (
+            "No merge commit brings other branches' work into the range; commits "
+            "the branch was cut from elsewhere would still be in it."
+        )
+    return [
+        f"**Base branch:** `{base_ref}` is not the default branch (`{default_branch}`). "
+        f"{range_note} If the base is another change still under review (a stacked "
+        "PR), findings about code on the base belong to the base's own review; if it "
+        "is a long-lived branch such as a release line, review as usual. Say which it "
+        "is in the change purpose."
+    ]
+
+
+_RESOLVE_BASE_BY_HAND = "Resolve the base by hand before trusting any range."
+_INFLATED_RANGE_ADVICE = (
+    "The local range is inflated: treat GitHub's file list as the PR's scope "
+    "in the change purpose, name the discrepancy there, and expect reviewer "
+    "assignments to carry files the PR did not touch."
+)
+_SHORT_RANGE_ADVICE = (
+    "The local range is short of the PR: files the PR touches will reach no "
+    "reviewer. Stop and restart the run from workspace setup so the checkout "
+    "and this context are rebuilt at the PR's current head; if you continue, "
+    "name the missing files in the change purpose."
+)
+
+
+def _format_base_fetch(context):
+    """One line on whether origin/<base> was refreshed before merge-base."""
+    fetch = context.get("git", {}).get("base_fetch")
+    if not fetch:
+        return []
+    ref = fetch.get("ref", "origin/<base>")
+    sha = (fetch.get("sha") or "")[:8]
+    if fetch.get("status") == "fetched":
+        if context.get("git", {}).get("merge_base"):
+            return [f"**Base:** `{ref}` fetched at `{sha}`"]
+        if fetch.get("shallow"):
+            return [
+                f"**Base:** `{ref}` fetched at `{sha}` but merge-base failed, so there "
+                "is no range. The clone is shallow, which is the usual cause: run "
+                "`git fetch --unshallow origin` (or `--deepen=<n>` with enough depth "
+                "to reach the base) and restart the run from workspace setup. If "
+                "merge-base still fails, the branch and the base share no history."
+            ]
+        return [
+            f"**Base:** `{ref}` fetched at `{sha}` but merge-base failed, so there is "
+            f"no range. The branch and the base may share no history. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    if not sha:
+        return [
+            f"**Base:** fetch of `{ref}` FAILED and the ref does not exist locally, "
+            f"so no merge-base could be computed. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    if not context.get("git", {}).get("merge_base"):
+        return [
+            f"**Base:** fetch of `{ref}` FAILED and merge-base against the local ref "
+            f"at `{sha}` also failed, so there is no range. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    return [
+        f"**Base:** fetch of `{ref}` FAILED — merge-base was computed against the "
+        f"local ref at `{sha}`, which may be behind the remote. Cross-check the "
+        "file list against the PR or the remote before trusting the range."
+    ]
+
+
+def _format_path_list(paths, cap=10):
+    """Render up to `cap` paths as code spans, then a count of the rest."""
+    shown = ", ".join(_markdown_code_span(p) for p in paths[:cap])
+    rest = len(paths) - cap
+    return f"{shown} (+{rest} more)" if rest > 0 else shown
+
+
+def _format_scope_check(context):
+    """Lines comparing the local range with GitHub's file list or counts."""
+    check = context.get("git", {}).get("scope_check")
+    if not check or check.get("status") == "unavailable":
+        return []
+    github_count = check.get("github_changed_files")
+    local_count = check.get("local_changed_files")
+    if check.get("status") == "match":
+        return [f"**Scope check:** local range matches GitHub ({github_count} files)."]
+    if check.get("status") == "count_only":
+        return [
+            f"**Scope check:** file counts agree ({github_count}) but GitHub's file "
+            "list was not available and the base or head identity could not be "
+            "verified, so this is not proof of matching scope. Cross-check the file "
+            "list against the PR before trusting the range."
+        ]
+    # Each cause gets its own sentence and instruction. Extra local files
+    # mean the range holds files the PR does not; missing ones mean the
+    # local range is short of the PR; a moved head or base means the range
+    # was computed from different commits than GitHub's.
+    lines = []
+    extra = check.get("extra_local_files") or []
+    missing = check.get("missing_local_files") or []
+    lists_measured = check.get("extra_local_files") is not None
+    if extra or missing:
+        lines.append(
+            f"**Scope check:** GitHub reports {github_count} changed files; the local "
+            f"range has {local_count}, and the file sets differ."
+        )
+        if extra:
+            lines.append(
+                f"Local files not in the PR ({len(extra)}): {_format_path_list(extra)}. "
+                + _INFLATED_RANGE_ADVICE
+            )
+        if missing:
+            lines.append(
+                f"PR files missing locally ({len(missing)}): {_format_path_list(missing)}. "
+                + _SHORT_RANGE_ADVICE
+            )
+    elif github_count is not None and local_count is not None and github_count != local_count:
+        lines.append(
+            f"**Scope check:** GitHub reports {github_count} changed files; the local "
+            f"range has {local_count}. "
+            + (_INFLATED_RANGE_ADVICE if local_count > github_count else _SHORT_RANGE_ADVICE)
+        )
+    if check.get("head_matches") is False:
+        lead = "" if lines else "**Scope check:** "
+        lines.append(
+            f"{lead}The reviewed head does not match GitHub's headRefOid: the checkout "
+            "is not at the PR's current head, so the diff may predate the author's "
+            "latest push. Updating the checkout mid-run is not enough, because the "
+            "dispatch plan and this context were built from the old head; restart the "
+            "run from workspace setup, or name the reviewed commit in the change purpose."
+        )
+    if check.get("base_matches") is False:
+        lead = "" if lines else "**Scope check:** "
+        line = (
+            f"{lead}The range's merge base is not where GitHub's recorded base meets "
+            "the head: the range was computed from a different base than the PR's "
+            "(a base that merely advanced, or a fork point behind GitHub's recorded "
+            "base, does not trip this)."
+        )
+        if lists_measured and not extra and not missing:
+            line += (
+                " The file sets agree path for path, so the difference is in the "
+                "hunks the local range takes from the base."
+            )
+        lines.append(line + " The base line above says whether the fetch refreshed it.")
+    return lines
+
+
+def _format_foreign_merges(context):
+    """One line naming merge commits that bring in work from other branches."""
+    merges = context.get("git", {}).get("foreign_merges") or []
+    if not merges:
+        return []
+    shas = ", ".join(f"`{m.get('sha', '')[:8]}`" for m in merges)
+    noun = "merge commit" if len(merges) == 1 else "merge commits"
+    return [
+        f"**Merged-in work:** {len(merges)} {noun} ({shas}) bring commits that are "
+        "not on the base branch. Their files are part of this range relative to the "
+        "base; say in the change purpose whether they are intended as part of this "
+        "change."
+    ]
+
+
 def _format_domain_counts(context):
     """Compute and format domain file counts from changed files."""
     git = context.get("git", {})
@@ -506,6 +702,10 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
     git_range = git.get("git_range", "")
     if git_range:
         situation.append(f"**Git range:** `{git_range}`")
+    situation.extend(_format_base_fetch(context))
+    situation.extend(_format_non_default_base(context))
+    situation.extend(_format_scope_check(context))
+    situation.extend(_format_foreign_merges(context))
 
     # Commit count
     commit_count = git.get("commit_count", 0)

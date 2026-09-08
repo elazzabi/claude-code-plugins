@@ -31,6 +31,23 @@ def mod():
     return _load_module()
 
 
+
+def fake_run_cmd(responses):
+    """A `_run_cmd` stand-in: the first `(needle, value)` whose needle is in
+    the joined command answers; anything else is None (a failed command).
+    Returns `(calls, mock)`, `calls` being every joined command asked."""
+    calls = []
+
+    def mock_run_cmd(cmd, cwd=None, **kwargs):
+        cmd_str = " ".join(cmd)
+        calls.append(cmd_str)
+        for needle, value in responses:
+            if needle in cmd_str:
+                return value
+        return None
+
+    return calls, mock_run_cmd
+
 class TestGapFilling:
     """The script fills missing fields without re-computing existing ones."""
 
@@ -108,7 +125,7 @@ class TestIncrementalAncestryValidation:
         state = {"last_reviewed_sha": "abc123valid"}
         (tmp_path / ".branch-review-baseline.json").write_text(json.dumps(state))
 
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             cmd_str = " ".join(cmd)
             if "merge-base" in cmd_str and "--is-ancestor" in cmd_str:
                 return ""  # exit 0 = is ancestor
@@ -131,7 +148,7 @@ class TestIncrementalAncestryValidation:
         state = {"last_reviewed_sha": "deadbeefdeadbeef"}
         (tmp_path / ".branch-review-baseline.json").write_text(json.dumps(state))
 
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             cmd_str = " ".join(cmd)
             if "merge-base" in cmd_str and "--is-ancestor" in cmd_str:
                 return None  # exit 1 = not ancestor
@@ -158,15 +175,11 @@ class TestIncrementalAncestryValidation:
 
     def test_no_state_file_falls_through(self, mod, tmp_path):
         """No .review-state.json → falls through to full-branch detection."""
-        def mock_run_cmd(cmd, cwd=None):
-            cmd_str = " ".join(cmd)
-            if "branch --show-current" in cmd_str:
-                return "feature-branch"
-            if "symbolic-ref" in cmd_str:
-                return "refs/remotes/origin/main"
-            if "merge-base" in cmd_str:
-                return "fullrange123"
-            return None
+        _calls, mock_run_cmd = fake_run_cmd([
+            ("branch --show-current", "feature-branch"),
+            ("symbolic-ref", "refs/remotes/origin/main"),
+            ("merge-base", "fullrange123"),
+        ])
 
         ctx = {"output": {"directory": str(tmp_path)}}
         from unittest.mock import patch
@@ -187,7 +200,7 @@ class TestReviewedHeadSha:
     def test_resolves_head_ref_to_full_sha(self, mod):
         head_sha = "a" * 40
 
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             cmd_str = " ".join(cmd)
             if cmd_str == "git rev-parse --verify feature-branch^{commit}":
                 return head_sha
@@ -213,7 +226,7 @@ class TestReviewedHeadSha:
     def test_explicit_range_resolves_the_range_head_endpoint(
         self, mod, git_range
     ):
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             if " ".join(cmd) == "git rev-parse --verify feature^{commit}":
                 return "c" * 40
             return None
@@ -228,7 +241,7 @@ class TestReviewedHeadSha:
         assert ctx["git"]["head_sha"] == "c" * 40
 
     def test_omitted_range_head_endpoint_falls_back_to_head(self, mod):
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             if " ".join(cmd) == "git rev-parse --verify HEAD^{commit}":
                 return "e" * 40
             return None
@@ -247,7 +260,7 @@ class TestReviewedHeadSha:
                        "head_sha": "d" * 40, "merge_base": "x"}}
         calls = []
 
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             calls.append(" ".join(cmd))
             return None
 
@@ -259,7 +272,7 @@ class TestReviewedHeadSha:
         assert not any("rev-parse --verify" in call for call in calls)
 
     def test_unresolvable_head_leaves_head_sha_absent(self, mod):
-        def mock_run_cmd(cmd, cwd=None):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
             return None
 
         ctx = {}
@@ -626,3 +639,518 @@ class TestRefreshHostContextMode:
         assert "JSON object" in r.stderr
         assert "refusing to overwrite" in r.stderr
         assert ctx_path.read_text() == original
+
+
+class TestBaseFetch:
+    """The base ref is fetched before merge-base so a stale local
+    origin/<base> cannot inflate the range (run 6e6a: 8-file PR reviewed
+    as 91 files because origin/trunk was 15 commits behind)."""
+
+    def _calls_and_mock(self, responses):
+        return fake_run_cmd(responses)
+
+    def test_pr_mode_fetches_base_before_merge_base(self, mod):
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "trunk fix/topic"),
+            ("fetch --no-tags origin +refs/heads/trunk:refs/remotes/origin/trunk", ""),
+            ("rev-parse --verify origin/trunk", "56e4e8c2" + "0" * 32),
+            ("merge-base origin/trunk fix/topic", "56e4e8c2" + "0" * 32),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66900")
+
+        fetch_idx = next(i for i, c in enumerate(calls) if "fetch --no-tags origin +refs/heads/trunk:" in c)
+        mb_idx = next(i for i, c in enumerate(calls) if "merge-base origin/trunk" in c)
+        assert fetch_idx < mb_idx
+        assert any("rev-list fix/topic ^origin/trunk" in c for c in calls)
+        assert ctx["git"]["base_fetch"] == {
+            "ref": "origin/trunk",
+            "status": "fetched",
+            "sha": "56e4e8c2" + "0" * 32,
+            "shallow": None,
+        }
+        assert ctx["git"]["merge_base"] == "56e4e8c2" + "0" * 32
+
+    def test_pr_mode_fetches_a_stacked_prs_parent_branch(self, mod):
+        """A stacked PR declares another PR's branch as its base. PR mode
+        already anchors on whatever `baseRefName` GitHub returns, so the
+        only thing that broke stacked PRs was `origin/<parent>` not being
+        in the local clone — a colleague's branch is rarely fetched. The
+        base fetch is what makes them work; nothing else is needed here."""
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "feat/parent-pr feat/child-pr"),
+            ("fetch --no-tags origin +refs/heads/feat/parent-pr:refs/remotes/origin/feat/parent-pr", ""),
+            ("rev-parse --verify origin/feat/parent-pr", "aa" + "0" * 38),
+            ("merge-base origin/feat/parent-pr feat/child-pr", "aa" + "0" * 38),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66901")
+
+        assert any("+refs/heads/feat/parent-pr:refs/remotes/origin/feat/parent-pr" in c for c in calls)
+        assert ctx["git"]["base_ref"] == "feat/parent-pr"
+        assert ctx["git"]["merge_base"] == "aa" + "0" * 38
+        assert ctx["git"]["base_fetch"]["ref"] == "origin/feat/parent-pr"
+
+    def test_records_a_shallow_clone_beside_the_fetch(self, mod):
+        """Verified on a depth-1 single-branch clone: the refspec fetch brings
+        origin/<base> in and merge-base still fails until the clone is
+        deepened. The fact is recorded so the briefing can say why."""
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "trunk fix/topic"),
+            ("is-shallow-repository", "true"),
+            ("fetch --no-tags origin +refs/heads/trunk:", ""),
+            ("rev-parse --verify origin/trunk", "56e4e8c2" + "0" * 32),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66900")
+        assert ctx["git"]["base_fetch"]["status"] == "fetched"
+        assert ctx["git"]["base_fetch"]["shallow"] is True
+        assert "merge_base" not in ctx["git"]
+
+    def test_default_branch_comes_from_the_remote_before_the_cached_symref(self, mod):
+        """origin/HEAD is written at clone time and never refreshed by a
+        fetch; a repository that moved its default from main to trunk keeps
+        the stale value in the cache. The remote's answer wins."""
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("ls-remote --symref origin HEAD", "ref: refs/heads/trunk\tHEAD\n" + "a" * 40 + "\tHEAD"),
+            ("symbolic-ref refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+        ])
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            assert mod._detect_default_branch() == "trunk"
+
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("symbolic-ref refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+        ])
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            assert mod._detect_default_branch() == "main"  # offline: cached value
+
+    def test_pr_mode_records_default_branch_without_guessing(self, mod):
+        """The step-3 stacked-base line compares base_ref with the default
+        branch, so PR mode records it when the symbolic ref resolves and
+        leaves it absent (never a guessed "main") when it does not."""
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "trunk fix/topic"),
+            ("symbolic-ref refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66900")
+        assert ctx["git"]["default_branch"] == "trunk"
+
+        calls, mock_run_cmd = self._calls_and_mock([("pr view", "trunk fix/topic")])
+        ctx = {"github_cli_command": "gh"}
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66900")
+        assert "default_branch" not in ctx["git"]
+
+    def test_fetch_that_exits_clean_but_leaves_the_ref_absent_is_failed(self, mod):
+        """A single-branch clone answers a bare-name fetch with exit 0 and no
+        tracking ref. The explicit refspec prevents that, and status is
+        derived from the ref resolving so the briefing never states a
+        fetched base that does not exist."""
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "feat/parent-pr feat/child-pr"),
+            ("fetch --no-tags origin +refs/heads/feat/parent-pr:", ""),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66901")
+
+        assert ctx["git"]["base_fetch"] == {
+            "ref": "origin/feat/parent-pr", "status": "failed", "sha": None,
+            "shallow": None,
+        }
+        assert "merge_base" not in ctx["git"]
+
+    def test_pr_mode_records_failed_fetch_and_still_computes_merge_base(self, mod):
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("pr view", "trunk fix/topic"),
+            ("rev-parse --verify origin/trunk", "c725aac2" + "0" * 32),
+            ("merge-base origin/trunk fix/topic", "c725aac2" + "0" * 32),
+        ])
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="66900")
+
+        assert ctx["git"]["base_fetch"]["status"] == "failed"
+        assert ctx["git"]["base_fetch"]["ref"] == "origin/trunk"
+        assert ctx["git"]["merge_base"] == "c725aac2" + "0" * 32
+
+    def test_branch_mode_fetches_detected_default_branch(self, mod, tmp_path):
+        calls, mock_run_cmd = self._calls_and_mock([
+            ("branch --show-current", "feature-branch"),
+            ("symbolic-ref refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"),
+            ("fetch --no-tags origin +refs/heads/trunk:refs/remotes/origin/trunk", ""),
+            ("rev-parse --verify origin/trunk", "abc" + "0" * 37),
+            ("merge-base origin/trunk HEAD", "abc" + "0" * 37),
+        ])
+        ctx = {"output": {"directory": str(tmp_path)}}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, branch=True, incremental=False,
+                                  config={"target_dir": str(tmp_path)})
+
+        assert any("+refs/heads/trunk:refs/remotes/origin/trunk" in c for c in calls)
+        assert ctx["git"]["base_fetch"]["status"] == "fetched"
+        assert ctx["git"]["git_range"] == "abc" + "0" * 37 + "..HEAD"
+
+    def test_explicit_range_does_not_fetch(self, mod):
+        calls, mock_run_cmd = self._calls_and_mock([])
+        ctx = {}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, git_range="main..HEAD")
+
+        assert not any("fetch" in c for c in calls)
+        assert "base_fetch" not in ctx["git"]
+
+    def test_fetch_uses_a_longer_timeout_than_the_default(self, mod):
+        seen = {}
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "fetch --no-tags origin +refs/heads/trunk:" in cmd_str:
+                seen["timeout"] = kwargs.get("timeout")
+                return ""
+            if "pr view" in cmd_str:
+                return "trunk fix/topic"
+            return None
+
+        ctx = {"github_cli_command": "gh"}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, pr_number="1")
+
+        assert seen["timeout"] == mod.FETCH_TIMEOUT_SECONDS
+        assert mod.FETCH_TIMEOUT_SECONDS > 30
+
+
+class TestChangedFilesQuoting:
+    def test_run_cmd_can_return_stdout_verbatim(self, mod):
+        """The default strip would remove leading whitespace from the first
+        NUL-delimited path; strip=False keeps every path as git spelled it."""
+        assert mod._run_cmd(["printf", " lead.php\\0b.php\\0"], strip=False) == " lead.php\0b.php\0"
+        assert mod._run_cmd(["printf", "  x  "]) == "x"
+
+    def test_run_cmd_decodes_non_utf8_paths_losslessly(self, mod):
+        """A git-valid path need not be UTF-8. Strict decoding raised before
+        the context was written; surrogateescape keeps the bytes."""
+        emit = "import sys; sys.stdout.buffer.write(b'bad\\xff.py\\0')"
+        out = mod._run_cmd(["python3", "-c", emit], strip=False)
+        assert out == "bad\udcff.py\0"
+        import os
+        assert os.fsencode(out.rstrip("\0")) == b"bad\xff.py"
+
+    def test_file_list_is_read_verbatim(self, mod):
+        seen = {}
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            if "--name-only" in cmd:
+                seen["strip"] = kwargs.get("strip")
+                return " lead.php\0b.php\0"
+            return None
+
+        ctx = {}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, git_range="main..HEAD")
+        assert seen["strip"] is False
+        assert ctx["git"]["changed_files"] == [" lead.php", "b.php"]
+
+    def test_file_list_is_read_nul_delimited(self, mod):
+        """git C-quotes non-ASCII, backslash and control-character paths in
+        newline output; NUL output spells every path as GitHub does."""
+        calls = []
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            calls.append(" ".join(cmd))
+            return "café.php\0back\\slash.php\0b.php\0" if "--name-only" in cmd else None
+
+        ctx = {}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._fill_git_context(ctx, git_range="main..HEAD")
+        assert any("-c diff.renames=true diff --name-only -z main..HEAD" in c for c in calls)
+        assert ctx["git"]["changed_files"] == ["café.php", "back\\slash.php", "b.php"]
+
+
+class TestScopeCheckAgainstGithub:
+    """PR mode records whether the local range agrees with GitHub. The
+    witness is GitHub's file list; counts alone never produce a match."""
+
+    BASE = "56e4e8c2" + "0" * 32
+    HEAD = "a534276d" + "0" * 32
+    PR_JSON = json.dumps({
+        "title": "T", "author": {"login": "a"}, "state": "OPEN",
+        "isDraft": False, "baseRefName": "trunk", "headRefName": "fix/x",
+        "body": "", "labels": [], "url": "u",
+        "baseRefOid": BASE, "headRefOid": HEAD, "changedFiles": 2,
+        "files": [{"path": "a.php", "additions": 1, "deletions": 0},
+                  {"path": "b.php", "additions": 1, "deletions": 0}],
+    })
+
+    def _verified(self, changed_files, count, paths=None):
+        pr = {"number": 1, "changed_files_count": count,
+              "head_ref_oid": self.HEAD, "base_ref_oid": self.BASE}
+        if paths is not None:
+            pr["changed_files_paths"] = paths
+        return {"pr": pr,
+                "git": {"changed_files": changed_files, "head_sha": self.HEAD,
+                        "merge_base": self.BASE,
+                        "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                       "sha": self.BASE}}}
+
+    def test_metadata_carries_github_oids_count_and_complete_file_list(self, mod):
+        from unittest.mock import patch
+        ctx = {"pr": {"number": 66900}, "github_cli_command": "gh"}
+        with patch.object(mod, "_run_cmd", return_value=self.PR_JSON):
+            mod._fill_pr_metadata(ctx)
+        assert ctx["pr"]["base_ref_oid"] == self.BASE
+        assert ctx["pr"]["head_ref_oid"] == self.HEAD
+        assert ctx["pr"]["changed_files_count"] == 2
+        assert ctx["pr"]["changed_files_paths"] == ["a.php", "b.php"]
+
+    def test_metadata_drops_a_truncated_file_list(self, mod):
+        """gh caps the file list; a partial list is not a set to compare."""
+        from unittest.mock import patch
+        data = json.loads(self.PR_JSON)
+        data["changedFiles"] = 150
+        ctx = {"pr": {"number": 66900}, "github_cli_command": "gh"}
+        with patch.object(mod, "_run_cmd", return_value=json.dumps(data)):
+            mod._fill_pr_metadata(ctx)
+        assert ctx["pr"]["changed_files_count"] == 150
+        assert "changed_files_paths" not in ctx["pr"]
+
+    # Each row: the local range and GitHub's view (`_verified`), one
+    # mutation of that context, and the fields the check must record.
+    #   moved-base-tip — run 4: origin/develop had advanced past the PR's
+    #   fork point, so the fetched tip was not GitHub's baseRefOid while
+    #   the merge base was, and the nine files matched; comparing the tip
+    #   called that a mismatch.
+    #   base-wins-over-list — equal file sets can hide different hunks: a
+    #   range computed from an older base carries the base's own changes
+    #   to files the PR also touches (A→B→C all editing a.php: the PR is
+    #   B..C, the local range A..C). A known base disagreement is a
+    #   mismatch whatever the lists say.
+    #   head-wins-over-list — a checkout behind the author's latest push can
+    #   hold the same file set with different content.
+    #   merge-base-differs-counts-only — a stale base can swap files without
+    #   changing the count, so with a truncated list the merge base must be
+    #   where GitHub's recorded base meets the head.
+    @pytest.mark.parametrize("changed, count, paths, mutate, expected", [
+        pytest.param(["a.php", "c.php"], 2, ["a.php", "b.php"], None,
+                     {"status": "mismatch", "extra_local_files": ["c.php"], "missing_local_files": ["b.php"]},
+                     id="file-sets-compared-when-list-complete"),
+        pytest.param(["b.php", "a.php"], 2, ["a.php", "b.php"], None,
+                     {"status": "match", "extra_local_files": [], "missing_local_files": []},
+                     id="equal-file-sets-match"),
+        pytest.param([f"f{i}.php" for i in range(91)], 8, None, None,
+                     {"status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+                      "head_matches": True, "base_matches": True, "extra_local_files": None},
+                     id="more-local-files-counts-only"),
+        pytest.param(["a.php", "b.php"], 2, None, lambda ctx: ctx["git"].__setitem__("head_sha", "b" * 40),
+                     {"status": "mismatch", "head_matches": False}, id="head-differs"),
+        pytest.param(["a.php", "b.php"], 2, None,
+                     lambda ctx: ctx["git"].__setitem__("merge_base", "c725aac2" + "0" * 32),
+                     {"status": "mismatch", "base_matches": False}, id="merge-base-differs-counts-only"),
+        pytest.param(["a.php", "b.php"], 2, ["a.php", "b.php"],
+                     lambda ctx: ctx["git"]["base_fetch"].__setitem__("sha", "60add377" + "0" * 32),
+                     {"status": "match", "base_matches": True, "head_matches": True}, id="moved-base-tip"),
+        pytest.param(["a.php", "b.php"], 2, ["a.php", "b.php"],
+                     lambda ctx: ctx["git"].__setitem__("merge_base", "c725aac2" + "0" * 32),
+                     {"status": "mismatch", "base_matches": False, "extra_local_files": [], "missing_local_files": []},
+                     id="base-wins-over-list"),
+        pytest.param(["a.php", "b.php"], 2, ["a.php", "b.php"],
+                     lambda ctx: ctx["git"].__setitem__("head_sha", "b" * 40),
+                     {"status": "mismatch", "head_matches": False, "extra_local_files": [], "missing_local_files": []},
+                     id="head-wins-over-list"),
+        pytest.param(["a.php", "b.php"], 2, ["a.php", "b.php"], lambda ctx: ctx["git"].pop("merge_base"),
+                     {"status": "match", "base_matches": None}, id="no-merge-base-is-unknown"),
+        pytest.param(["a.php", "b.php"], 2, None, None, {"status": "match"},
+                     id="equal-counts-with-verified-identities"),
+        pytest.param(None, 2, None, lambda ctx: ctx["git"].update(changed_files=None, head_sha="b" * 40),
+                     {"status": "mismatch", "head_matches": False, "local_changed_files": None},
+                     id="head-mismatch-without-a-local-file-list"),
+    ])
+    def test_the_status_follows_the_witnesses(self, mod, changed, count, paths, mutate, expected):
+        from unittest.mock import patch
+        ctx = self._verified(changed, count, paths=paths)
+        if mutate is not None:
+            mutate(ctx)
+        # GitHub's recorded base meets the head at the fork point, which
+        # the verified context records as its merge base.
+        _, run_cmd = fake_run_cmd([("merge-base", self.BASE)])
+        with patch.object(mod, "_run_cmd", side_effect=run_cmd):
+            check = mod._check_scope_against_github(ctx)
+        assert {key: check[key] for key in expected} == expected
+        assert ctx["git"]["scope_check"] is check
+
+    def test_a_fork_point_behind_the_recorded_base_is_still_githubs_base(self, mod):
+        """GitHub's `baseRefOid` is the base as of the PR's last
+        synchronisation, not the fork point: a branch forked before the
+        base advanced has a merge base behind it and is the same range.
+        The identity compared is where the recorded base meets the head."""
+        from unittest.mock import patch
+        fork = "c725aac2" + "0" * 32
+        ctx = self._verified(["a.php", "b.php"], 2)
+        ctx["git"]["merge_base"] = fork
+        calls, run_cmd = fake_run_cmd([("merge-base", fork)])
+        with patch.object(mod, "_run_cmd", side_effect=run_cmd):
+            check = mod._check_scope_against_github(ctx)
+        assert f"git merge-base {self.BASE} {self.HEAD}" in calls
+        assert check["base_matches"] is True
+        assert check["status"] == "match"
+
+    def test_a_recorded_base_absent_locally_leaves_the_base_unknown(self, mod):
+        """A stale base fetch or a shallow clone may not hold GitHub's
+        recorded base; the identity is then unknown, never a mismatch."""
+        from unittest.mock import patch
+        ctx = self._verified(["a.php", "b.php"], 2)
+        _, run_cmd = fake_run_cmd([])
+        with patch.object(mod, "_run_cmd", side_effect=run_cmd):
+            check = mod._check_scope_against_github(ctx)
+        assert check["base_matches"] is None
+        assert check["status"] == "count_only"
+
+    def test_a_ref_name_or_short_sha_merge_base_is_unknown_not_false(self, mod):
+        """`--pr-number` with `--git-range` leaves `merge_base` as the range's
+        left operand verbatim; a string compare against the OID would read
+        as a false mismatch."""
+        from unittest.mock import patch
+        for left in ("origin/trunk", "c725aac2"):
+            ctx = self._verified(["a.php", "b.php"], 2)
+            ctx["git"]["merge_base"] = left
+            calls, run_cmd = fake_run_cmd([("merge-base", self.BASE)])
+            with patch.object(mod, "_run_cmd", side_effect=run_cmd):
+                check = mod._check_scope_against_github(ctx)
+            assert calls == [], "an unresolvable left operand asks git nothing"
+            assert check["base_matches"] is None
+            assert check["status"] == "count_only"
+
+    def test_equal_counts_without_verified_identities_are_count_only(self, mod):
+        ctx = {
+            "pr": {"number": 1, "changed_files_count": 2, "head_ref_oid": "a" * 40},
+            "git": {"changed_files": ["a.php", "b.php"], "head_sha": "a" * 40},
+        }
+        check = mod._check_scope_against_github(ctx)
+        assert check["status"] == "count_only"
+        assert check["base_matches"] is None
+
+    def test_unavailable_without_github_count(self, mod):
+        ctx = {"pr": {"number": 1}, "git": {"changed_files": ["a.php"]}}
+        check = mod._check_scope_against_github(ctx)
+        assert check["status"] == "unavailable"
+        assert check["github_changed_files"] is None
+        assert check["head_matches"] is None
+
+
+FETCHED = {"ref": "origin/trunk", "status": "fetched", "sha": "f" * 40}
+
+
+class TestForeignMerges:
+    """Merge commits whose second parent is not on origin/<base> bring in
+    work from elsewhere; the briefing must say so instead of the
+    orchestrator guessing."""
+
+    def test_failed_base_fetch_claims_nothing(self, mod):
+        """Against a stale origin/<base>, a merge of the real base's newer
+        commits would look foreign. No classification without a fresh base."""
+        calls = []
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            calls.append(" ".join(cmd))
+            return ""
+
+        git = {"merge_base": "b" * 40, "base_ref": "trunk",
+               "base_fetch": {"ref": "origin/trunk", "status": "failed", "sha": "s" * 40}}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            assert mod._detect_foreign_merges(git, "HEAD") is None
+        assert git["foreign_merges"] is None
+        assert calls == []
+
+    def test_records_merges_whose_second_parent_is_off_base(self, mod):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "rev-list HEAD ^origin/trunk" in cmd_str:
+                # Reachable from HEAD, not from origin/trunk: the branch's own
+                # commits plus the sibling it merged. The trunk merge's second
+                # parent is on trunk and therefore absent.
+                return "\n".join(["m1" + "0" * 38, "p1" + "0" * 37, "sib" + "0" * 37,
+                                  "m2" + "0" * 38, "p2" + "0" * 37])
+            if "rev-list --merges --parents" in cmd_str:
+                return ("m1" + "0" * 38 + " p1" + "0" * 37 + " sib" + "0" * 37 + "\n"
+                        "m2" + "0" * 38 + " p2" + "0" * 37 + " trk" + "0" * 37)
+            return None
+
+        git = {"merge_base": "base" + "0" * 36, "base_ref": "trunk", "base_fetch": FETCHED}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            result = mod._detect_foreign_merges(git, "HEAD")
+
+        assert result == [{"sha": "m1" + "0" * 38, "second_parent": "sib" + "0" * 37}]
+        assert git["foreign_merges"] is result
+
+    def test_scans_the_range_head_not_the_checkout(self, mod):
+        """PR mode computes the range against the PR branch; the merge scan
+        must read the same head, not whatever happens to be checked out."""
+        calls = []
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            calls.append(" ".join(cmd))
+            return ""
+
+        git = {"merge_base": "b" * 40, "base_ref": "trunk", "base_fetch": FETCHED}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            mod._detect_foreign_merges(git, "fix/topic")
+        assert any("rev-list fix/topic ^origin/trunk" in c for c in calls)
+        assert any(("--parents " + "b" * 40 + "..fix/topic") in c for c in calls)
+        assert not any("HEAD" in c for c in calls)
+
+    def test_no_merges_gives_empty_list(self, mod):
+        """A scan that ran and found nothing is [], distinct from None."""
+        from unittest.mock import patch
+        git = {"merge_base": "b" * 40, "base_ref": "trunk", "base_fetch": FETCHED}
+        with patch.object(mod, "_run_cmd", return_value=""):
+            assert mod._detect_foreign_merges(git, "HEAD") == []
+        assert git["foreign_merges"] == []
+
+    def test_failed_merge_listing_is_none_not_empty(self, mod):
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            return "" if "^origin/trunk" in " ".join(cmd) else None
+
+        from unittest.mock import patch
+        git = {"merge_base": "b" * 40, "base_ref": "trunk", "base_fetch": FETCHED}
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            assert mod._detect_foreign_merges(git, "HEAD") is None
+        assert git["foreign_merges"] is None
+
+    def test_unresolvable_base_ref_claims_nothing(self, mod):
+        """A missing origin/<base> — the state a failed base fetch leaves —
+        must not mark every merge foreign on precisely the least trustworthy
+        run. The off-base listing fails as a whole and nothing is claimed."""
+        calls = []
+
+        def mock_run_cmd(cmd, cwd=None, **kwargs):
+            calls.append(" ".join(cmd))
+            return None  # ^origin/trunk does not resolve
+
+        git = {"merge_base": "b" * 40, "base_ref": "trunk", "base_fetch": FETCHED}
+        from unittest.mock import patch
+        with patch.object(mod, "_run_cmd", side_effect=mock_run_cmd):
+            assert mod._detect_foreign_merges(git, "HEAD") is None
+
+        assert git["foreign_merges"] is None
+        assert any("rev-list HEAD ^origin/trunk" in c for c in calls)
+        assert not any("--merges" in c for c in calls)

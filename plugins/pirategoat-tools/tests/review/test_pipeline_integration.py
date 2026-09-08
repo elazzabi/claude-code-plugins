@@ -945,7 +945,13 @@ class TestTelemetryIntegration:
             "head_sha": current_head,
         }
         manifest = json.loads(Path(log_path).with_suffix(".manifest.json").read_text())
-        assert manifest["run"]["git"] == start["pipeline"]["git"]
+        assert manifest["run"]["git"] == {
+            "requested_range": "",
+            "base_sha": "",
+            "head_sha": current_head,
+            "base_fetch": None,
+            "scope_check": None,
+        }
         assert json.loads((out / "review-context.json").read_text()) == {
             "output": {"directory": str(out)},
         }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.119.0] - UNRELEASED
 
+### Added
+
+- PR and branch reviews fetch the base branch before computing the review range, and a PR review compares its local changed-file list with GitHub's — path for path when GitHub returns the whole list, by count otherwise.
+- The step-3 briefing states the base fetch outcome, any scope mismatch, merge commits that bring in work from other branches, and whether the PR targets a branch other than the default.
 ### Changed
 
 - `/pr-review` with no argument reviews the current branch's PR when there is exactly one and it is open; a merged or closed PR stops with usage.
