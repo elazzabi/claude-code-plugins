@@ -855,6 +855,7 @@ class ReviewTelemetry:
                 "verdict": pipeline_result.get("verdict"),
                 "critic_verdict": pipeline_result.get("critic_verdict"),
                 "verdict_source": pipeline_result.get("verdict_source"),
+                "reconciliation_verification": pipeline_result.get("reconciliation_verification"),
                 "reconciliation": (
                     findings.get("reconciliation") if findings else None
                 ),

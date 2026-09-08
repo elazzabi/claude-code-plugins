@@ -2621,7 +2621,7 @@ class TestAnalyzeSubagent:
         assert result["artifact_writes"]["builder_failures"] == 0
         assert result["artifact_writes"]["first_builder_attempt_succeeded"] is None
 
-    def test_extracts_only_narrow_successful_repo_reads_and_classifies_scope(self, tmp_path):
+    def test_extracts_successful_literal_repo_reads_and_classifies_scope(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
         calls_and_results = [
@@ -2706,6 +2706,10 @@ class TestAnalyzeSubagent:
                 "src/pid.py",
             ],
         )["observed_reads"]
+        # A redirect's source and a pattern search read their file
+        # operand; a pipeline's first stage is uncertain (its exit status
+        # is masked), and globs, variables, tilde paths outside the repo,
+        # traversal and failures still count nothing.
         assert observed == {
             "all": [
                 "src/a.py",
@@ -2714,7 +2718,9 @@ class TestAnalyzeSubagent:
                 "src/e.py",
                 "src/f.py",
                 "src/h.py",
+                "src/j.py",
                 "src/pid.py",
+                "src/redir.py",
                 "tests/b.py",
                 "tests/d.py",
                 "tests/g.py",
@@ -2729,9 +2735,199 @@ class TestAnalyzeSubagent:
                 "src/h.py",
                 "src/pid.py",
             ],
-            "out_of_scope": ["tests/b.py", "tests/d.py", "tests/g.py", "tests/i.py"],
+            "out_of_scope": [
+                "src/j.py",
+                "src/redir.py",
+                "tests/b.py",
+                "tests/d.py",
+                "tests/g.py",
+                "tests/i.py",
+            ],
             "exhaustive": False,
         }
+
+    @pytest.mark.parametrize("command, expected", [
+        # A heredoc body is opaque up to its own terminator; a body line
+        # naming a reader must not count (the over-count direction).
+        ("python3 - <<'PY'\nimport json\nprint(1)\nsed -n 1p src/sneaky.py\nPY\ncat src/after.py", ["src/after.py"]),
+        ("python3 - <<-EOF\n\tcat src/inner.py\n\tEOF\ncat src/outer.py", ["src/outer.py"]),
+        # A here-string has no body.
+        ("python3 -c 'x' <<< 'here'\ncat src/after.py", ["src/after.py"]),
+        # A pipeline's exit status is its last stage's: without pipefail a
+        # reader that failed before opening its file (`sed -n '[' a.php |
+        # head` exits 0) is masked, so a piped reader is uncertain and not
+        # counted. `|&` is a pipeline separator like `|`.
+        ("cat src/a.py | head -5", []),
+        ("sed -n '[' src/a.py | head -5", []),
+        ("cat src/a.py |& grep x", []),
+        ("head -5 src/a.py", ["src/a.py"]),
+        # `cd -` is unknown, like a variable.
+        ("cd - && cat foo.py", []),
+        # After an unknown directory only an absolute `cd` recovers; a
+        # relative one is relative to the unknown.
+        ("cd src && cd $VAR && cat lost.py\ncd src\ncat still-lost.py", []),
+        ("cd src && cd .. && cat top.py", ["top.py"]),
+        # `-f`/`--file` and `--expression=` supply the pattern, so every operand is a file.
+        ("grep -f patterns.txt src/target.py", ["src/target.py"]),
+        ("sed --expression=p src/foo.py", ["src/foo.py"]),
+        # An input redirect's target is read.
+        ("sed -n 1p < src/foo.py", ["src/foo.py"]),
+        ("wc -l < src/foo.py > out.txt", ["src/foo.py"]),
+        # The call's success certifies only the last foreground and-or list,
+        # and only when nothing in it is `||`-conditional. A reader anywhere
+        # else ran, perhaps, but may have failed before opening its file
+        # (`sed -n '[' a.php; true` exits 0), so it is not counted; a `cd`
+        # there still moves the detector, since its own success is checked
+        # against the disk.
+        ("false && cat src/never.py; true", []),
+        ("test -f src/a.py && cat src/a.py", ["src/a.py"]),
+        ("cat src/a.py || cat src/b.py", []),
+        ("sed -n '[' src/a.py; true", []),
+        ("cat src/a.py; true", []),
+        # An `exit`, `exec` or `return` in an earlier list may have ended
+        # the shell before the last list ran; exit 0 then proves nothing
+        # about it. In the last list itself, `&& exit 0` follows the read.
+        ("test -f src/optional.py || exit 0; cat src/app.py", []),
+        ("test -f src/optional.py || exit; cat src/app.py", []),
+        ("exec true; cat src/a.py", []),
+        ("return 0\ncat src/a.py", []),
+        ("cat src/a.py && exit 0", ["src/a.py"]),
+        # The same exit inside the last list: whatever follows it did not run.
+        ("true && exit 0 && cat src/a.py", []),
+        ("exec true && cat src/a.py", []),
+        # A quoted operator is an argument, not a separator: `'&&'` here
+        # is printf's operand and there is no `cat` command at all. Quoted
+        # paths are still paths.
+        ("printf '%s\\n' '&&' cat src/a.py", []),
+        # A quoted argument may span lines: `cat src/a.py` inside it is
+        # printf's text, and a reader after the closing quote is real.
+        ("printf '%s\\n' 'line1\ncat src/a.py\nline3'", []),
+        ("printf '%s\\n' 'line1\nline2' && cat src/a.py", ["src/a.py"]),
+        ("printf '%s\\n' 'line1\nline2'\ncat src/a.py", ["src/a.py"]),
+        # A quote the call never closes leaves the rest of the command
+        # unknown; nothing in it is counted.
+        ("printf '%s\\n' 'open\ncat src/a.py", []),
+        # `--` ends the options, not the pattern: the operand after it is
+        # still the pattern, and only the one after that is a file.
+        ("grep -- README.md src/a.py", ["src/a.py"]),
+        ("grep -- README.md /external/log.txt", []),
+        ("grep -e pat -- src/a.py", ["src/a.py"]),
+        ("sed -n -- 1p src/a.py", ["src/a.py"]),
+        ("echo 'a;b' ; cat src/a.py", ["src/a.py"]),
+        ("cat 'src/a.py'", ["src/a.py"]),
+        ('cat "src/a b.py"', ["src/a b.py"]),
+        # `exit 1` ends the shell too, but a call that did so did not
+        # succeed, so a successful call's last list did run.
+        ("cd src || exit 1; cat a.py", ["src/a.py"]),
+        ("cd src && cat a.py; cat b.py", ["src/b.py"]),
+        ("cd src &&\ncat a.py", ["src/a.py"]),
+        ("false && cat src/bg.py &", []),
+        # A backgrounded list runs in a subshell: its `cd` moves nothing in
+        # the foreground, so the reader after it is at the root.
+        ("cd src & cat a.py", ["a.py"]),
+        # A `cd` that may not have run leaves the directory unknown.
+        ("cd src || cd lib; cat a.py", []),
+        # So does a `cd` to something that is not a directory: the shell
+        # stayed put, and `foo.py` must not be counted at a made-up place.
+        ("cd doesnotexist; cat foo.py", []),
+        ("cd doesnotexist && cat foo.py; true", []),
+        ("cd src/a.py; cat foo.py", []),
+        # ripgrep's `-r`/`--replace` takes a replacement; it is not grep's
+        # recursion flag, and the pattern is never a file.
+        ("rg -r repl pattern src/actual.py", ["src/actual.py"]),
+        ("rg --replace repl pattern src/actual.py", ["src/actual.py"]),
+        ("rg --replace=repl -n pattern src/actual.py", ["src/actual.py"]),
+        # A directory operand (ripgrep walks it) is not a file read; `lib`
+        # exists as a directory in the test repository.
+        ("rg pattern lib", []),
+        ("rg pattern lib/a.py", ["lib/a.py"]),
+    ])
+    def test_compound_edge_cases(self, tmp_path, command, expected):
+        repo = tmp_path / "repo"
+        (repo / "lib").mkdir(parents=True)
+        (repo / "src").mkdir()
+        (repo / "src" / "a.py").write_text("")
+        entries = [_assistant(_call("c", "Bash", command=command)), _result("c")]
+        transcript = _write_jsonl(tmp_path / "edge.jsonl", entries)
+        observed = analyze_subagent(transcript, repo, [])["observed_reads"]
+        assert observed["all"] == expected
+
+    def test_a_backgrounded_cd_back_into_the_repository_moves_nothing(self, tmp_path):
+        """After a `cd` outside the repository the foreground stays outside;
+        a backgrounded `cd` back in is a subshell's, and the read that
+        follows is not a repository read."""
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "a.py").write_text("")
+        command = f"cd {tmp_path}; cd {repo} & cat src/a.py"
+        entries = [_assistant(_call("c", "Bash", command=command)), _result("c")]
+        transcript = _write_jsonl(tmp_path / "bg.jsonl", entries)
+        assert analyze_subagent(transcript, repo, [])["observed_reads"]["all"] == []
+
+    def test_extracts_reads_from_the_harness_read_idioms(self, tmp_path):
+        """Run 4's reconciliator read every source file through `sed -n`
+        and `grep -n` inside `cd <repo> && …` compounds and measured zero
+        repository reads, so step 9 called its verification UNVERIFIED and
+        the report said it read no repository file. These are the idioms
+        the harness itself hands agents in bypass-permissions sessions."""
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)  # the idioms `cd src`
+        calls_and_results = [
+            (_call("sed", "Bash", command="sed -n '130,220p' src/k.py"), _result("sed")),
+            (_call("cd-and", "Bash", command="cd src && grep -n foo l.py"), _result("cd-and")),
+            (
+                _call("cd-line", "Bash", command="cd src\nsed -n '1,5p' m.py | nl -ba"),
+                _result("cd-line"),
+            ),
+            (_call("sed-i", "Bash", command="sed -i 's/a/b/' src/no.py"), _result("sed-i")),
+            (_call("grep-r", "Bash", command="grep -rn foo src/"), _result("grep-r")),
+            (
+                _call("stderr", "Bash", command="cat -n src/n.py 2>&1 | head"),
+                _result("stderr"),
+            ),
+            (
+                _call(
+                    "heredoc",
+                    "Bash",
+                    command="python3 - <<'PY'\nprint(open('src/hidden.py').read())\nPY\ncat src/after.py",
+                ),
+                _result("heredoc"),
+            ),
+            (_call("cd-var", "Bash", command="cd $OUT && cat rel.py"), _result("cd-var")),
+            (
+                _call("cd-abs", "Bash", command=f"cd {repo} && sed -n '3p' src/t.py"),
+                _result("cd-abs"),
+            ),
+            (_call("semi", "Bash", command="cat src/o.py; cat src/p.py"), _result("semi")),
+            (_call("grep-e", "Bash", command="grep -e foo src/q.py"), _result("grep-e")),
+            (_call("grep-A", "Bash", command="grep -A3 foo src/r.py"), _result("grep-A")),
+            (
+                _call("show-pipe", "Bash", command="git show HEAD:src/e.py | cat -n | sed -n '1,120p'"),
+                _result("show-pipe"),
+            ),
+            (_call("ls", "Bash", command="ls src/"), _result("ls")),
+            (_call("failed", "Bash", command="sed -n '1p' src/failed.py"), _result("failed", is_error=True)),
+        ]
+        entries = []
+        for call, result in calls_and_results:
+            entries.extend([_assistant(call), result])
+        transcript = _write_jsonl(tmp_path / "idioms.jsonl", entries)
+
+        observed = analyze_subagent(transcript, repo, ["src/k.py", "src/l.py"])["observed_reads"]
+        # `cd-line`, `stderr` and `show-pipe` pipe their reader into
+        # another stage, which masks its exit status, and `semi` reads
+        # `o.py` in a list whose status the call does not certify: uncounted.
+        assert observed["all"] == [
+            "src/after.py",
+            "src/k.py",
+            "src/l.py",
+            "src/p.py",
+            "src/q.py",
+            "src/r.py",
+            "src/t.py",
+        ]
+        assert observed["in_scope"] == ["src/k.py", "src/l.py"]
+        assert observed["exhaustive"] is False
 
 
 def test_orchestrator_usage_uses_manifest_events_not_multiline_stage_commands(tmp_path):
@@ -3875,6 +4071,7 @@ class TestEnrichRunTranscript:
                 "usage": None,
                 "usage_by_model": None,
                 "tool_calls": None,
+                "repository_reads": None,
             }
         ]
         assert result["usage"]["output_tokens"] == 2
@@ -4304,6 +4501,8 @@ class TestEnrichRunTranscript:
             "code": "agent_transcript_usage_missing",
             "agent": "security-reviewer",
         } in result["warnings"]
+        assert result["agent_usage"][0]["available"] is True
+        assert result["agent_usage"][0]["repository_reads"] is None
         assert result["completeness"]["agent_data"] is False
         assert result["completeness"]["scope_comparable_reads"] is False
 
@@ -4413,6 +4612,9 @@ class TestEnrichRunTranscript:
             "code": "agent_transcript_time_gap",
             "agent": "security-reviewer",
         } in result["warnings"]
+        assert result["agent_usage"][0]["available"] is True
+        assert result["agent_usage"][0]["usage"]["output_tokens"] == 5
+        assert result["agent_usage"][0]["repository_reads"] is None
         assert result["completeness"]["agent_data"] is False
 
     def test_retry_and_partial_synthesis_reads_remain_private_and_separate(
@@ -4752,6 +4954,8 @@ class TestEnrichRunTranscript:
             {"code": "agent_transcript_parse_gap", "agent": "security-reviewer"}
         ]
         assert result["agent_usage"][0]["usage"]["output_tokens"] == 1
+        assert result["agent_usage"][0]["available"] is True
+        assert result["agent_usage"][0]["repository_reads"] is None
         assert result["correlation"]["complete"] is False
         assert result["agent_data_complete"] is False
         assert result["usage_complete"] is False
@@ -5331,6 +5535,7 @@ class TestBudgetAndEvidenceCounts:
 
         [entry] = result["agent_usage"]
         assert entry["tool_calls"] == 2
+        assert entry["repository_reads"] == 1
         assert result["completeness"]["agent_data"] is True
 
     def test_unresolved_tool_call_marks_agent_evidence_incomplete(
@@ -5358,6 +5563,9 @@ class TestBudgetAndEvidenceCounts:
         assert result["artifact_writes"]["complete"] is False
         [entry] = result["agent_usage"]
         assert entry["tool_calls"] == 1
+        assert entry["available"] is True
+        assert entry["usage"]["output_tokens"] == 2
+        assert entry["repository_reads"] is None
 
     def test_malformed_tool_use_blocks_count_as_unresolved_calls(
         self, tmp_path
@@ -6303,3 +6511,38 @@ class TestEvidenceToolNameSync:
         assert _branched_tool_names(sample, "tool_name", "name") == {
             "Read", "Write", "Edit", "Grep", "Glob", "Bash",
         }
+
+
+def test_usage_summary_for_transcript_counts_a_split_response_once(tmp_path):
+    path = tmp_path / "agent-1.jsonl"
+
+    def entry(output, mid="m1"):
+        return json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": mid,
+                "model": "claude-sonnet-5",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 100,
+                    "output_tokens": output,
+                },
+            },
+        })
+
+    path.write_text("\n".join([entry(3), entry(9), entry(4, "m2"), "not json"]) + "\n")
+
+    summary = _mod.usage_summary_for_transcript(path)
+
+    assert summary["usage"] == {
+        "input_tokens": 20,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 200,
+        "effective_input_tokens": 230,
+        "output_tokens": 13,
+    }
+    assert summary["usage_by_model"] == {"claude-sonnet-5": summary["usage"]}
+    assert summary["usage_valid"] is True
+    assert summary["usage_observed"] is True
+    assert summary["parse_gap"] is True

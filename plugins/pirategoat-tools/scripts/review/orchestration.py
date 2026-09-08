@@ -437,6 +437,11 @@ def _render_run_notes(state: dict, hosts) -> str:
         for warning in warnings:
             lines.append(f"- ⚠ Dispatch warning: {warning}")
 
+    lines.append(
+        "- Reconciliation verification: "
+        + manifest_sections.describe_reconciliation_verification(state)
+    )
+
     return "\n".join(lines)
 
 
@@ -449,7 +454,7 @@ def _tri_state(value) -> str:
     return "unknown"
 
 
-def _render_record_verdict_line(findings: dict) -> str:
+def _render_record_verdict_line(findings: dict, state: dict) -> str:
     """The record's closing verdict, stated at the layer that computed it.
 
     The ledger verdict is the only one derived from findings. The published
@@ -463,13 +468,24 @@ def _render_record_verdict_line(findings: dict) -> str:
     gone: they described states the reader had already rejected.
     """
     ledger = findings["verdict"]
-    return (
+    line = (
         f"**Verdict — from the findings ledger: `{ledger}` "
         f"({publish_verdict(ledger)} at the published layer).** A critic "
         "ESCALATE overrides the published verdict to COMMENT at finalize; "
         "this line reports the ledger, the only verdict actually computed "
         "from findings."
     )
+    verification = state.get("reconciliation_verification")
+    if isinstance(verification, dict) and verification.get("status") == "unverified":
+        line += (
+            " Reconciliation is UNVERIFIED: no repository read by the "
+            "reconciliator was observed (the read detector is not "
+            "exhaustive), so the verified concerns above are not evidenced "
+            "by its transcript and rest on the reviewers' own claims and "
+            "the source snippets."
+        )
+    return line
+
 
 def _table_cell(text):
     return " ".join(str(text or "").split()).replace("|", "\\|")
@@ -584,7 +600,7 @@ def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
             "",
             "---",
             "",
-            _render_record_verdict_line(findings),
+            _render_record_verdict_line(findings, state),
             "",
         ])
         atomic_write_text(
@@ -811,6 +827,45 @@ def _usage_summary(output_dir):
         # still partial is the other story — damaged transcript evidence —
         # and a consumer cannot tell them apart without this.
         "window_closed": section["window"]["closed"],
+    }
+
+
+def _reconciliation_verification(output_dir, read):
+    """Compare claimed verified concerns with measured repository reads.
+
+    Measure the reconciliator's own transcript through stdout mode so step 9
+    cannot replace or reproject the durable usage snapshot. Missing evidence
+    stays unmeasured; measured zero reads is unverified, never a save gate.
+    """
+    verified = None
+    if read.status == critic_adjustments.FINDINGS_READ_OK:
+        verified = manifest_sections.safe_nonnegative_int(
+            read.findings.get("meta", {}).get("reconciliation", {}).get("verified_concern_count")
+        )
+    stdout, ok = _run_subprocess(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR.parent / "analysis" / "usage_snapshot.py"),
+            "--output-dir", str(output_dir),
+            "--stdout",
+        ],
+        timeout=USAGE_SNAPSHOT_TIMEOUT,
+    )
+    reads = None
+    if ok and stdout:
+        try:
+            snapshot = json.loads(stdout)
+        except json.JSONDecodeError:
+            snapshot = None
+        rows = snapshot.get("subagent_usage") if isinstance(snapshot, dict) else None
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("agent") == synthesis_lifecycle.RECONCILIATOR:
+                reads = manifest_sections.safe_nonnegative_int(row.get("repository_reads"))
+    status = "unmeasured" if reads is None else "unverified" if reads == 0 else "verified"
+    return {
+        "verified_concern_count": verified,
+        "repository_reads": reads,
+        "status": status,
     }
 
 
@@ -1503,6 +1558,9 @@ def _orchestrate_step_9(mode, config, state, context, output_dir):
         output_dir, changed_files=changed_files,
         reviewable_files=_plan_changed_files(plan),
         override_orphans=_plan_override_orphans(plan),
+    )
+    state["reconciliation_verification"] = _reconciliation_verification(
+        output_dir, read
     )
 
     # Assemble the record LAST, once the coverage populations are in state:

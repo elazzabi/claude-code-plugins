@@ -2228,6 +2228,31 @@ class TestStep9ReviewRecord:
     step's rewrite deleted.
     """
 
+    @pytest.mark.parametrize("reads, status, expected", VERIFICATION_SENTENCES)
+    def test_states_the_reconciliation_verification(self, mod, tmp_path, reads, status, expected):
+        """The one sentence `describe_reconciliation_verification` words;
+        step 9 adds what the orchestrator should make of an UNVERIFIED one."""
+        state = {"completed_steps": [], "reconciliation_verification": {
+            "verified_concern_count": 3, "repository_reads": reads, "status": status,
+        }}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert f"**Reconciliation:** {expected}" in text
+        assert ("the decision critic will be told" in text) == (status == "unverified")
+        assert "verified nothing" not in text
+
+    def test_the_record_is_complete_so_no_ledger_dump_is_needed(self, mod, tmp_path):
+        """Run 4's orchestrator read the record and then dumped the ledger
+        three times through ad-hoc scripts; the briefing says the record
+        carries everything."""
+        state = {"completed_steps": [], "review_record": {
+            "ran": True, "written": 1, "expected": 1, "status": "complete",
+        }}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert "nothing in the ledger is missing from it" in text
+        assert "not `review-findings.json` through a script of your own" in text
+
     def test_points_at_the_assembled_record(self, mod, tmp_path):
         state = {"completed_steps": [], "review_record": {
             "ran": True, "written": 1, "expected": 1, "status": "complete",

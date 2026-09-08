@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,77 @@ def _init_repo(path):
         cwd=path, check=True,
     )
     return path
+
+
+class TestStepNineReconciliationVerification:
+    def _read_ok(self, verified):
+        return types.SimpleNamespace(
+            status=critic_adjustments.FINDINGS_READ_OK,
+            findings=canonical_findings_ledger(("high",) * verified),
+        )
+
+    def test_reads_measured_from_the_reconciliator_row(self, tmp_path, monkeypatch):
+        snapshot = {"schema": 1, "subagent_usage": [
+            {"agent": "security-reviewer", "repository_reads": 9, "tool_calls": 20},
+            {"agent": "review-reconciliator", "repository_reads": 3, "tool_calls": 11},
+        ]}
+        monkeypatch.setattr(orchestration_mod, "_run_subprocess",
+                            lambda cmd, cwd=None, timeout=60: (json.dumps(snapshot), True))
+        assert orchestration_mod._reconciliation_verification(
+            str(tmp_path), self._read_ok(2)
+        ) == {"verified_concern_count": 2, "repository_reads": 3, "status": "verified"}
+
+    @pytest.mark.parametrize(
+        "reads,status", [(None, "unmeasured"), (0, "unverified"), (2, "verified")],
+    )
+    def test_read_quality_is_actor_specific(self, tmp_path, monkeypatch, reads, status):
+        snapshot = {"schema": 1, "availability": {"subagents": "partial"}, "subagent_usage": [
+            {"agent": "security-reviewer", "repository_reads": None, "tool_calls": 8},
+            {"agent": "review-reconciliator", "repository_reads": reads, "tool_calls": 4},
+        ]}
+        monkeypatch.setattr(orchestration_mod, "_run_subprocess",
+                            lambda cmd, cwd=None, timeout=60: (json.dumps(snapshot), True))
+        result = orchestration_mod._reconciliation_verification(str(tmp_path), self._read_ok(1))
+        assert result["status"] == status
+        assert result["repository_reads"] == reads
+
+    @pytest.mark.parametrize("stdout, ok", [
+        ("", False), ("not json", True),
+        (json.dumps({"schema": 1, "subagent_usage": []}), True),
+        *[(json.dumps({"schema": 1, "subagent_usage": [
+            {"agent": "review-reconciliator", "repository_reads": value}]}), True)
+          for value in (None, True, -1, "2")],
+    ])
+    def test_no_measurement_is_unmeasured_never_unverified(self, tmp_path, monkeypatch, stdout, ok):
+        monkeypatch.setattr(orchestration_mod, "_run_subprocess",
+                            lambda cmd, cwd=None, timeout=60: (stdout, ok))
+        result = orchestration_mod._reconciliation_verification(str(tmp_path), self._read_ok(1))
+        assert result["status"] == "unmeasured"
+        assert result["repository_reads"] is None
+
+    def test_measures_through_stdout_mode(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake(cmd, cwd=None, timeout=60):
+            seen["cmd"] = cmd
+            return json.dumps({"schema": 1, "subagent_usage": []}), True
+
+        monkeypatch.setattr(orchestration_mod, "_run_subprocess", fake)
+        orchestration_mod._reconciliation_verification(str(tmp_path), self._read_ok(1))
+        assert "--stdout" in seen["cmd"]
+        assert seen["cmd"][1].endswith("usage_snapshot.py")
+        assert seen["cmd"][seen["cmd"].index("--output-dir") + 1] == str(tmp_path)
+
+    def test_an_unusable_ledger_has_no_verified_count(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            orchestration_mod, "_run_subprocess",
+            lambda cmd, cwd=None, timeout=60: (json.dumps({"schema": 1, "subagent_usage": [
+                {"agent": "review-reconciliator", "repository_reads": 2}]}), True),
+        )
+        read = types.SimpleNamespace(status=critic_adjustments.FINDINGS_READ_ABSENT, findings=None)
+        result = orchestration_mod._reconciliation_verification(str(tmp_path), read)
+        assert result["verified_concern_count"] is None
+        assert result["status"] == "verified"
 
 
 class TestBaselineCapture:

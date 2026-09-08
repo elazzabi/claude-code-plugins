@@ -26,7 +26,7 @@ try:
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
-    from .manifest_sections import host_identity_phrase, project_host_entry
+    from .manifest_sections import describe_reconciliation_verification, host_identity_phrase, project_host_entry
     from .run_paths import artifact_path
     from .telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 except ImportError:
@@ -52,7 +52,7 @@ except ImportError:
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
-    from review.manifest_sections import host_identity_phrase, project_host_entry
+    from review.manifest_sections import describe_reconciliation_verification, host_identity_phrase, project_host_entry
     from review.run_paths import artifact_path
     from review.telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 
@@ -618,6 +618,20 @@ def _format_linked_issues(context):
         bottom_lines.append("--- END LINKED ISSUE DETAILS ---")
 
     return top_lines, bottom_lines
+
+
+def _format_reconciliation_verification(state):
+    """One situation line: verified concerns beside repository reads."""
+    if not isinstance(state.get("reconciliation_verification"), dict):
+        return []
+    line = "**Reconciliation:** " + describe_reconciliation_verification(state)
+    if state["reconciliation_verification"].get("status") == "unverified":
+        line += (
+            " Treat its verifications as unevidenced rather than false: the "
+            "record's verdict line says so and the decision critic will be told "
+            "to verify every finding itself."
+        )
+    return [line]
 
 
 def _change_purpose_handoff(output_dir, mode="pr"):
@@ -1805,6 +1819,8 @@ def _step_9_review_record(mode, state, context, config, output_dir):
     elif commit_messages:
         situation.append(f"**Change purpose (from commits — the reconciled findings, not this framing, are the source of truth):** {'; '.join(commit_messages[:3])}")
 
+    situation.extend(_format_reconciliation_verification(state))
+
     if degradation.get("reconciliation_failed"):
         # The sanctioned LLM-authored fallback. With no ledger there is no
         # record to assemble, so there is nothing for this step to hand
@@ -1858,8 +1874,11 @@ def _step_9_review_record(mode, state, context, config, output_dir):
             f"**The review record is assembled at `{_artifact_display(od, 'review_record')}`.** "
             "The pipeline wrote it from the findings ledger and this run's "
             "own measurements — findings, verified checks, the reconciler's "
-            "assessment, run notes, and the coverage measurement. Nothing "
-            "in it was authored by an agent."
+            "assessment, observations, dropped sources, answered notes, run "
+            "notes, and the coverage measurement. Nothing in it was authored "
+            "by an agent, and nothing in the ledger is missing from it: read "
+            f"the record, not `{_artifact_name('review_findings_json')}` through "
+            "a script of your own."
         )
         actions.append("")
         actions.append(

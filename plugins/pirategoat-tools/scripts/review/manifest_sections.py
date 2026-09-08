@@ -176,6 +176,34 @@ def read_artifact_file(output_dir: str, key: str) -> Optional[dict]:
     return _read_json_path(str(artifact_path(output_dir, key)))
 
 
+RECONCILIATION_UNVERIFIED_CAVEAT = "no read observed; the read detector is not exhaustive"
+
+
+def describe_reconciliation_verification(state: dict) -> str:
+    """The step-9 measurement in one sentence, the same in the record's run
+    notes, the step-9 situation and the critic prompt.
+
+    A measured zero is "no read observed", never "read nothing": the
+    transcript read detector recognises the Read tool and literal
+    cat/head/tail/wc/sed/grep/rg/nl/git-show commands and is not
+    exhaustive.
+    """
+    verification = state.get("reconciliation_verification")
+    if not isinstance(verification, dict):
+        return "not measured."
+    verified = verification.get("verified_concern_count")
+    verified_text = (
+        f"{verified} verified concern(s)" if isinstance(verified, int)
+        else "verified concern count unknown"
+    )
+    reads = verification.get("repository_reads")
+    status = verification.get("status")
+    if status == "unmeasured" or not isinstance(reads, int):
+        return f"{verified_text}, repository reads unmeasured (no transcript)."
+    observed = f"{verified_text}, {reads} repository read(s) observed for the reconciliator"
+    if status == "unverified":
+        return f"{observed} — UNVERIFIED ({RECONCILIATION_UNVERIFIED_CAVEAT})."
+    return f"{observed} — verified."
 
 
 def read_change_purpose(output_dir: str) -> Optional[dict]:
