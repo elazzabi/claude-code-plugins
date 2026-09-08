@@ -47,6 +47,7 @@ try:
         render_review_body,
     )
     from .verdict_rules import publish_verdict
+    from .workspace_setup import SETUP_TIMEOUT_SECONDS
 except ImportError:
     _scripts_parent = str(Path(__file__).resolve().parent.parent)
     if _scripts_parent not in sys.path:
@@ -89,6 +90,7 @@ except ImportError:
         render_review_body,
     )
     from review.verdict_rules import publish_verdict
+    from review.workspace_setup import SETUP_TIMEOUT_SECONDS
 
 from git_paths import decode_git_c_quoted_path
 
@@ -536,7 +538,7 @@ def _orchestrate_step_2(mode, config, state, context, output_dir):
             sys.executable, str(SCRIPTS_DIR / "workspace_setup.py"),
             "--pr-number", str(pr_number),
         ]
-        stdout, ok = _run_subprocess(setup_cmd, timeout=60)
+        stdout, ok = _run_subprocess(setup_cmd, timeout=SETUP_TIMEOUT_SECONDS)
         if ok and stdout:
             try:
                 ws_result = json.loads(stdout)

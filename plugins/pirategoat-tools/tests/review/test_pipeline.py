@@ -269,6 +269,24 @@ class TestStep2RepoSetup:
         assert "git status" in text
         assert "checkout" in text.lower()
 
+    def test_failure_states_the_cause_and_forbids_a_hard_reset(self, mod):
+        """WooCommerce PR #68063: the helper's reason now reaches the
+        briefing, and the orchestrator is told what it may not do with it."""
+        config = {"mode": "pr", "pr_number": "42", "interactive": True}
+        state = {
+            "completed_steps": [1],
+            "workspace": {"original_branch": None, "stash_ref": None},
+            "workspace_setup_result": {
+                "error": "Failed to checkout PR #42: fatal: not possible to fast-forward, aborting. (exit 128)",
+                "checkout_ok": False,
+            },
+        }
+        g = mod.get_step_guidance(2, "pr", state, {"git": {}}, config=config)
+        situation = "\n".join(g["situation"])
+        actions = "\n".join(g["actions"])
+        assert "fatal: not possible to fast-forward, aborting. (exit 128)" in situation
+        assert "Never `git reset --hard`" in actions
+
     def test_no_result_falls_back_to_manual(self, mod, tmp_path):
         """No workspace_setup_result at all: fall back to manual."""
         config = {"mode": "pr", "pr_number": "42", "interactive": True}

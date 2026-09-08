@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/pr-review` with no argument reviews the current branch's PR when there is exactly one and it is open; a merged or closed PR stops with usage.
 
+### Fixed
+
+- A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
+
 ## [1.118.0] - 2026-09-04
 
 ### Added

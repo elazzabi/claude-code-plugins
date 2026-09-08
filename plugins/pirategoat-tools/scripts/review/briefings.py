@@ -231,7 +231,16 @@ def _step_2_repo_setup(mode, state, context, config, output_dir):
         situation = [
             f"Automatic workspace setup for PR #{pr_number} failed: {ws_result['error']}",
         ]
-        actions = ["Manual fallback:"] + manual_fallback
+        actions = [
+            "The reason above is gh's own; act on it, and report it if you "
+            "cannot. `gh pr checkout` fetches the head, checks out the "
+            "branch, and fast-forwards an existing local branch with "
+            "`merge --ff-only`. Never `git reset --hard` in the reviewed "
+            "clone: unlike merge it overwrites untracked files silently. If "
+            "the local branch has diverged from the PR head, stop and ask "
+            "the user before moving anything.",
+            "Manual fallback:",
+        ] + manual_fallback
 
     else:
         # No result path
