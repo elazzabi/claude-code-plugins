@@ -2069,18 +2069,21 @@ class TestRunManifest:
                     "domain": "security",
                     "status": "DISPATCH",
                     "reason": "keywords matched (files: auth)",
+                    "signal": "keyword",
                 },
                 {
                     "name": "a11y-reviewer",
                     "domain": "a11y",
                     "status": "SKIPPED_TRIAGE",
                     "reason": "no UI signal",
+                    "signal": "evidence_gate",
                 },
                 {
                     "name": "code-reviewer",
                     "domain": "code",
                     "status": "DISPATCH",
                     "reason": "always dispatch (domain has files)",
+                    "signal": "always",
                 },
             ]
         }
@@ -2091,6 +2094,7 @@ class TestRunManifest:
                     "domain": "security",
                     "status": "SKIPPED_OVERRIDE",
                     "reason": "keywords matched (files: auth)",
+                    "signal": "keyword",
                     "override_reason": "change does not touch an auth boundary",
                 },
                 {
@@ -2098,6 +2102,7 @@ class TestRunManifest:
                     "domain": "a11y",
                     "status": "DISPATCH_OVERRIDE",
                     "reason": "no UI signal",
+                    "signal": "evidence_gate",
                     "override_reason": "rendered markup coverage was missed",
                 },
                 {
@@ -2105,6 +2110,7 @@ class TestRunManifest:
                     "domain": "code",
                     "status": "DISPATCH",
                     "reason": "always dispatch (domain has files)",
+                    "signal": "always",
                 },
             ]
         }
@@ -2133,6 +2139,8 @@ class TestRunManifest:
             "initial_reason": "keywords matched (files: auth)",
             "final_status": "SKIPPED_OVERRIDE",
             "final_reason": "keywords matched (files: auth)",
+            "initial_signal": "keyword",
+            "final_signal": "override",
             "planner_signals": [
                 "security-reviewer: STATUS=DISPATCH (keywords matched (files: auth))"
             ],
@@ -2145,6 +2153,8 @@ class TestRunManifest:
         added = dispatch["agents"]["a11y-reviewer"]
         assert added["initial_status"] == "SKIPPED_TRIAGE"
         assert added["final_status"] == "DISPATCH_OVERRIDE"
+        assert added["initial_signal"] == "evidence_gate"
+        assert added["final_signal"] == "override"
         assert added["adjustment_reason"] == "rendered markup coverage was missed"
         assert added["change"] == "added"
         assert added["configured_planner_checks"] == [
@@ -2154,6 +2164,8 @@ class TestRunManifest:
         ]
         assert added["model_tier"] == "opus"
         assert dispatch["agents"]["code-reviewer"]["change"] == "unchanged"
+        assert dispatch["agents"]["code-reviewer"]["initial_signal"] == "always"
+        assert dispatch["agents"]["code-reviewer"]["final_signal"] == "always"
 
     def test_repo_reviewer_model_override_reaches_dispatch_telemetry(
         self, telemetry, output_dir

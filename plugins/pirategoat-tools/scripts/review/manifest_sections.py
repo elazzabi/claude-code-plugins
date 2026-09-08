@@ -27,7 +27,11 @@ try:
     )
     from .dispatch_status import (
         AGENT_NAME_RE,
+        DISPATCH_OVERRIDE,
+        DISPATCH_SIGNALS,
         DISPATCHED_STATUSES,
+        SIGNAL_OVERRIDE,
+        SKIPPED_OVERRIDE,
         validate_dispatch_plan_agents,
     )
     from .synthesis_lifecycle import (
@@ -53,7 +57,11 @@ except ImportError:
     )
     from review.dispatch_status import (
         AGENT_NAME_RE,
+        DISPATCH_OVERRIDE,
+        DISPATCH_SIGNALS,
         DISPATCHED_STATUSES,
+        SIGNAL_OVERRIDE,
+        SKIPPED_OVERRIDE,
         validate_dispatch_plan_agents,
     )
     from review.synthesis_lifecycle import (
@@ -162,9 +170,16 @@ def read_artifact_file(output_dir: str, key: str) -> Optional[dict]:
     return _read_json_path(str(artifact_path(output_dir, key)))
 
 
+
+
 def safe_dispatch_string(value: Any) -> Optional[str]:
     """Return a dispatch scalar only when it is a string."""
     return value if isinstance(value, str) else None
+
+
+def safe_dispatch_signal(value: Any) -> Optional[str]:
+    """One planner signal from the closed vocabulary, or None."""
+    return value if isinstance(value, str) and value in DISPATCH_SIGNALS else None
 
 
 def safe_nonnegative_int(value: Any) -> Optional[int]:
@@ -399,6 +414,12 @@ def build_dispatch_manifest(output_dir: str, final_info: dict) -> dict:
             "initial_reason": safe_dispatch_string(initial.get("reason")),
             "final_status": final_status,
             "final_reason": safe_dispatch_string(final.get("reason")),
+            "initial_signal": safe_dispatch_signal(initial.get("signal")),
+            "final_signal": (
+                SIGNAL_OVERRIDE
+                if final_status in (DISPATCH_OVERRIDE, SKIPPED_OVERRIDE)
+                else safe_dispatch_signal(final.get("signal"))
+            ),
             "planner_signals": planner_signals(
                 initial_plan, name, initial
             ),

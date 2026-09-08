@@ -193,6 +193,7 @@ def _aggregate_dispatch(
     actual_total = 0
     actual_runs = 0
     adjustments = Counter()
+    by_signal: dict[str, Counter] = {}
     compared_runs = 0
     compared_planner_candidates = 0
     for run in runs:
@@ -214,6 +215,20 @@ def _aggregate_dispatch(
                     _nonnegative_int(dispatch.get("planner_candidate_count")) or 0
                 )
                 compared_runs += 1
+            agents = dispatch.get("agents") if isinstance(dispatch.get("agents"), dict) else {}
+            for decision in agents.values():
+                if not isinstance(decision, dict):
+                    continue
+                signal = decision.get("initial_signal")
+                if not isinstance(signal, str):
+                    continue
+                bucket = by_signal.setdefault(signal, Counter())
+                bucket["planned"] += 1
+                # An added agent has no initial entry, so only these two
+                # changes can carry a planner signal.
+                change = decision.get("change")
+                if change in ("unchanged", "removed"):
+                    bucket[change] += 1
     adjustment_denominator = sum(adjustments.values())
     adjustment_rate = (
         (adjustments["added"] + adjustments["removed"]) / adjustment_denominator
@@ -241,8 +256,37 @@ def _aggregate_dispatch(
         ),
         "compared_planner_candidates": compared_planner_candidates,
         "planner_removal_rate": planner_removal_rate,
+        "by_signal": {
+            name: dict(counter) for name, counter in sorted(by_signal.items())
+        } or None,
         "availability": availability["dispatch"],
     }
+
+
+def _aggregate_range_truth(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count base-fetch and local/GitHub scope-check outcomes."""
+    fetch: Counter = Counter()
+    scope: Counter = Counter()
+    for run in runs:
+        identity = run.get("run") if isinstance(run.get("run"), dict) else {}
+        git = identity.get("git") if isinstance(identity.get("git"), dict) else {}
+        base_fetch = git.get("base_fetch")
+        if (
+            isinstance(base_fetch, dict)
+            and base_fetch.get("status") in _BASE_FETCH_STATUSES
+        ):
+            fetch[base_fetch["status"]] += 1
+        else:
+            fetch["unmeasured"] += 1
+        check = git.get("scope_check")
+        if (
+            isinstance(check, dict)
+            and check.get("status") in _SCOPE_CHECK_STATUSES
+        ):
+            scope[check["status"]] += 1
+        else:
+            scope["unmeasured"] += 1
+    return {"base_fetch": dict(fetch), "scope_check": dict(scope)}
 
 
 def _aggregate_assignment(

@@ -380,13 +380,13 @@ class TestDecideAgentDispatch:
     def test_always_agent_with_files_dispatches(self):
         config = {"dispatch_class": "always", "domain": "code"}
         counts = self._make_counts(code=5)
-        status, reason = decide_agent_dispatch("code-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("code-reviewer", config, counts)
         assert status == "DISPATCH"
 
     def test_always_agent_without_files_skips(self):
         config = {"dispatch_class": "always", "domain": "go-tests"}
         counts = self._make_counts(code=5)  # go-tests = 0
-        status, reason = decide_agent_dispatch("go-tests-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("go-tests-reviewer", config, counts)
         assert status == "SKIPPED"
         assert "no files" in reason
 
@@ -399,7 +399,7 @@ class TestDecideAgentDispatch:
             "triage_criteria": ["New endpoints"],
         }
         counts = self._make_counts(security=3)
-        status, reason = decide_agent_dispatch("security-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("security-reviewer", config, counts)
         assert status == "DISPATCH"
 
     def test_conditional_agent_without_files_skips(self):
@@ -409,7 +409,7 @@ class TestDecideAgentDispatch:
             "triage_criteria": ["JSX components"],
         }
         counts = self._make_counts()  # all zeros
-        status, reason = decide_agent_dispatch("a11y-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("a11y-reviewer", config, counts)
         assert status == "SKIPPED"
         assert "no files" in reason
 
@@ -424,7 +424,7 @@ class TestDecideAgentDispatch:
         }
         # Primary domain has 0 files, but secondary has files
         counts = self._make_counts(**{"config-ops": 2})
-        status, reason = decide_agent_dispatch("security-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("security-reviewer", config, counts)
         assert status == "DISPATCH"
 
     def test_no_primary_or_secondary_files_skips(self):
@@ -435,7 +435,7 @@ class TestDecideAgentDispatch:
             "triage_criteria": ["CI/CD changes"],
         }
         counts = self._make_counts()  # all zeros
-        status, reason = decide_agent_dispatch("security-reviewer", config, counts)
+        status, reason, _signal = decide_agent_dispatch("security-reviewer", config, counts)
         assert status == "SKIPPED"
 
 
@@ -886,7 +886,7 @@ class TestTriageConditionalAgent:
         """All domain files are test files → SKIPPED_TRIAGE."""
         config = self._make_config()
         domain_files = ["tests/ControllerTest.php", "tests/ServiceTest.php"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config, domain_files, "", {},
         )
         assert status == "SKIPPED_TRIAGE"
@@ -896,7 +896,7 @@ class TestTriageConditionalAgent:
         """Domain has both production and test files → DISPATCH."""
         config = self._make_config()
         domain_files = ["src/Controller.php", "tests/ControllerTest.php"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config, domain_files, "", {},
         )
         assert status == "DISPATCH"
@@ -904,7 +904,7 @@ class TestTriageConditionalAgent:
     def test_production_page_ts_file_does_not_trigger_test_only_skip(self):
         """Conditional reviewers should treat src/*Page.ts as production code."""
         config = self._make_config()
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config, ["src/HomePage.ts"], "", {},
         )
         assert status == "DISPATCH"
@@ -914,7 +914,7 @@ class TestTriageConditionalAgent:
         """Only production files → DISPATCH."""
         config = self._make_config()
         domain_files = ["src/Controller.php", "src/Service.php"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config, domain_files, "", {},
         )
         assert status == "DISPATCH"
@@ -924,7 +924,7 @@ class TestTriageConditionalAgent:
     def test_commit_keyword_match_dispatches(self):
         """Commit message matches triage keyword → DISPATCH with reason."""
         config = self._make_config(triage_keywords=["auth", "security"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config,
             ["src/Login.php"],
             "fix auth token validation",
@@ -936,7 +936,7 @@ class TestTriageConditionalAgent:
     def test_commit_keyword_partial_match(self):
         """Partial keyword match (substring) → DISPATCH."""
         config = self._make_config(triage_keywords=["sanitiz"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config,
             ["src/Form.php"],
             "add sanitization to user input",
@@ -948,7 +948,7 @@ class TestTriageConditionalAgent:
     def test_no_keyword_match_still_dispatches_by_default(self):
         """No keyword match → still DISPATCH (conservative default)."""
         config = self._make_config(triage_keywords=["auth", "security"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config,
             ["src/Report.php"],
             "add CSV export feature",
@@ -964,7 +964,7 @@ class TestTriageConditionalAgent:
             triage_checks=["substantial_non_test_additions"],
             triage_keywords=["cache", "adapter", "workaround"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "devils-advocate-reviewer", config,
             ["src/CheckoutService.php"],
             "refine checkout service orchestration",
@@ -989,7 +989,7 @@ class TestTriageConditionalAgent:
             triage_checks=["substantial_non_test_additions"],
             triage_keywords=["adapter"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "devils-advocate-reviewer", config,
             ["src/HomePage.ts"],
             "build homepage application flow",
@@ -1014,7 +1014,7 @@ class TestTriageConditionalAgent:
             triage_checks=["new_abstraction_files", "substantial_non_test_additions"],
             triage_keywords=["cache", "adapter", "workaround"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "devils-advocate-reviewer", config,
             ["src/CheckoutService.php"],
             "refine checkout service orchestration",
@@ -1040,7 +1040,7 @@ class TestTriageConditionalAgent:
             triage_checks=["new_abstraction_files", "substantial_non_test_additions"],
             triage_keywords=["adapter"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "devils-advocate-reviewer", config,
             ["src/CheckoutAdapter.php", "tests/CheckoutAdapterTest.php"],
             "",
@@ -1068,7 +1068,7 @@ class TestTriageConditionalAgent:
             triage_checks=["file_deletions"],
         )
         diffstat = {"deleted_files": ["src/old.php"], "renamed_files": [], "added": 0, "removed": 50}
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config, ["src/new.php"], "", diffstat,
         )
         assert status == "DISPATCH"
@@ -1081,7 +1081,7 @@ class TestTriageConditionalAgent:
             triage_checks=["net_removal"],
         )
         diffstat = {"deleted_files": [], "renamed_files": [], "added": 10, "removed": 100}
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config, ["src/old.php"], "", diffstat,
         )
         assert status == "DISPATCH"
@@ -1094,7 +1094,7 @@ class TestTriageConditionalAgent:
             triage_checks=["large_pr"],
         )
         domain_files = [f"src/file{i}.php" for i in range(25)]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "architecture-reviewer", config, domain_files, "", {},
         )
         assert status == "DISPATCH"
@@ -1106,7 +1106,7 @@ class TestTriageConditionalAgent:
             domain="clarity",
             triage_checks=["has_new_functions"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "code-clarity-reviewer",
             config,
             ["src/service.py"],
@@ -1123,7 +1123,7 @@ class TestTriageConditionalAgent:
             domain="docs-drift",
             triage_checks=["has_public_api_changes"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "docs-drift-reviewer",
             config,
             ["src/api.ts"],
@@ -1153,7 +1153,7 @@ class TestTriageConditionalAgent:
     def test_empty_domain_files_dispatches(self):
         """Empty domain file list → DISPATCH (conservative)."""
         config = self._make_config()
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", config, [], "", {},
         )
         assert status == "DISPATCH"
@@ -1382,7 +1382,7 @@ class TestKeywordRequiredTriage:
 
     def test_ecosystem_integration_dispatches_php_subclass_without_hook_keyword(self, registry):
         config = registry["agents"]["ecosystem-integration-reviewer"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["src/OrdersController.php"],
@@ -1405,7 +1405,7 @@ class TestKeywordRequiredTriage:
             "triage_keywords": ["add_filter"],
             "require_triage_keyword_match": True,
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["plugin.php"],
@@ -1423,7 +1423,7 @@ class TestKeywordRequiredTriage:
             "triage_keywords": ["add_filter"],
             "require_triage_keyword_match": True,
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["plugin.php"],
@@ -1441,7 +1441,7 @@ class TestKeywordRequiredTriage:
             "triage_keywords": ["add_filter", "apply_filters", "do_action"],
             "require_triage_keyword_match": True,
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["plugin.php"],
@@ -1460,7 +1460,7 @@ class TestKeywordRequiredTriage:
             "triage_keywords": ["add_filter", "apply_filters", "do_action"],
             "require_triage_keyword_match": True,
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["src/Foo.php"],
@@ -1474,7 +1474,7 @@ class TestKeywordRequiredTriage:
 
     def test_ecosystem_integration_skips_plain_js_ts_inheritance(self, registry):
         config = registry["agents"]["ecosystem-integration-reviewer"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["src/components/CheckoutPanel.tsx"],
@@ -1492,7 +1492,7 @@ class TestKeywordRequiredTriage:
 
     def test_ecosystem_integration_requires_php_source_before_keyword_dispatch(self, registry):
         config = registry["agents"]["ecosystem-integration-reviewer"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             agent_name="ecosystem-integration-reviewer",
             config=config,
             domain_files=["src/blocks/checkout/index.ts"],
@@ -1604,7 +1604,7 @@ class TestWooRegressionReviewerTriage:
         assert config["dispatch_class"] == "conditional"
 
     def test_dispatches_on_wc_file_path_signal(self, registry):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", self._config(registry),
             ["includes/class-wc-order.php"],
             "fix order total rounding",
@@ -1613,7 +1613,7 @@ class TestWooRegressionReviewerTriage:
         assert status == "DISPATCH"
 
     def test_dispatches_on_wc_diff_signal(self, registry):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", self._config(registry),
             ["src/OrderTotals.php"],
             "fix rounding",
@@ -1734,7 +1734,7 @@ class TestWooRegressionReviewerTriage:
 
     def test_skipped_without_wc_signal(self, registry):
         """Non-WooCommerce PHP repo → SKIPPED_TRIAGE (the triage-out requirement)."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", self._config(registry),
             ["src/Controller.php"],
             "add csv export feature",
@@ -1747,7 +1747,7 @@ class TestWooRegressionReviewerTriage:
 
     def test_skipped_for_js_only_diff(self, registry):
         """No PHP source in domain files → SKIPPED_TRIAGE even with WC signal."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", self._config(registry),
             ["assets/js/checkout.js"],
             "woocommerce checkout tweak",
@@ -1778,7 +1778,7 @@ class TestWpArchitectureReviewerTriage:
         """Commit message matches triage keywords ('hook', 'filter') but the
         changed files are TS-only → SKIPPED_TRIAGE, not a false-positive
         DISPATCH into a non-PHP codebase."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "wp-architecture-reviewer", self._config(registry),
             ["src/hooks/useTransient.ts"],
             "add hook and filter transient cache",
@@ -1790,7 +1790,7 @@ class TestWpArchitectureReviewerTriage:
     def test_dispatches_for_keyword_match_with_php_file(self, registry):
         """Same keyword signal, but a real PHP source file is in scope →
         DISPATCH still fires."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "wp-architecture-reviewer", self._config(registry),
             ["includes/class-wc-hooks.php"],
             "add hook and filter transient cache",
@@ -1819,7 +1819,7 @@ class TestKeywordMatchingPrecision:
         """'move' must not match inside 'remove' (observed FP: dead-code
         dispatched with reason 'commits: remove, move' on one word)."""
         config = self._make_config(triage_keywords=["move"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config,
             ["src/Renderer.php"],
             "remove dangling label from radio branch",
@@ -1830,7 +1830,7 @@ class TestKeywordMatchingPrecision:
     def test_keyword_still_matches_at_word_start(self):
         """'move' matches 'move' and 'moved' as standalone word starts."""
         config = self._make_config(triage_keywords=["move"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config,
             ["src/Renderer.php"],
             "moved helper into trait",
@@ -1842,7 +1842,7 @@ class TestKeywordMatchingPrecision:
     def test_prefix_keyword_still_matches_word_continuation(self):
         """Deliberate prefix keywords ('accessib') keep matching longer words."""
         config = self._make_config(triage_keywords=["accessib"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", config,
             ["src/Renderer.php"],
             "improve accessibility of radio settings",
@@ -1861,7 +1861,7 @@ class TestKeywordMatchingPrecision:
         config = self._make_config(
             domain="concurrency", triage_keywords=["lock"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-cache.php"],
             "tidy cache handling",
@@ -1877,7 +1877,7 @@ class TestKeywordMatchingPrecision:
         config = self._make_config(
             domain="data-flow", triage_keywords=["user_data"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "data-flow-privacy-reviewer", config,
             ["includes/class-export.php"],
             "extend export",
@@ -1894,7 +1894,7 @@ class TestKeywordMatchingPrecision:
         config = self._make_config(
             domain="data-flow", triage_keywords=["email"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "data-flow-privacy-reviewer", config,
             ["src/checkout/logger.ts"],
             "extend logger fields",
@@ -1909,7 +1909,7 @@ class TestKeywordMatchingPrecision:
         'move' still must not match 'remove' or 'removeAll'."""
         config = self._make_config(triage_keywords=["move"])
         for text in ("+ remove_dangling_label();", "+ items.removeAll();"):
-            status, reason = triage_conditional_agent(
+            status, reason, _signal = triage_conditional_agent(
                 "dead-code-reviewer", config,
                 ["src/Renderer.php"],
                 "",
@@ -1924,7 +1924,7 @@ class TestKeywordMatchingPrecision:
         """'screen reader' must match 'screen-reader-text' in diff text
         (observed miss: the 55669 diff contained screen-reader-text)."""
         config = self._make_config(triage_keywords=["screen reader"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", config,
             ["src/Renderer.php"],
             "",
@@ -1937,7 +1937,7 @@ class TestKeywordMatchingPrecision:
     def test_space_anchored_keyword_matches_separator_variants(self):
         """' wc ' style keywords match across -, _, and space separators."""
         config = self._make_config(triage_keywords=[" wc "])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", config,
             ["includes/class-renderer.php"],
             "update-wc-templates for checkout",
@@ -1962,7 +1962,7 @@ class TestKeywordMatchingPrecision:
         config = self._make_config(
             domain="reference-integrity", triage_keywords=["plugin"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "reference-integrity-reviewer", config,
             ["includes/class-x.php"],
             "",
@@ -1987,7 +1987,7 @@ class TestKeywordMatchingPrecision:
             domain="reference-integrity",
             triage_keywords=["plugin"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "reference-integrity-reviewer", config,
             ["plugins/woocommerce/includes/admin/class-wc-admin-settings.php"],
             "",
@@ -2001,7 +2001,7 @@ class TestKeywordMatchingPrecision:
             domain="reference-integrity",
             triage_keywords=["plugin"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "reference-integrity-reviewer", config,
             ["src/plugin-loader.php"],
             "",
@@ -2017,7 +2017,7 @@ class TestKeywordMatchingPrecision:
             domain="reference-integrity",
             triage_keywords=["vendor"],
         )
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "reference-integrity-reviewer", config,
             ["src/vendor-sync.php"],
             "",
@@ -2052,7 +2052,7 @@ class TestHasNewSourceFiles:
 
     def test_new_source_module_dispatches(self):
         files = ["scripts/util/parsing.py"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "architecture-reviewer", self._config(), files,
             "add parsing helpers", self._diffstat(files, files),
             diff_text="+def parse_header(raw):\n+    return raw.strip()",
@@ -2062,7 +2062,7 @@ class TestHasNewSourceFiles:
 
     def test_new_test_file_does_not_fire_source_check(self):
         files = ["tests/util/test_parsing.py", "scripts/util/existing.py"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "architecture-reviewer", self._config(), files,
             "cover parsing helpers",
             self._diffstat(["tests/util/test_parsing.py"], files),
@@ -2073,7 +2073,7 @@ class TestHasNewSourceFiles:
 
     def test_new_non_source_file_does_not_fire_source_check(self):
         files = ["docs/parsing.md", "scripts/util/existing.py"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "architecture-reviewer", self._config(), files,
             "document parsing", self._diffstat(["docs/parsing.md"], files),
             diff_text="+How parsing works.",
@@ -2162,7 +2162,7 @@ class TestDetectorPolarity:
 
     def test_unclaimed_language_dispatches_conservatively(self):
         f = "src/main/java/SyncClient.java"
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "reliability-reviewer", self._config(), [f],
             "load remote status", self._small(f),
             diff_text="+        HttpResponse<String> resp = client.send(req, handler);",
@@ -2171,7 +2171,7 @@ class TestDetectorPolarity:
 
     def test_claimed_language_dispatches_when_detector_is_partial(self):
         f = "internal/sync/notes.go"
-        status, _ = triage_conditional_agent(
+        status, _, _signal = triage_conditional_agent(
             "reliability-reviewer", self._config(), [f],
             "tidy comments", self._small(f),
             diff_text="+\t// clarify rounding behavior",
@@ -2216,7 +2216,7 @@ class TestTemplateExtensionsAreInherentUI:
     def test_template_only_diff_dispatches_without_literal_markup(self, registry):
         cfg = registry["agents"]["a11y-reviewer"]
         f = "templates/checkout/form.twig"
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", cfg, [f],
             "compose payment methods",
             {"added": 3, "removed": 0,
@@ -2228,7 +2228,7 @@ class TestTemplateExtensionsAreInherentUI:
     def test_backend_php_only_diff_dispatches_conservatively(self, registry):
         cfg = registry["agents"]["a11y-reviewer"]
         f = "includes/class-wc-order-store.php"
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", cfg, [f],
             "tune order lookups",
             {"added": 3, "removed": 0,
@@ -2249,7 +2249,7 @@ class TestTemplateExtensionsAreInherentUI:
     )
     def test_template_alias_dispatches_as_inherent_ui(self, registry, filepath):
         cfg = registry["agents"]["a11y-reviewer"]
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer",
             cfg,
             [filepath],
@@ -2337,7 +2337,7 @@ class TestA11yMixedMarkupDispatch:
     def test_dispatches_on_markup_removal_in_php_diff(self, registry):
         """Removed markup lines count as markup evidence (the 55669 diff
         REMOVED a label — deletion is exactly when blast radius needs review)."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/admin/class-wc-admin-settings.php"],
             "fix settings radio markup",
@@ -2348,7 +2348,7 @@ class TestA11yMixedMarkupDispatch:
         assert "markup" in reason
 
     def test_dispatches_on_markup_addition_in_php_diff(self, registry):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/admin/class-wc-admin-settings.php"],
             "fix settings radio markup",
@@ -2360,7 +2360,7 @@ class TestA11yMixedMarkupDispatch:
     def test_dispatches_on_a11y_keyword_without_markup_in_diff(self, registry):
         """Commit keywords rescue dispatch even when the scanned diff text
         carries no markup tokens."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/class-renderer.php"],
             "improve accessibility of settings rows",
@@ -2387,7 +2387,7 @@ class TestA11yMixedMarkupDispatch:
     )
     def test_dispatches_on_php_render_surface(self, registry, render_call):
         filepath = "includes/class-renderer.php"
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer",
             self._a11y_config(registry),
             [filepath],
@@ -2410,7 +2410,7 @@ class TestA11yMixedMarkupDispatch:
     def test_dispatches_when_mixed_markup_detector_is_silent(
         self, registry, filepath, render_call,
     ):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer",
             self._a11y_config(registry),
             [filepath],
@@ -2424,7 +2424,7 @@ class TestA11yMixedMarkupDispatch:
     def test_backend_php_dispatches_when_markup_detector_is_silent(self, registry):
         """Backend-looking PHP may still call project-specific render paths;
         detector silence is not proof of accessibility irrelevance."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/class-wc-query.php"],
             "refactor query batching",
@@ -2440,7 +2440,7 @@ class TestA11yMixedMarkupDispatch:
 
     def test_php_loop_dispatches_without_false_markup_evidence(self, registry):
         """A PHP loop remains token-silent but dispatches conservatively."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/class-wc-query.php"],
             "refactor query batching",
@@ -2451,7 +2451,7 @@ class TestA11yMixedMarkupDispatch:
         assert "no triage signal to skip" in reason
 
     def test_jsx_with_interactive_markup_dispatches(self, registry):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/components/Modal.tsx"],
             "tweak modal",
@@ -2473,7 +2473,7 @@ class TestA11yMixedMarkupDispatch:
         """'CSS/SCSS affecting visibility, focus indicators, or contrast' is
         an explicit a11y triage criterion — a sizable CSS-only change must
         dispatch even without keywords or markup tokens."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/styles/buttons.scss"],
             "adjust button outline and contrast tokens",
@@ -2486,7 +2486,7 @@ class TestA11yMixedMarkupDispatch:
         """'Screen reader announcements: speak() calls' is an explicit a11y
         triage criterion — a speak() change must not depend on the
         @wordpress/a11y import line happening to be in the diff."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/store/notices.ts"],
             "announce settings save result",
@@ -2497,7 +2497,7 @@ class TestA11yMixedMarkupDispatch:
 
     def test_mixed_php_and_css_diff_dispatches_on_style_evidence(self, registry):
         """A style file supplies specific positive accessibility evidence."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/class-renderer.php", "src/styles/admin.scss"],
             "restyle settings rows",
@@ -2517,7 +2517,7 @@ class TestA11yMixedMarkupDispatch:
         """'+ outline: none;' is a one-line focus-indicator regression — an
         explicit a11y criterion. Style files are inherent visual-a11y surface
         (has_style_files), so this carries positive evidence."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/styles/buttons.scss"],
             "tidy button styles",
@@ -2532,7 +2532,7 @@ class TestA11yMixedMarkupDispatch:
 
     def test_small_ts_speak_change_dispatches(self, registry):
         """A small speak() announcement change is markup evidence."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/store/notices.ts"],
             "announce save result",
@@ -2548,7 +2548,7 @@ class TestA11yMixedMarkupDispatch:
     def test_unrelated_test_file_does_not_change_conservative_dispatch(self, registry):
         """An unrelated test cannot manufacture or suppress routing evidence
         for the production PHP change."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["includes/class-wc-query.php", "tests/js/query.test.ts"],
             "refactor query batching",
@@ -2570,7 +2570,7 @@ class TestA11yMixedMarkupDispatch:
     ):
         """The a11y detector vocabulary is not exhaustive enough to turn
         silence into absence in any mixed-purpose UI language."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "a11y-reviewer", self._a11y_config(registry),
             ["src/utils/currency.ts"],
             "fix rounding in currency formatter",
@@ -2679,7 +2679,7 @@ class TestSmallDiffPolarity:
 
     def test_small_diff_without_signal_dispatches(self):
         config = self._make_config(triage_keywords=["async", "lock"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-renderer.php"],
             "fix settings radio markup",
@@ -2697,7 +2697,7 @@ class TestSmallDiffPolarity:
         self, agents, agent_name,
     ):
         filepath = "internal/client.go"
-        status, _ = triage_conditional_agent(
+        status, _, _signal = triage_conditional_agent(
             agent_name,
             agents[agent_name],
             [filepath],
@@ -2711,7 +2711,7 @@ class TestSmallDiffPolarity:
         self, agents,
     ):
         filepath = "src/items.js"
-        status, _ = triage_conditional_agent(
+        status, _, _signal = triage_conditional_agent(
             "performance-reviewer",
             agents["performance-reviewer"],
             [filepath],
@@ -2726,7 +2726,7 @@ class TestSmallDiffPolarity:
     def test_large_diff_without_signal_still_dispatches_by_default(self):
         config = self._make_config(triage_keywords=["async", "lock"])
         diffstat = self._small_diffstat(added=180, removed=40)
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-renderer.php"],
             "restructure renderer",
@@ -2738,7 +2738,7 @@ class TestSmallDiffPolarity:
 
     def test_small_diff_with_keyword_evidence_dispatches(self):
         config = self._make_config(triage_keywords=["async", "lock"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-renderer.php"],
             "add lock around cache write",
@@ -2753,7 +2753,7 @@ class TestSmallDiffPolarity:
             triage_checks=["net_removal"],
         )
         diffstat = self._small_diffstat(added=2, removed=30)
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "dead-code-reviewer", config,
             ["includes/class-renderer.php"],
             "trim renderer",
@@ -2764,7 +2764,7 @@ class TestSmallDiffPolarity:
     def test_unsized_diffstat_keeps_default_dispatch(self):
         """No sizing data (empty diffstat) → cannot prove smallness → dispatch."""
         config = self._make_config(triage_keywords=["async"])
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-renderer.php"],
             "fix renderer",
@@ -2783,7 +2783,7 @@ class TestSmallDiffPolarity:
         """Adding a required parameter to a public method is a classic
         two-line breaking change — it must dispatch api-contract-reviewer
         without any keyword in commits."""
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "api-contract-reviewer", agents["api-contract-reviewer"],
             ["src/PaymentGatewayInterface.php"],
             "extend process method",
@@ -2800,7 +2800,7 @@ class TestSmallDiffPolarity:
         assert status == "DISPATCH"
 
     def test_one_line_superglobal_echo_dispatches_security(self, agents):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "security-reviewer", agents["security-reviewer"],
             ["includes/render.php"],
             "show visitor name",
@@ -2823,7 +2823,7 @@ class TestSmallDiffPolarity:
                 "tests/RendererTest.php": {"added": 294, "removed": 9},
             },
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["includes/class-renderer.php", "tests/RendererTest.php"],
             "fix renderer",
@@ -2986,7 +2986,7 @@ class TestDiffFetchFailureConservatism:
             assert _mod.get_diff_text("main..HEAD", ["a.php"]) == ""
 
     def test_blanket_gate_dispatches_when_scan_failed(self):
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "woo-regression-reviewer", self._blanket_config(),
             ["includes/class-wc-order.php"], "", {}, diff_text=None,
         )
@@ -3004,7 +3004,7 @@ class TestDiffFetchFailureConservatism:
             "added": 4, "removed": 1,
             "file_stats": {"src/orders.php": {"added": 4, "removed": 1}},
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["src/orders.php"], "", diffstat, diff_text=None,
         )
@@ -3022,7 +3022,7 @@ class TestDiffFetchFailureConservatism:
             "added": 4, "removed": 1,
             "file_stats": {"src/orders.php": {"added": 4, "removed": 1}},
         }
-        status, _ = triage_conditional_agent(
+        status, _, _signal = triage_conditional_agent(
             "concurrency-reviewer", config,
             ["src/orders.php"], "", diffstat, diff_text="",
         )
@@ -3040,7 +3040,7 @@ class TestDiffFetchFailureConservatism:
             "file_stats": {"includes/class-admin.php": {"added": 4, "removed": 1}},
         }
         with patch.object(_mod, "get_diff_text", return_value=None):
-            status, reason = _mod.decide_agent_dispatch(
+            status, reason, _signal = _mod.decide_agent_dispatch(
                 "woo-regression-reviewer", config,
                 {"code": 1},
                 clean_files=["includes/class-admin.php"],
@@ -3059,7 +3059,7 @@ class TestDiffFetchFailureConservatism:
         }
         cache = {}
         with patch.object(_mod, "get_diff_text", return_value=None):
-            status, reason = _mod.decide_agent_dispatch(
+            status, reason, _signal = _mod.decide_agent_dispatch(
                 "woo-regression-reviewer", config,
                 {"code": 1},
                 clean_files=["includes/class-admin.php"],
@@ -3084,7 +3084,7 @@ class TestDiffFetchFailureConservatism:
             "added": 4, "removed": 1,
             "file_stats": {"src/orders.php": {"added": 4, "removed": 1}},
         }
-        status, _ = triage_conditional_agent(
+        status, _, _signal = triage_conditional_agent(
             "some-reviewer", config,
             ["src/orders.php"], "", diffstat, diff_text=None,
         )
@@ -3694,7 +3694,7 @@ class TestStructuralChecks:
             "domain": "architecture",
             "triage_checks": ["large_pr"],
         }
-        status, reason = triage_conditional_agent(
+        status, reason, _signal = triage_conditional_agent(
             "architecture-reviewer", config,
             ["src/Checkout.php"],
             "",
@@ -3766,6 +3766,7 @@ class TestRepoReviewerExpansion:
         assert e["execution"] == "inline"
         assert e["model"] == "sonnet"
         assert e["scope_domains"] == ["security"]
+        assert e["include_paths"] == []
         assert e["status"] == "DISPATCH"
         assert any("repo-renewals-reviewer: STATUS=DISPATCH" in s for s in signals)
 
@@ -3852,6 +3853,28 @@ class TestRepoReviewerExpansion:
         assert any("UNTRUSTED config" in w for w in plan["warnings"])
         assert not any("UNTRUSTED" in s for s in plan["agent_signals"])
 
+    def test_declared_path_globs_ride_on_the_plan_row(self):
+        """The globs bootstrap passes as `--include-path` are the plan row's
+        `include_paths`, so the orphan measurement sees the same scope."""
+        dispatch = []
+        rev = {"id": "contracts", "ref": ".ai/agents/review/contracts.md",
+               "applies_to": {"paths": ["contracts/*.contract"]}}
+        expand_repo_reviewers(_review_ctx([rev]), {}, ["contracts/payment.contract"], dispatch)
+        assert dispatch[0]["status"] == "DISPATCH"
+        assert dispatch[0]["include_paths"] == ["contracts/*.contract"]
+
+    def test_registry_rows_carry_their_declared_scope(self, registry):
+        """A plan row states the agent's scope — primary plus secondary
+        domains — so a reader of the plan (dispatch_adjust's orphan
+        measurement) needs no registry."""
+        plan = build_dispatch_plan(
+            mode="full", git_range="main..HEAD", output_dir="/tmp/test",
+            changed_files=["Dockerfile", "src/a.php"], registry=registry,
+        )
+        rows = {a["name"]: a for a in plan["agents"]}
+        assert rows["security-reviewer"]["scope_domains"] == ["security", "config-ops"]
+        assert rows["code-reviewer"]["scope_domains"] == ["code"]
+
     def test_scope_domains_fallback_to_code(self):
         dispatch = []
         rev = {"id": "any", "label": "Any", "ref": "r.md",
@@ -3926,3 +3949,82 @@ class TestRepoReviewerExpansion:
         )
         assert entry["model"] == "opus"
         assert entry["declared_model"] == "opus"
+
+
+class TestDispatchSignals:
+    """The planner names why it decided, from the code path that decided."""
+
+    _CONFIG = {"domain": "security", "triage_keywords": ["nonce"], "triage_checks": []}
+
+    @pytest.mark.parametrize("config, files, text, diffstat, kwargs, expected", [
+        pytest.param(_CONFIG, ["tests/test_a.php"], "", {}, {}, "test_only", id="test_only"),
+        pytest.param({**_CONFIG, "min_added_lines": 5}, ["src/a.php"], "", {"added": 0, "removed": 0}, {}, "min_added_lines", id="min_added_lines"),
+        pytest.param({**_CONFIG, "require_php_source_file": True}, ["src/a.js"], "", {}, {}, "source_gate", id="source_gate"),
+        pytest.param(_CONFIG, ["src/a.php"], "add nonce check", {}, {}, "keyword", id="keyword"),
+        pytest.param({**_CONFIG, "triage_repository_keywords": ["woocommerce"]}, ["src/a.php"], "tidy", {}, {"diff_text": "", "repository_text": "woocommerce/woocommerce"}, "repository_keyword", id="repository_keyword"),
+        pytest.param(_CONFIG, ["src/a.php"], "tidy", {}, {"diff_text": None}, "diff_unavailable", id="diff_unavailable"),
+        pytest.param({**_CONFIG, "require_triage_keyword_match": True}, ["src/a.php"], "tidy", {}, {"diff_text": ""}, "evidence_gate", id="evidence_gate"),
+        pytest.param(_CONFIG, ["src/a.php"], "tidy", {}, {"diff_text": ""}, "default", id="default"),
+    ])
+    def test_every_triage_layer_emits_its_own_signal(self, config, files, text, diffstat, kwargs, expected):
+        status, reason, signal = triage_conditional_agent("security-reviewer", config, files, text, diffstat, **kwargs)
+        assert signal == expected, (status, reason)
+
+    def test_a_triage_check_emits_the_check_signal(self, registry):
+        from review.dispatch_status import SIGNAL_CHECK
+        dead = registry["agents"]["dead-code-reviewer"]
+        status, reason, signal = triage_conditional_agent(
+            "dead-code-reviewer", dead, ["src/a.php"], "",
+            {"deleted_files": ["src/old.php"], "renamed_files": [], "added": 0, "removed": 40},
+        )
+        assert signal == SIGNAL_CHECK, reason
+
+    def test_decide_agent_dispatch_falls_back_to_the_default_signal(self):
+        from review.dispatch_status import SIGNAL_DEFAULT
+        status, reason, signal = decide_agent_dispatch("x-reviewer", {"domain": "code", "dispatch_class": "special"}, {"code": 3})
+        assert (reason, signal) == ("default", SIGNAL_DEFAULT)
+
+    def test_repo_reviewers_carry_their_own_signals(self):
+        from review.dispatch_status import SIGNAL_NO_DOMAIN_FILES, SIGNAL_REPO_REVIEWER
+        dispatch = []
+        expand_repo_reviewers(
+            _review_ctx([
+                {"id": "foo", "prompt": "review.md", "applies_to": {"domains": ["php"]}},
+                {"id": "bar", "prompt": "review.md", "applies_to": {"domains": ["go"]}},
+            ]),
+            {"php": 2, "go": 0}, ["src/a.php"], dispatch,
+        )
+        signals = {entry["name"]: entry["signal"] for entry in dispatch}
+        assert signals == {"repo-foo-reviewer": SIGNAL_REPO_REVIEWER, "repo-bar-reviewer": SIGNAL_NO_DOMAIN_FILES}
+
+    def test_decide_agent_dispatch_signals_always_and_no_domain_files(self):
+        from review.dispatch_status import SIGNAL_ALWAYS, SIGNAL_NO_DOMAIN_FILES, SIGNAL_UNTRIAGED
+
+        always = {"domain": "code", "dispatch_class": "always"}
+        assert decide_agent_dispatch("code-reviewer", always, {"code": 3})[2] == SIGNAL_ALWAYS
+        assert decide_agent_dispatch("code-reviewer", always, {"code": 0})[2] == SIGNAL_NO_DOMAIN_FILES
+        conditional = {"domain": "code", "dispatch_class": "conditional"}
+        assert decide_agent_dispatch("x-reviewer", conditional, {"code": 3})[2] == SIGNAL_UNTRIAGED
+
+    def test_quick_mode_keys_on_the_signal_not_the_reason_prose(self, registry, tmp_path):
+        from review.dispatch_status import SIGNAL_QUICK_MODE, SKIPPED_QUICK_MODE
+
+        plan = build_dispatch_plan(
+            mode="full",
+            git_range="main..HEAD",
+            output_dir=str(tmp_path),
+            changed_files=["src/Controller.php"],
+            registry=registry,
+            commit_messages="refine controller flow",
+            diffstat={
+                "added": 20,
+                "removed": 5,
+                "deleted_files": [],
+                "renamed_files": [],
+                "file_stats": {"src/Controller.php": {"added": 20, "removed": 5}},
+            },
+            quick=True,
+        )
+        skipped = [a for a in plan["agents"] if a["status"] == SKIPPED_QUICK_MODE]
+        assert skipped and all(a["signal"] == SIGNAL_QUICK_MODE for a in skipped)
+        assert all("signal" in a and a["signal"] for a in plan["agents"])

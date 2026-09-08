@@ -114,16 +114,19 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
             "name": "security-reviewer", "domain": "security",
             "model_tier": "sonnet", "status": "DISPATCH",
             "reason": "keywords matched (title: enterprise-customer)",
+            "signal": "keyword",
         },
         {
             "name": "performance-reviewer", "domain": "performance",
             "model_tier": "sonnet", "status": "SKIPPED_TRIAGE",
             "reason": "no triage criteria matched",
+            "signal": "evidence_gate",
         },
         {
             "name": "php-tests-reviewer", "domain": "php-tests",
             "model_tier": "sonnet", "status": "SKIPPED",
             "reason": SKIP_REASON,
+            "signal": "no_domain_files",
         },
     ]
     _write_artifact(output_dir, "dispatch_plan_initial", {

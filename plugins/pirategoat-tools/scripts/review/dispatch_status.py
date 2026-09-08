@@ -24,6 +24,36 @@ SKIPPED_STATUSES = frozenset({
 })
 SUPPORTED_DISPATCH_STATUSES = DISPATCHED_STATUSES | SKIPPED_STATUSES
 
+# Why the planner decided, as one enumeration emitted from the code path
+# that decided. Telemetry discloses and counts these; the prose `reason`
+# beside each stays undisclosed. Nothing derives a signal from a reason.
+SIGNAL_NO_DOMAIN_FILES = "no_domain_files"
+SIGNAL_ALWAYS = "always"
+SIGNAL_TEST_ONLY = "test_only"
+SIGNAL_MIN_ADDED_LINES = "min_added_lines"
+SIGNAL_SOURCE_GATE = "source_gate"
+SIGNAL_KEYWORD = "keyword"
+SIGNAL_REPOSITORY_KEYWORD = "repository_keyword"
+SIGNAL_CHECK = "check"
+SIGNAL_DIFF_UNAVAILABLE = "diff_unavailable"
+SIGNAL_EVIDENCE_GATE = "evidence_gate"
+SIGNAL_DEFAULT = "default"
+SIGNAL_UNTRIAGED = "untriaged"
+SIGNAL_QUICK_MODE = "quick_mode"
+SIGNAL_REPO_REVIEWER = "repo_reviewer"
+SIGNAL_OVERRIDE = "override"
+DISPATCH_SIGNALS = frozenset({
+    SIGNAL_NO_DOMAIN_FILES, SIGNAL_ALWAYS, SIGNAL_TEST_ONLY,
+    SIGNAL_MIN_ADDED_LINES, SIGNAL_SOURCE_GATE, SIGNAL_KEYWORD,
+    SIGNAL_REPOSITORY_KEYWORD, SIGNAL_CHECK, SIGNAL_DIFF_UNAVAILABLE,
+    SIGNAL_EVIDENCE_GATE, SIGNAL_DEFAULT, SIGNAL_UNTRIAGED,
+    SIGNAL_QUICK_MODE, SIGNAL_REPO_REVIEWER, SIGNAL_OVERRIDE,
+})
+# Dispatches resting on no positive evidence; quick mode may skip these.
+LOW_SIGNAL_DISPATCH_SIGNALS = frozenset({
+    SIGNAL_ALWAYS, SIGNAL_DEFAULT, SIGNAL_UNTRIAGED,
+})
+
 
 def validate_dispatch_plan_agents(agents: object) -> list[dict]:
     """Validate and return dispatch-plan agent entries."""
@@ -72,5 +102,22 @@ __all__ = [
     "DISPATCHED_STATUSES",
     "SKIPPED_STATUSES",
     "SUPPORTED_DISPATCH_STATUSES",
+    "SIGNAL_NO_DOMAIN_FILES",
+    "SIGNAL_ALWAYS",
+    "SIGNAL_TEST_ONLY",
+    "SIGNAL_MIN_ADDED_LINES",
+    "SIGNAL_SOURCE_GATE",
+    "SIGNAL_KEYWORD",
+    "SIGNAL_REPOSITORY_KEYWORD",
+    "SIGNAL_CHECK",
+    "SIGNAL_DIFF_UNAVAILABLE",
+    "SIGNAL_EVIDENCE_GATE",
+    "SIGNAL_DEFAULT",
+    "SIGNAL_UNTRIAGED",
+    "SIGNAL_QUICK_MODE",
+    "SIGNAL_REPO_REVIEWER",
+    "SIGNAL_OVERRIDE",
+    "DISPATCH_SIGNALS",
+    "LOW_SIGNAL_DISPATCH_SIGNALS",
     "validate_dispatch_plan_agents",
 ]

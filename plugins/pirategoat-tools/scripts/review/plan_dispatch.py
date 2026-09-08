@@ -35,6 +35,21 @@ from typing import Callable, Dict, List, Optional, Tuple
 try:
     from .dispatch_status import (
         DISPATCH,
+        LOW_SIGNAL_DISPATCH_SIGNALS,
+        SIGNAL_ALWAYS,
+        SIGNAL_CHECK,
+        SIGNAL_DEFAULT,
+        SIGNAL_DIFF_UNAVAILABLE,
+        SIGNAL_EVIDENCE_GATE,
+        SIGNAL_KEYWORD,
+        SIGNAL_MIN_ADDED_LINES,
+        SIGNAL_NO_DOMAIN_FILES,
+        SIGNAL_QUICK_MODE,
+        SIGNAL_REPOSITORY_KEYWORD,
+        SIGNAL_REPO_REVIEWER,
+        SIGNAL_SOURCE_GATE,
+        SIGNAL_TEST_ONLY,
+        SIGNAL_UNTRIAGED,
         SKIPPED,
         SKIPPED_QUICK_MODE,
         SKIPPED_TRIAGE,
@@ -46,6 +61,21 @@ except ImportError:
         sys.path.insert(0, _scripts_parent)
     from review.dispatch_status import (
         DISPATCH,
+        LOW_SIGNAL_DISPATCH_SIGNALS,
+        SIGNAL_ALWAYS,
+        SIGNAL_CHECK,
+        SIGNAL_DEFAULT,
+        SIGNAL_DIFF_UNAVAILABLE,
+        SIGNAL_EVIDENCE_GATE,
+        SIGNAL_KEYWORD,
+        SIGNAL_MIN_ADDED_LINES,
+        SIGNAL_NO_DOMAIN_FILES,
+        SIGNAL_QUICK_MODE,
+        SIGNAL_REPOSITORY_KEYWORD,
+        SIGNAL_REPO_REVIEWER,
+        SIGNAL_SOURCE_GATE,
+        SIGNAL_TEST_ONLY,
+        SIGNAL_UNTRIAGED,
         SKIPPED,
         SKIPPED_QUICK_MODE,
         SKIPPED_TRIAGE,
@@ -78,6 +108,7 @@ _review_config_spec = importlib.util.spec_from_file_location(
 _review_config_mod = importlib.util.module_from_spec(_review_config_spec)
 _review_config_spec.loader.exec_module(_review_config_mod)
 reviewer_applies_to_diff = _review_config_mod.reviewer_applies_to_diff
+glob_match = _review_config_mod.glob_match
 
 # The registry key of the generic adapter that runs repo-contributed reviewers.
 REPO_REVIEWER_ADAPTER = "repo-reviewer-adapter"
@@ -290,6 +321,24 @@ def get_domain_files(files: List[str], domain: str) -> List[str]:
     return matched
 
 
+def declared_domains(config: dict) -> List[str]:
+    """An agent's scope domains as the registry declares them: the primary
+    domain, then the secondary domains it also receives."""
+    domains = [config["domain"]] if config.get("domain") else []
+    return domains + [d for d in config.get("secondary_domains", []) if d not in domains]
+
+
+def scope_files(files: List[str], domains: List[str], globs=()) -> List[str]:
+    """The changed files a scope covers: every file in any of its domains,
+    plus every file one of its path globs matches (the globs bootstrap
+    passes to scope.py as `--include-path`)."""
+    covered = set()
+    for domain in domains:
+        covered.update(get_domain_files(files, domain))
+    covered.update(f for f in files if any(glob_match(g, f) for g in globs))
+    return sorted(covered)
+
+
 def build_domain_counts(files: List[str]) -> Dict[str, int]:
     """Count files matching each domain in DOMAIN_CATALOG.
 
@@ -317,13 +366,6 @@ _QUICK_MODE_EXCLUDED_AGENTS = frozenset([
     "reliability-reviewer",
     "simplification-reviewer",
     "devils-advocate-reviewer",
-])
-
-_LOW_SIGNAL_DISPATCH_REASONS = frozenset([
-    "always dispatch (domain has files)",
-    "conditional (domain has files)",
-    "conditional (domain has files, no triage signal to skip)",
-    "default",
 ])
 
 _ABSTRACTION_SUFFIXES = (
@@ -1539,7 +1581,7 @@ def triage_conditional_agent(
     pr_text: str = "",
     diff_text: Optional[str] = None,
     repository_text: str = "",
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """Apply deterministic triage for a conditional agent.
 
     Triage layers (first match wins):
@@ -1568,7 +1610,7 @@ def triage_conditional_agent(
         repository_text: Lowercased repository origin/name (empty if unavailable).
 
     Returns:
-        (status, reason) where status is DISPATCH or SKIPPED_TRIAGE.
+        (status, reason, signal) where status is DISPATCH or SKIPPED_TRIAGE.
     """
     _validate_triage_checks(agent_name, config)
 
@@ -1577,21 +1619,21 @@ def triage_conditional_agent(
     # Conditional agents target production-code concerns; test-only diffs
     # don't need security/performance/architecture review.
     if domain_files and all(is_test_file(f) for f in domain_files):
-        return SKIPPED_TRIAGE, "all matching files are test files"
+        return SKIPPED_TRIAGE, "all matching files are test files", SIGNAL_TEST_ONLY
 
     in_scope_added = _count_in_scope_non_test_additions(domain_files, diffstat)
 
     # Gate: min_added_lines — skip if PR doesn't add enough code in non-test scope
     min_lines = config.get("min_added_lines", 0)
     if min_lines > 0 and in_scope_added < min_lines:
-        return SKIPPED_TRIAGE, f"below minimum addition threshold ({in_scope_added} < {min_lines} lines)"
+        return SKIPPED_TRIAGE, f"below minimum addition threshold ({in_scope_added} < {min_lines} lines)", SIGNAL_MIN_ADDED_LINES
 
     # Layer 2: Agent-wide source gate.
     if config.get("require_php_source_file") and not any(
         f.lower().endswith(".php") and not is_test_file(f)
         for f in domain_files
     ):
-        return SKIPPED_TRIAGE, "requires PHP source file"
+        return SKIPPED_TRIAGE, "requires PHP source file", SIGNAL_SOURCE_GATE
 
     # Layer 3: Change-local keyword match. Ambient repository identity is
     # deliberately excluded so existing agents cannot inherit it implicitly.
@@ -1613,7 +1655,7 @@ def triage_conditional_agent(
             reason_parts = []
             for src, kws in by_source.items():
                 reason_parts.append(f"{src}: {', '.join(kws[:3])}")
-            return DISPATCH, f"keywords matched ({'; '.join(reason_parts)})"
+            return DISPATCH, f"keywords matched ({'; '.join(reason_parts)})", SIGNAL_KEYWORD
 
     # Layer 4: Repository identity is an ambient applicability signal. Agents
     # must opt in with source-specific keywords rather than reusing the generic
@@ -1625,7 +1667,7 @@ def triage_conditional_agent(
     )
     if repository_matches:
         matched_keywords = ", ".join(kw for kw, _ in repository_matches[:5])
-        return DISPATCH, f"repository keywords matched ({matched_keywords})"
+        return DISPATCH, f"repository keywords matched ({matched_keywords})", SIGNAL_REPOSITORY_KEYWORD
 
     # Layer 5: Agent-specific checks. Each check's predicate lives in
     # _CHECK_RUNNERS (the execution view over _CHECK_SPECS); the first that
@@ -1636,7 +1678,7 @@ def triage_conditional_agent(
             domain_files, diffstat, diff_text, in_scope_added, min_lines
         )
         if reason:
-            return DISPATCH, reason
+            return DISPATCH, reason, SIGNAL_CHECK
 
     # Unknown is not negative — I/O edition. The explicit applicability gate
     # below infers signal ABSENCE from patch text. When this agent's triage
@@ -1648,19 +1690,19 @@ def triage_conditional_agent(
         return DISPATCH, (
             "patch text unavailable (diff fetch failed); cannot verify "
             "absence of triage signals — dispatching conservatively"
-        )
+        ), SIGNAL_DIFF_UNAVAILABLE
 
     # Evidence gate: agents that opt in dispatch only on a positive triage
     # signal (keyword match above, or a triage check). Sits AFTER Layer 5 so
     # checks count as evidence; before this reorder the gate short-circuited
     # them, so a check-carrying agent could never dispatch on checks alone.
     if config.get("require_triage_keyword_match"):
-        return SKIPPED_TRIAGE, "requires positive triage signal; no keyword or check matched"
+        return SKIPPED_TRIAGE, "requires positive triage signal; no keyword or check matched", SIGNAL_EVIDENCE_GATE
 
     # Layer 6: Default — DISPATCH when no triage signal skips the agent.
     # Keywords and triage checks provide positive evidence, but conditional
     # agents still dispatch conservatively when their domain has files.
-    return DISPATCH, "conditional (domain has files, no triage signal to skip)"
+    return DISPATCH, "conditional (domain has files, no triage signal to skip)", SIGNAL_DEFAULT
 
 
 # =============================================================================
@@ -1679,7 +1721,7 @@ def decide_agent_dispatch(
     repository_text: str = "",
     git_range: Optional[str] = None,
     diff_text_cache: Optional[Dict[Tuple[str, ...], Optional[str]]] = None,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """Decide whether to dispatch a single agent.
 
     For always-dispatch and manual/special agents, only domain file counts
@@ -1702,7 +1744,7 @@ def decide_agent_dispatch(
         git_range: Git range used to fetch domain-specific patch text.
 
     Returns:
-        (status, reason) tuple where status is "DISPATCH", "SKIPPED",
+        (status, reason, signal) tuple where status is "DISPATCH", "SKIPPED",
         or "SKIPPED_TRIAGE".
     """
     dispatch_class = config.get("dispatch_class", "conditional")
@@ -1729,20 +1771,15 @@ def decide_agent_dispatch(
         secondary = config.get("secondary_domains", [])
         if secondary:
             domain_label += f" + {', '.join(secondary)}"
-        return SKIPPED, f"no files in {domain_label} domain"
+        return SKIPPED, f"no files in {domain_label} domain", SIGNAL_NO_DOMAIN_FILES
 
     # Always-dispatch agents: dispatch if domain has files
     if dispatch_class == "always":
-        return DISPATCH, "always dispatch (domain has files)"
+        return DISPATCH, "always dispatch (domain has files)", SIGNAL_ALWAYS
 
     # Conditional agents: apply deterministic triage
     if dispatch_class == "conditional" and clean_files is not None:
-        # Gather domain-matched files for triage
-        domain_files = get_domain_files(clean_files, domain) if domain else []
-        for sec_domain in config.get("secondary_domains", []):
-            domain_files.extend(get_domain_files(clean_files, sec_domain))
-        # Deduplicate
-        domain_files = sorted(set(domain_files))
+        domain_files = scope_files(clean_files, declared_domains(config))
         if diff_text is None and git_range and _needs_diff_scan(config):
             cache_key = tuple(domain_files)
             if diff_text_cache is not None:
@@ -1766,10 +1803,10 @@ def decide_agent_dispatch(
 
     # Conditional agents without triage context: dispatch by default
     if dispatch_class == "conditional":
-        return DISPATCH, "conditional (domain has files)"
+        return DISPATCH, "conditional (domain has files)", SIGNAL_UNTRIAGED
 
     # Fallback
-    return DISPATCH, "default"
+    return DISPATCH, "default", SIGNAL_DEFAULT
 
 
 def _build_pr_text(review_context: Optional[dict]) -> str:
@@ -1862,19 +1899,25 @@ def expand_repo_reviewers(
         # broad "code" domain when it declares none), filtered to real domains.
         declared = [d for d in (applies or {}).get("domains", []) if d in DOMAIN_CATALOG]
         scope_domains = declared or ["code"]
+        # The globs bootstrap passes to scope.py as `--include-path`; the
+        # orphan measurement in dispatch_adjust reads them from the row.
+        include_paths = [p for p in ((applies or {}).get("paths") or []) if isinstance(p, str)]
         if rev.get("execution") == "isolated":
             # An explicit isolation request must never silently WIDEN into
             # inline execution — refuse until isolated execution exists.
             status = "SKIPPED"
+            signal = SIGNAL_REPO_REVIEWER if applicable else SIGNAL_NO_DOMAIN_FILES
             reason = (
                 "isolated execution is not implemented — refusing the "
                 "inline fallback"
             )
         elif applicable:
             status = "DISPATCH"
+            signal = SIGNAL_REPO_REVIEWER
             reason = "repo reviewer applicable to this diff"
         else:
             status = "SKIPPED_TRIAGE"
+            signal = SIGNAL_NO_DOMAIN_FILES
             reason = "repo reviewer not applicable (no matching domain files or paths)"
         dispatch_list.append({
             "name": name,
@@ -1895,10 +1938,12 @@ def expand_repo_reviewers(
             ),
             "declared_model": rev.get("model"),
             "scope_domains": scope_domains,
+            "include_paths": include_paths,
             "domain": None,
             "focus": rev.get("label", rev["id"]),
             "status": status,
             "reason": reason,
+            "signal": signal,
         })
         signals.append(f"{name}: STATUS={status} ({reason})")
     return signals, warnings
@@ -1977,7 +2022,7 @@ def build_dispatch_plan(
         if config.get("dispatch_class") in ("manual", "special"):
             continue
 
-        status, reason = decide_agent_dispatch(
+        status, reason, signal = decide_agent_dispatch(
             agent_name, config, domain_counts,
             clean_files=clean_files,
             commit_messages=commit_messages,
@@ -1995,16 +2040,21 @@ def build_dispatch_plan(
         # keyword-confirmed ones.
         if (quick and agent_name in _QUICK_MODE_EXCLUDED_AGENTS
                 and status == DISPATCH
-                and reason in _LOW_SIGNAL_DISPATCH_REASONS):
+                and signal in LOW_SIGNAL_DISPATCH_SIGNALS):
             status = SKIPPED_QUICK_MODE
             reason = "excluded in quick review mode (no triage signal to override)"
+            signal = SIGNAL_QUICK_MODE
 
         entry = {
             "name": agent_name,
             "domain": config.get("domain"),
+            # The row states the agent's scope, so a plan reader (the orphan
+            # measurement in dispatch_adjust.py) needs no registry.
+            "scope_domains": declared_domains(config),
             "focus": config.get("focus", ""),
             "status": status,
             "reason": reason,
+            "signal": signal,
         }
         dispatch_list.append(entry)
 

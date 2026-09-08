@@ -17,6 +17,7 @@ from .contracts import (
     _DEPENDENCY_REFRESH_EXIT_STATUSES,
     _DEPENDENCY_REFRESH_STATUSES,
     _DERIVED_MARKDOWN_STATUSES,
+    _DISPATCH_SIGNALS,
     _DISPATCHED_STATUSES,
     _FIXED_WARNING_CODES,
     _FILE_EXCLUSIONS_FIELD,
@@ -60,6 +61,11 @@ def _nonnegative_int(value: object) -> int | None:
     ):
         return int(value)
     return None
+
+
+def _enum(value: object, vocabulary) -> str | None:
+    """One value from a closed vocabulary, or None for anything else."""
+    return value if isinstance(value, str) and value in vocabulary else None
 
 
 def _nonnegative_exact_int(value: object) -> int | None:
@@ -800,8 +806,10 @@ def _sanitize_dispatch(value: object) -> dict[str, Any] | None:
         "domain",
         "initial_status",
         "initial_reason",
+        "initial_signal",
         "final_status",
         "final_reason",
+        "final_signal",
         "model_tier",
         "declared_model",
         "adjustment_reason",
@@ -823,6 +831,9 @@ def _sanitize_dispatch(value: object) -> dict[str, Any] | None:
             ):
                 return None
         safe = _safe_scalar_map(decision, fields)
+        for field in ("initial_signal", "final_signal"):
+            signal = decision.get(field)
+            safe[field] = _enum(signal, _DISPATCH_SIGNALS)
         safe["planner_signals"] = _safe_strings(decision.get("planner_signals"))
         safe["configured_planner_checks"] = _safe_strings(
             decision.get("configured_planner_checks")

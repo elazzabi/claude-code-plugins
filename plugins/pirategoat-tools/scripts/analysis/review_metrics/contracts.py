@@ -237,6 +237,7 @@ _DISPATCHED_STATUSES = _DISPATCH_STATUS_CONTRACT.DISPATCHED_STATUSES
 _SUPPORTED_DISPATCH_STATUSES = (
     _DISPATCH_STATUS_CONTRACT.SUPPORTED_DISPATCH_STATUSES
 )
+_DISPATCH_SIGNALS = frozenset(_DISPATCH_STATUS_CONTRACT.DISPATCH_SIGNALS)
 # The path-segment grammar lives in run_paths, the sole authority for
 # durable review locations — not in the sharing module, which is only one
 # of its consumers.

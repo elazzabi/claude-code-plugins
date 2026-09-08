@@ -331,6 +331,8 @@ def _manifest(
                 "code-reviewer": {
                     "initial_status": "DISPATCH",
                     "final_status": "DISPATCH",
+                    "initial_signal": "keyword",
+                    "final_signal": "keyword",
                     "planner_signals": [],
                     "configured_planner_checks": [],
                     "change": "unchanged",
@@ -338,6 +340,8 @@ def _manifest(
                 "security-reviewer": {
                     "initial_status": "DISPATCH",
                     "final_status": "SKIPPED_TRIAGE",
+                    "initial_signal": "default",
+                    "final_signal": "override",
                     "planner_signals": [],
                     "configured_planner_checks": [],
                     "change": "removed",
@@ -858,6 +862,8 @@ def _final_only_dispatch() -> dict:
             "code-reviewer": {
                 "initial_status": "DISPATCH",
                 "final_status": "DISPATCH",
+                "initial_signal": None,
+                "final_signal": None,
                 "planner_signals": [],
                 "configured_planner_checks": [],
                 "change": "unchanged",
@@ -3515,6 +3521,14 @@ class TestMeasureRun:
         assert loaded["final_status"] == "DISPATCH"
         assert "adjustment_reason" not in loaded
         assert unsafe_reason not in json.dumps(run)
+
+    def test_unknown_dispatch_signal_sanitizes_to_none(self, tmp_path):
+        manifest = _manifest()
+        manifest["dispatch"]["agents"]["code-reviewer"]["initial_signal"] = "unknown"
+
+        measured = measure_run(manifest, tmp_path, include_transcripts=False)
+
+        assert measured["dispatch"]["agents"]["code-reviewer"]["initial_signal"] is None
 
     @pytest.mark.parametrize(
         "status,dispatched",
@@ -7426,6 +7440,10 @@ class TestAggregateCohort:
         )
         assert cohort["dispatch"]["compared_planner_candidates"] == 2
         assert cohort["dispatch"]["planner_removal_rate"] == pytest.approx(0.5)
+        assert cohort["dispatch"]["by_signal"] == {
+            "default": {"planned": 1, "removed": 1},
+            "keyword": {"planned": 1, "unchanged": 1},
+        }
         assert cohort["assignment"]["reviewable_files"] == 1
         assert cohort["assignment"]["assigned_files"] == 1
         assert cohort["assignment"]["unassigned_reviewable_files"] == 0
