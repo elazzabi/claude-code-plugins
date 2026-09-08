@@ -348,6 +348,7 @@ def render_review_body(data: Dict) -> str:
     # Markdown before this: add_recommendation() wrote them to the JSON
     # and nothing ever read them back out.
     recommendations = data.get('recommendations')
+    invalidated_recommendations = data.get('invalidated_recommendations')
     if isinstance(recommendations, dict):
         # The three known priorities render first and in their meaningful
         # order; anything else the producer wrote renders after, labelled
@@ -366,11 +367,20 @@ def render_review_body(data: Dict) -> str:
             groups.append(f"**{priority.title()}:**\n\n")
             groups.extend(f"- {entry}\n" for entry in entries)
             groups.append("\n")
-        # The header is emitted only once something will actually appear
-        # beneath it.
         if groups:
             md.append("## Recommendations\n\n")
             md.extend(groups)
+            if data.get('applied_critic_adjustments'):
+                md.append(
+                    "*Post-critic recommendations, installed after the critic "
+                    "adjustments applied.*\n\n"
+                )
+        elif invalidated_recommendations:
+            md.append("## Recommendations\n\n")
+            md.append(
+                "No current recommendations: the reconciler's were invalidated "
+                "by critic revision and not replaced; see the findings.\n\n"
+            )
 
     checks = data.get('checks')
     if checks:

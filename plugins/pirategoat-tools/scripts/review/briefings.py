@@ -2066,6 +2066,24 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
         actions.append(f"Review document to stress-test: {critic_target}")
         actions.append(f"No structured findings available (reconciliation failed) — critique the document directly without --context.")
     actions.append(f"Output directory: {od}")
+    git = context.get("git", {})
+    head_ref = git.get("head_ref")
+    head_sha = git.get("head_sha")
+    if head_ref and head_sha:
+        actions.append(f"Checkout: {head_ref} @ {str(head_sha)[:12]}")
+    else:
+        actions.append(
+            "Checkout: unknown — verify `git rev-parse --abbrev-ref HEAD` and "
+            "`git rev-parse HEAD` yourself before reading any file."
+        )
+    verification = state.get("reconciliation_verification")
+    line = "Reconciliation verification: " + describe_reconciliation_verification(state)
+    if not isinstance(verification, dict) or verification.get("status") == "unverified":
+        line += (
+            " Verify every finding against the source yourself; the record's "
+            "verifications are not evidenced by an observed read."
+        )
+    actions.append(line)
     actions.append(f"Context: <one-line summary of PR scope, verdict, and finding count>")
     actions.append(
         "Return STAND, REVISE, or ESCALATE. Author findings first at "
@@ -2150,8 +2168,9 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     actions.append("    }")
     actions.append("  ],")
     actions.append(
-        '  "revised_assessment": "<optional post-critic assessment>"'
+        '  "revised_assessment": "<optional post-critic assessment>",'
     )
+    actions.append('  "revised_recommendations": {"immediate": [], "important": [], "suggestions": []}')
     actions.append("}")
     actions.append("```")
     actions.append(
@@ -2161,7 +2180,9 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
         "its non-empty reason. Every committed ID omitted from both lists is "
         "derived as `not_checked`. The orchestrator never edits the committed "
         "proposal. `revised_assessment` is optional: omit it when no "
-        "replacement assessment should be installed."
+        "replacement assessment should be installed. `revised_recommendations` "
+        "is likewise optional: an applying batch withdraws the reconciler's "
+        "recommendations along with its assessment, and this is where replacements go."
     )
     actions.append(
         "3) Save the request as `$TMPDIR/critic-adjudication.json`, then run "
@@ -2176,7 +2197,8 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     actions.append(
         "A successful handoff reports `RECORDED ADJUDICATION`, the derived "
         "`VERIFIED | REFUTED | NOT_CHECKED` counts, `REVISED ASSESSMENT: "
-        "present|absent`, `APPLIED | REJECTED`, and the `LEDGER VERDICT`. On "
+        "present|absent`, `REVISED RECOMMENDATIONS: present|absent`, "
+        "`APPLIED | REJECTED`, and the `LEDGER VERDICT`. On "
         "any `REJECTED:` line, correct only the temp request and resubmit it; "
         "never edit the output artifact or bypass `adjudicate`."
     )
@@ -2189,11 +2211,11 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     )
     actions.append(
         "Never hand-edit the findings ledger either: that one write "
-        "carries provenance, invalidates the reconciler's prior assessment "
+        "carries provenance, invalidates the reconciler's prior assessment and recommendations "
         "only when an accepted operation really changes the ledger, installs "
-        "a supplied revised assessment, recounts findings, and derives the "
+        "a supplied revised assessment and recommendations, recounts findings, and derives the "
         "final ledger verdict. Refuted operations do not invalidate or "
-        "replace the assessment."
+        "replace the assessment or recommendations."
     )
     actions.append(
         f"4) Nothing else to edit. The pipeline re-assembles "
@@ -2579,6 +2601,23 @@ def _report_authoring_actions(mode, state, context, config, output_dir):
             "never restate, summarize, re-count, or edit the machine's "
             "sentences — the hedges in them are the measurement, and a "
             f"tighter paraphrase is a false claim.{gap_clause}"
+        )
+
+    actions.append("")
+    actions.append(
+        "**Coverage and scope facts come only from the record.** What the "
+        "review reached is the record's `## Review coverage` section and its "
+        "run notes; a sentence about the review's reach, coverage, or scope "
+        "that appears in the critic's findings and not there is unverified "
+        "and must not enter the report."
+    )
+    foreign = state.get("critic_prose_paths_outside_diff")
+    if isinstance(foreign, list) and foreign:
+        actions.append(
+            f"The critic's findings name {len(foreign)} path(s) not in this "
+            f"diff: {_format_path_list(foreign)}. A claim about any of them is not a fact about "
+            "this review's reach; carry it into the report only as the "
+            "critic's own verification note, never as coverage."
         )
 
     actions.append("")

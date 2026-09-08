@@ -127,13 +127,21 @@ export interface InvalidatedAssessment {
     invalidated_by_critic_adjustment_ids: string[];
 }
 
+export type ReviewRecommendations = ReviewContent['recommendations'];
+
+export interface InvalidatedRecommendations {
+    recommendations: Partial<ReviewRecommendations>; // At least one non-empty priority at runtime.
+    invalidated_by_critic_adjustment_ids: string[]; // Non-empty; each ID must name an applied adjustment.
+}
+
 type AtLeastOne<T> = {
     [Key in keyof T]-?: Required<Pick<T, Key>> & Partial<Omit<T, Key>>;
 }[keyof T];
 
 type FindingPatchFields = Pick<Finding, 'severity' | 'title' | 'description' | 'recommendation' | 'file' | 'line' | 'category' | 'confidence'>;
-export type FindingCorrectionFields = AtLeastOne<FindingPatchFields>;
-export type CheckCorrectionFields = AtLeastOne<Pick<ReviewCheck, 'question' | 'method' | 'result'>>;
+export type FindingSeverityChangeFields = Pick<Finding, 'severity'> & Partial<Omit<FindingPatchFields, 'severity'>>;
+export type FindingCorrectionFields = AtLeastOne<Omit<FindingPatchFields, 'severity'>> & { severity?: never };
+export type CheckCorrectionFields = AtLeastOne<Pick<ReviewCheck, 'question' | 'method' | 'result'>> & { severity?: never };
 export type FindingAddFields = Pick<Finding, 'severity' | 'title' | 'file' | 'description' | 'recommendation'> & Partial<Pick<Finding, 'line' | 'category' | 'confidence'>>;
 
 export type FindingTarget = { kind: 'finding'; id: FindingId };
@@ -221,7 +229,8 @@ export interface AdjudicationRequest {
     schema: 2;
     verified: string[];
     refuted: Array<{ adjustment_id: string; rejection_reason: string }>;
-    revised_assessment: string | null;
+    revised_assessment?: string | null;
+    revised_recommendations?: Partial<ReviewRecommendations> | null;
 }
 
 /**
@@ -416,6 +425,9 @@ export interface FindingsLedger extends ReviewContent {
 
     // Assessments invalidated by an applying batch, oldest first.
     invalidated_assessments?: InvalidatedAssessment[];
+
+    // Recommendations withdrawn by an applying batch, citing the applied IDs.
+    invalidated_recommendations?: InvalidatedRecommendations[];
 }
 
 /**

@@ -7,8 +7,8 @@ proposal-only fields through ``critic.py --save``, which calls
 :func:`write_critic_verdict` to publish the proposal beside a digest-bound
 verdict marker. **The proposal is never rewritten afterwards.** The
 orchestrator then submits only verified IDs, refuted IDs with reasons, and an
-optional revised assessment through :func:`adjudicate`, which takes the output
-lock once and makes exactly one ledger write: verified and unchecked entries
+optional revised assessment and recommendations through :func:`adjudicate`,
+which takes the output lock once and makes exactly one ledger write: verified and unchecked entries
 are applied with provenance, refuted entries are recorded with their reasons,
 and every entry's ``outcome`` lands in the findings ledger.
 
@@ -25,7 +25,6 @@ import json
 import os
 import re
 import sys
-import unicodedata
 import uuid
 from typing import Mapping
 
@@ -115,10 +114,6 @@ FINDING_PATCH_FIELDS = (
 CHECK_PATCH_FIELDS = CHECK_TEXT_FIELDS
 ADD_REQUIRED_FIELDS = ("severity", "title", "file", "description",
                        "recommendation")
-# Free-text ledger fields are bounded here because the ledger is their one
-# authority; the offline metrics sanitizer applies the same ceiling.
-MAX_LEDGER_TEXT_LENGTH = 4096
-
 # Script-derived per-entry outcomes from the orchestrator's exact adjudication
 # request. The request names only positive verified/refuted claims; every
 # committed ID it omits is derived as OUTCOME_NOT_CHECKED. The outcome is
@@ -138,6 +133,11 @@ OUTCOMES = (OUTCOME_VERIFIED, OUTCOME_REFUTED, OUTCOME_NOT_CHECKED)
 # seat: on apply it BECOMES the ledger's assessment, with the invalidation
 # record left intact beside it.
 REVISED_ASSESSMENT_KEY = "revised_assessment"
+
+# Recommendations are ledger-level prose the critic cannot address directly;
+# an applying batch withdraws them and the request may supply replacements.
+REVISED_RECOMMENDATIONS_KEY = "revised_recommendations"
+INVALIDATED_RECOMMENDATIONS_KEY = "invalidated_recommendations"
 
 ADJUSTMENTS_FILENAME = artifact_path("", "critic_adjustments").name
 FINDINGS_FILENAME = artifact_path("", "review_findings_json").name
@@ -196,6 +196,7 @@ _REQUEST_KEYS = frozenset({
     "verified",
     "refuted",
     REVISED_ASSESSMENT_KEY,
+    REVISED_RECOMMENDATIONS_KEY,
 })
 _REFUTED_REQUEST_KEYS = frozenset({"adjustment_id", "rejection_reason"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -356,19 +357,34 @@ def _validate_proposal_entry(entry, label, *, require_adjustment_id):
     field_problems = _validate_fields(fields, allowed_fields, label)
     problems.extend(field_problems)
     if not field_problems:
-        if action in ("promote", "demote") and set(fields) != {"severity"}:
+        if action in ("promote", "demote") and "severity" not in fields:
             problems.append(
-                f"{label}: {action} requires exactly the severity field"
+                f"{label}: {action} requires the severity field"
             )
         elif action == "rescope" and set(fields) != {"file", "line"}:
             problems.append(
                 f"{label}: rescope requires exactly the file and line fields"
             )
+        elif action == "correct" and "severity" in fields:
+            problems.append(
+                f"{label}: correct may not change severity; use promote or "
+                "demote with the required severity field"
+            )
         elif action == "correct" and not fields:
             problems.append(
                 f"{label}: correct requires at least one field"
             )
-        elif action == "add":
+        if (
+            action in ("promote", "demote", "correct")
+            and "file" in fields
+            and "line" not in fields
+        ):
+            problems.append(
+                f"{label}: a file change requires the line field as well "
+                "(null for a file-scoped finding), so a moved finding never "
+                "keeps a stale line"
+            )
+        if action == "add":
             missing = [key for key in ADD_REQUIRED_FIELDS if key not in fields]
             if missing:
                 problems.append(
@@ -599,8 +615,14 @@ def write_critic_verdict(output_dir, verdict, proposal):
     return digest
 
 
-def read_committed_proposal(output_dir):
-    """Return (verdict, proposal) only when the marker binds the proposal."""
+def read_verdict_marker(output_dir):
+    """The validated verdict marker on its own, or a raise.
+
+    The marker is a fact even when the proposal it binds is unreadable —
+    the evidence projection reports such a verdict beside `adjustments:
+    None` — so the marker has one reader, which `read_committed_proposal`
+    calls before it goes on to bind the proposal.
+    """
     marker = _read_json_object(
         artifact_path(output_dir, "critic_verdict"),
         CRITIC_VERDICT_FILENAME,
@@ -608,6 +630,12 @@ def read_committed_proposal(output_dir):
     problems = _validate_verdict_marker(marker)
     if problems:
         raise AdjustmentValidationError(problems)
+    return marker
+
+
+def read_committed_proposal(output_dir):
+    """Return (verdict, proposal) only when the marker binds the proposal."""
+    marker = read_verdict_marker(output_dir)
     proposal = _read_json_object(
         artifact_path(output_dir, "critic_adjustments"), ADJUSTMENTS_FILENAME
     )
@@ -669,6 +697,7 @@ _LEDGER_EXTENSION_FIELDS = frozenset({
     "checks_removed_by_critic",
     REJECTED_ADJUSTMENTS_KEY,
     INVALIDATED_ASSESSMENTS_KEY,
+    INVALIDATED_RECOMMENDATIONS_KEY,
     "dropped_findings",
     "dropped_checks",
     "orchestrator_notes",
@@ -951,6 +980,34 @@ def _validate_invalidated_assessments(value, applied_ids):
             raise ValueError(f"{label}[{index}] cites unknown adjustments")
 
 
+def _validate_invalidated_recommendations(value, applied_ids):
+    label = f"{FINDINGS_FILENAME}: {INVALIDATED_RECOMMENDATIONS_KEY}"
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty list")
+    for index, record in enumerate(value):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {
+                "recommendations", "invalidated_by_critic_adjustment_ids",
+            }
+            or not isinstance(record["recommendations"], dict)
+            or not set(record["recommendations"]) <= set(RECOMMENDATION_PRIORITIES)
+            or any(
+                not isinstance(entries, list) or any(
+                    not isinstance(entry, str) or not entry.strip()
+                    for entry in entries
+                )
+                for entries in record["recommendations"].values()
+            )
+            or not any(record["recommendations"].values())
+        ):
+            raise ValueError(f"{label}[{index}] is malformed")
+        ids = record["invalidated_by_critic_adjustment_ids"]
+        _validate_unique_strings(ids, f"{label}[{index}] adjustment ids")
+        if not ids or not set(ids) <= applied_ids:
+            raise ValueError(f"{label}[{index}] cites unknown adjustments")
+
+
 def validate_findings_document(document):
     """Validate one exact canonical post-critic findings ledger.
 
@@ -1079,6 +1136,7 @@ def validate_findings_document(document):
         or "checks_removed_by_critic" in extensions
         or VERDICT_BEFORE_ADJUSTMENTS_KEY in extensions
         or INVALIDATED_ASSESSMENTS_KEY in extensions
+        or INVALIDATED_RECOMMENDATIONS_KEY in extensions
     )
     if critic_requires_applied and not applied_by_id:
         raise ValueError(
@@ -1097,6 +1155,10 @@ def validate_findings_document(document):
     if INVALIDATED_ASSESSMENTS_KEY in extensions:
         _validate_invalidated_assessments(
             extensions[INVALIDATED_ASSESSMENTS_KEY], set(applied_by_id)
+        )
+    if INVALIDATED_RECOMMENDATIONS_KEY in extensions:
+        _validate_invalidated_recommendations(
+            extensions[INVALIDATED_RECOMMENDATIONS_KEY], set(applied_by_id)
         )
     return document
 
@@ -1301,7 +1363,7 @@ def _records_by_adjustment_id(records, ledger_key):
 def _validate_adjudication_request(request, known_ids):
     """Validate the orchestrator's claims against the committed proposal."""
     if not isinstance(request, dict):
-        return ["adjudication request must be a JSON object"], {}, None
+        return ["adjudication request must be a JSON object"], {}, None, None
     problems = _extra_key_problems(
         request, _REQUEST_KEYS, "adjudication request"
     )
@@ -1318,6 +1380,35 @@ def _validate_adjudication_request(request, known_ids):
             "non-empty string"
         )
     normalized_assessment = revised.strip() if isinstance(revised, str) else None
+
+    revised_recs = request.get(REVISED_RECOMMENDATIONS_KEY)
+    normalized_recommendations = None
+    if revised_recs is not None:
+        if (
+            not isinstance(revised_recs, dict)
+            or not set(revised_recs) <= set(RECOMMENDATION_PRIORITIES)
+        ):
+            problems.append(
+                "adjudication request: 'revised_recommendations' must be null "
+                f"or an object with keys among {', '.join(RECOMMENDATION_PRIORITIES)}"
+            )
+        else:
+            normalized_recommendations = {
+                priority: [] for priority in RECOMMENDATION_PRIORITIES
+            }
+            for priority, entries in revised_recs.items():
+                if not isinstance(entries, list) or any(
+                    not isinstance(entry, str) or not entry.strip()
+                    for entry in entries
+                ):
+                    problems.append(
+                        f"adjudication request: 'revised_recommendations'.{priority} "
+                        "must be a list of non-empty strings"
+                    )
+                    continue
+                normalized_recommendations[priority] = [
+                    entry.strip() for entry in entries
+                ]
 
     verified = request.get("verified")
     decisions = {}
@@ -1374,7 +1465,7 @@ def _validate_adjudication_request(request, known_ids):
     for adjustment_id in decisions:
         if adjustment_id not in known_ids:
             problems.append(f"unknown adjustment id {adjustment_id!r}")
-    return problems, decisions, normalized_assessment
+    return problems, decisions, normalized_assessment, normalized_recommendations
 
 
 def _invalidate_assessment(review, recorded_ids):
@@ -1402,6 +1493,24 @@ def _invalidate_assessment(review, recorded_ids):
         "invalidated_by_critic_adjustment_ids": list(recorded_ids),
     })
     review[INVALIDATED_ASSESSMENTS_KEY] = invalidated
+
+
+def _invalidate_recommendations(review, recorded_ids):
+    """Withdraw recommendations only when an applying batch may contradict them."""
+    prior = review.get("recommendations")
+    review["recommendations"] = {
+        priority: [] for priority in RECOMMENDATION_PRIORITIES
+    }
+    if not isinstance(prior, dict) or not any(prior.values()):
+        return
+    invalidated = review.get(INVALIDATED_RECOMMENDATIONS_KEY)
+    if not isinstance(invalidated, list):
+        invalidated = []
+    invalidated.append({
+        "recommendations": copy.deepcopy(prior),
+        "invalidated_by_critic_adjustment_ids": list(recorded_ids),
+    })
+    review[INVALIDATED_RECOMMENDATIONS_KEY] = invalidated
 
 
 def _changed_fields(target, fields):
@@ -1435,9 +1544,10 @@ def _validate_pending_mutation(entry, target, label):
                 f"{label}: demote must decrease severity, not change "
                 f"{current!r} to {replacement!r}"
             )
+    elif action not in ("correct", "rescope"):
         return dict(fields)
-    if action not in ("correct", "rescope"):
-        return dict(fields)
+    # Companion fields on a promote/demote follow the correct/rescope path:
+    # a moved line keeps scope paired, and the change set is what differs.
     changed = _changed_fields(target, fields)
     candidate = copy.deepcopy(target)
     candidate.update(changed)
@@ -1450,7 +1560,9 @@ def _validate_pending_mutation(entry, target, label):
     return changed
 
 
-def _apply_proposal(proposal, decisions, revised_assessment, ledger):
+def _apply_proposal(
+    proposal, decisions, revised_assessment, revised_recommendations, ledger
+):
     """Apply one adjudicated proposal to one validated ledger, in memory.
 
     Refuted entries are recorded and skipped; every other entry is applied
@@ -1539,6 +1651,9 @@ def _apply_proposal(proposal, decisions, revised_assessment, ledger):
         _invalidate_assessment(ledger, batch_ids)
         if revised_assessment:
             ledger[ASSESSMENT_KEY] = revised_assessment
+        _invalidate_recommendations(ledger, batch_ids)
+        if revised_recommendations is not None:
+            ledger["recommendations"] = revised_recommendations
     if refuted_count:
         ledger[REJECTED_ADJUSTMENTS_KEY] = rejected_records
     return len(batch_ids), refuted_count
@@ -1572,8 +1687,8 @@ def adjudicate(output_dir, request):
         known_ids = {
             entry["adjustment_id"] for entry in proposal["adjustments"]
         }
-        problems, decisions, revised = _validate_adjudication_request(
-            request, known_ids
+        problems, decisions, revised, revised_recommendations = (
+            _validate_adjudication_request(request, known_ids)
         )
         if problems:
             raise AdjustmentValidationError(problems)
@@ -1586,7 +1701,7 @@ def adjudicate(output_dir, request):
         if known_ids & _recorded_ids(ledger):
             raise ValueError("critic proposal is already adjudicated")
         applied, rejected = _apply_proposal(
-            proposal, decisions, revised, ledger
+            proposal, decisions, revised, revised_recommendations, ledger
         )
         validate_findings_document(ledger)
         write_findings(output_dir, ledger)
@@ -1659,6 +1774,10 @@ def main():
     print(
         "REVISED ASSESSMENT: "
         f"{'present' if request.get(REVISED_ASSESSMENT_KEY) else 'absent'}"
+    )
+    print(
+        "REVISED RECOMMENDATIONS: "
+        f"{'present' if request.get(REVISED_RECOMMENDATIONS_KEY) is not None else 'absent'}"
     )
     print(f"APPLIED: {result['applied']} | REJECTED: {result['rejected']}")
     print(f"LEDGER VERDICT: {result['verdict']}")

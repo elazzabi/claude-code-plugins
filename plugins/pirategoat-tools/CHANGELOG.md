@@ -32,7 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
 - Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
+- An applying critic batch withdraws the reconciler's recommendations along with its assessment, and the adjudication request accepts `revised_recommendations` as the replacement set.
+- The decision critic's synthesis phase corrects every check whose result restates a factual claim its demotion or removal refuted, so the record no longer contradicts itself after adjudication.
+- A `correct` adjustment may no longer change severity; a promote or demote carries the severity change, and any action that moves a finding's file must give its line as well.
 - A confirmed orchestrator note may cite the Verify items its evidence settles, counted beside reviewer checks in the record's Verify table and the cohort metric, instead of leaving an item the reconciliator itself reproduced to the decision critic.
+- The critic prompt names the reviewed branch and commit, and the report-authoring briefing lists any paths the critic's prose names outside the diff.
 - The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
 - The reconciliator's ledger template states what the builder derives and accepts, and the step-8 dispatch prompt names the plugin scripts directory instead of the reviewer builder file, so the agent no longer reads plugin source to find its own contract.
 - Unresolved host signals merge by name, one banner line per host with every source recorded, and a cache entry whose identity cannot be read says so instead of reporting `version: "latest"`.
@@ -44,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The repository-read detector counts only reads the shell certainly ran, leaves incomplete transcript evidence unmeasured, and words a measured zero as no read observed.
 - Shared telemetry discloses host names, versions and commits but never paths or branch names, and a wp-env pin's `#ref` is recorded as a version only when it is version-shaped.
 - A host the repository itself provides — WooCommerce, in its own monorepo — is never resolved from the ecosystem cache, and the reviewer protocol says a mounted host proves only that the local site mounts it.
+- The published TypeScript review-output contract exposes the reconciliation evidence and recommendation-adjudication fields the Python ledger reader already accepted.
 - Reviewer `review.json` files stamp an aware UTC timestamp, like every other run artifact, instead of the naive local clock.
 
 ## [1.118.0] - 2026-09-04

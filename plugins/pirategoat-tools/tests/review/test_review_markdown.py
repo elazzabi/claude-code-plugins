@@ -837,6 +837,56 @@ class TestEvidenceTrailSections:
         }])
         assert "Settles:" not in render_review_body(doc)
 
+    def test_revised_recommendations_without_prior_advice_are_attributed(self, tmp_path):
+        ledger = canonical_findings_ledger(("high",))
+        ledger["recommendations"] = {
+            "immediate": [], "important": [], "suggestions": [],
+        }
+        critic_adjustments.write_findings(str(tmp_path), ledger)
+        proposal = critic_adjustments.prepare_proposal({
+            "schema": 2,
+            "adjustments": [{
+                "action": "demote", "target": {"kind": "finding", "id": "f1"},
+                "fields": {"severity": "low"}, "rationale": "Guarded upstream.",
+            }],
+        })
+        critic_adjustments.write_critic_verdict(str(tmp_path), "REVISE", proposal)
+        critic_adjustments.adjudicate(str(tmp_path), {
+            "schema": 2,
+            "verified": [proposal["adjustments"][0]["adjustment_id"]],
+            "refuted": [],
+            "revised_recommendations": {"suggestions": ["Add a nonce."]},
+        })
+        settled = critic_adjustments.read_findings_file(tmp_path / "review-findings.json").findings
+        assert "invalidated_recommendations" not in settled
+        text = render_review_body(settled)
+        assert "- Add a nonce." in text
+        assert "*Post-critic recommendations, installed after the critic adjustments applied.*" in text
+
+    @pytest.mark.parametrize("replacement", [None, "New advice."])
+    def test_withdrawn_recommendations_render_the_current_state(self, replacement):
+        doc = canonical_findings_ledger(("high",))
+        doc["recommendations"] = {
+            "immediate": [replacement] if replacement else [],
+            "important": [], "suggestions": [],
+        }
+        doc["invalidated_recommendations"] = [{
+            "recommendations": {"immediate": ["Old advice."]},
+            "invalidated_by_critic_adjustment_ids": ["a1"],
+        }]
+        doc["applied_critic_adjustments"] = [{"adjustment_id": "a1", "outcome": "verified"}]
+        doc["findings"][0]["critic_adjustment"] = {
+            "action": "demote", "rationale": "r", "prior": {"severity": "critical"},
+        }
+        text = render_review_body(doc)
+        assert "## Recommendations" in text
+        assert "Old advice." not in text
+        if replacement:
+            assert "- New advice." in text
+            assert "*Post-critic recommendations, installed after the critic adjustments applied.*" in text
+        else:
+            assert "No current recommendations: the reconciler's were invalidated by critic revision and not replaced; see the findings." in text
+
     def _ledger(self):
         doc = canonical_findings_ledger(("high",), checks=[{
             "id": "c1", "question": "Callers?", "method": "git grep foo",

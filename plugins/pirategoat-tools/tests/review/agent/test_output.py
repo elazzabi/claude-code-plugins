@@ -2782,6 +2782,7 @@ class TestTypeScriptContractLockstep:
             "dropped_findings?": "DroppedFinding[]",
             "dropped_checks?": "DroppedCheck[]",
             "orchestrator_notes?": "OrchestratorNote[]",
+            "invalidated_recommendations?": "InvalidatedRecommendations[]",
         }),
     ], ids=["finding-provenance", "check-provenance", "ledger-audit"])
     def test_reconciliation_extensions_remain_optional(self, interface, expected):

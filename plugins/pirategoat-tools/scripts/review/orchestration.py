@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -828,6 +829,78 @@ def _usage_summary(output_dir):
         # and a consumer cannot tell them apart without this.
         "window_closed": section["window"]["closed"],
     }
+
+
+# A repository path as prose names one: at least one directory segment,
+# including scoped segments, and a filename with one or more extensions.
+# The boundaries prevent starting inside a URL or another path-shaped token;
+# an optional :line suffix belongs to the prose reference, not the path.
+# This is a token match, not a judgement: it finds paths the critic wrote,
+# and the briefing says only that they are not in the diff.
+_PROSE_PATH_RE = re.compile(
+    r"(?<![\w@./:-])"
+    r"((?:@?[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]+)"
+    r"(?::\d+)?"
+    r"(?![\w@/-]|:|\.[\w-])"
+)
+_PROSE_URL_RE = re.compile(
+    r'''https?://[^\s<>{}\[\]()`"'—–]+'''
+)
+
+
+def _critic_prose_paths_outside_diff(output_dir, changed_files):
+    """Paths the critic's findings prose names that the diff does not hold.
+
+    Run 6e6a's critic wrote a coverage sentence about files the review
+    never reached and the report repeated it. The pipeline cannot judge
+    prose, but it can list every path the prose names that is not in the
+    diff, so the report author knows which statements are not facts of
+    this review. None when the critic wrote no findings file.
+    """
+    path = artifact_path(output_dir, "critic_findings")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    changed = set(changed_files)
+    url_spans = [match.span() for match in _PROSE_URL_RE.finditer(text)]
+    return sorted(
+        {
+            match.group(1)
+            for match in _PROSE_PATH_RE.finditer(text)
+            if _is_prose_path(match.group(1))
+            and not _names_changed_file(match.group(1), changed)
+            and not any(
+                match.start(1) < url_end and url_start < match.end(1)
+                for url_start, url_end in url_spans
+            )
+        }
+    )
+
+
+def _is_prose_path(path):
+    """A path-shaped token that can name a repository file.
+
+    A relative prefix (`./`, `../`) is not a repository location, and a
+    first segment with no letter (`3/4.5`) is a ratio, not a directory.
+    """
+    first = path.split("/", 1)[0]
+    return first not in (".", "..") and re.search(r"[A-Za-z]", first) is not None
+
+
+def _names_changed_file(path, changed):
+    """True when the prose path names a changed file, in full or abbreviated.
+
+    Critics abbreviate: `includes/class-wc-order.php` names
+    `plugins/woocommerce/includes/class-wc-order.php` in the diff. An
+    exact-membership test would report that file as outside the diff,
+    which is a false fact, so a prose path counts as in-diff when it is
+    a changed file or a trailing-segment suffix of one.
+    """
+    if path in changed:
+        return True
+    suffix = "/" + path
+    return any(item.endswith(suffix) for item in changed)
 
 
 def _reconciliation_verification(output_dir, read):

@@ -90,6 +90,22 @@ class TestStepTitles:
         assert expected_phase in result.stdout
 
 
+class TestSynthesisAuthorsSiblingCheckCorrections:
+    def test_step_4_sends_a_refuted_premise_to_the_checks(self):
+        """A false premise behind a demoted or removed finding is usually
+        restated in a check's result; the critic is told to grep the ledger's
+        checks for it and correct them in the same proposal."""
+        result = run_critic(
+            "--step-number", "4",
+            "--total-steps", "4",
+            "--report", "/tmp/test-report.md",
+            "--output-dir", "/tmp/test-critic",
+            "--thoughts", "state",
+        )
+        # Where to look is the instruction the ledger depends on.
+        assert "checks[].result" in result.stdout and "checks[].method" in result.stdout
+
+
 class TestNextStepDirective:
     """Each step except the last must direct to the next step."""
 

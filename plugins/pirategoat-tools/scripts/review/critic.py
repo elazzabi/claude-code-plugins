@@ -232,6 +232,12 @@ def get_step_guidance(
                 "BORDERLINE: When between STAND and REVISE, favor REVISE (cheaper to refine "
                 "than to ship an unfair review).",
                 "",
+                "A refuted factual claim rarely lives in one place. When a demotion or "
+                "removal rests on one, grep the ledger's `checks[].result` and "
+                "`checks[].method` for the same claim and correct those checks in the "
+                "same proposal; a check that restates a refuted claim leaves the record "
+                "contradicting itself, and nothing after you can touch a check.",
+                "",
                 "Author findings in `$TMPDIR/"
                 f"{artifact_path('', 'critic_findings').name}` "
                 "using the format specified in the agent definition; never "

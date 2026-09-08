@@ -308,6 +308,38 @@ class TestStep3GatherContext:
         """Return a rich review-context.json content."""
         return COMPLETE_CONTEXT
 
+    def test_step_3_lists_each_resolved_host_with_its_identity(self, mod):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = dict(self._make_context())
+        ctx["host_context"] = {
+            "resolved": [
+                {"name": "wordpress", "kind": "runtime-host", "path": "/x/cache/wordpress/latest", "source": "ecosystem-cache",
+                 "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+                 "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk", "declared_minimum": "7.0"}},
+                {"name": "vendor", "kind": "library-dep", "path": "/x/repo/vendor", "source": "vendor-inspection", "notes": {}},
+            ],
+            "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": "14.1"}],
+            "banner": {"degraded": True, "reason": "partial_unresolved", "message": "m"},
+            "diagnostics": {"self_provided": ["woocommerce"], "scan_roots": 4, "config_errors": ["hosts.roots: 'x' is not a directory"]},
+        }
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx)["situation"])
+        assert "**Host context:** ⚠ degraded (partial_unresolved) — 1 runtime-host(s), 1 dependency root(s) resolved." in text
+        assert "- `wordpress` via ecosystem-cache: `/x/cache/wordpress/latest` — version 7.2-alpha-63166-src, commit 474555a85c05, refreshed 2026-09-04; the repository declares it requires 7.0" in text
+        assert "- `jetpack` unresolved: declared_in_plugin_headers (declared 14.1)" in text
+        assert "- `woocommerce` is provided by this repository and was not resolved as an upstream host." in text
+        assert "⚠️  Host config: hosts.roots: 'x' is not a directory" in text
+
+    def test_step_3_says_unknown_for_a_host_without_identity(self, mod):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = dict(self._make_context())
+        ctx["host_context"] = {
+            "resolved": [{"name": "wordpress", "kind": "runtime-host", "path": "/x/wp", "source": "ecosystem-cache",
+                          "version": None, "version_freshness": None, "notes": {"commit": None}}],
+            "unresolved": [], "banner": None, "diagnostics": {},
+        }
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx)["situation"])
+        assert "- `wordpress` via ecosystem-cache: `/x/wp` — version unknown, commit unknown" in text
+
     def test_presents_git_range(self, mod, tmp_path):
         state = {"completed_steps": [1, 2]}
         ctx = self._make_context()
@@ -2417,6 +2449,19 @@ class TestStep9ReviewRecord:
 
 
 class TestStep10DecisionCritic:
+    def test_revise_template_offers_revised_recommendations(self, mod):
+        revise = self._revise_section(
+            mod.get_step_guidance(10, "pr", {"completed_steps": []}, {})
+        )
+        assert '"revised_recommendations": {"immediate": [], "important": [], "suggestions": []}' in revise
+        assert "REVISED RECOMMENDATIONS: present|absent" in revise
+        assert "invalidates the reconciler's prior assessment and recommendations" in revise
+
+    @staticmethod
+    def _prompt_block(guidance):
+        text = "\n".join(guidance["actions"])
+        return text.split("Use this dispatch prompt:", 1)[1].split("```", 2)[1]
+
     @staticmethod
     def _revise_section(guidance):
         """The REVISE block: from the `**REVISE**` line up to `**ESCALATE**`."""
@@ -2433,6 +2478,33 @@ class TestStep10DecisionCritic:
                 collected.append(line)
         assert collected, "no REVISE block found in the step-10 briefing"
         return "\n".join(collected)
+
+    def test_prompt_names_the_checkout(self, mod, tmp_path):
+        ctx = {"git": {"head_ref": "fix/topic", "head_sha": "a534276d" + "0" * 32}}
+        g = mod.get_step_guidance(10, "pr", {"completed_steps": [], "ledger_status": "ok"}, ctx, output_dir=str(tmp_path))
+        assert "Checkout: fix/topic @ a534276d0000" in self._prompt_block(g)
+
+    def test_prompt_says_when_the_checkout_is_unknown(self, mod, tmp_path):
+        g = mod.get_step_guidance(10, "pr", {"completed_steps": [], "ledger_status": "ok"}, {}, output_dir=str(tmp_path))
+        assert "Checkout: unknown — verify `git rev-parse --abbrev-ref HEAD` and `git rev-parse HEAD` yourself" in self._prompt_block(g)
+
+    @pytest.mark.parametrize("reads, status, expected", VERIFICATION_SENTENCES + [
+        (None, None, "not measured."),
+    ])
+    def test_prompt_carries_the_reconciliation_verification(self, mod, tmp_path, reads, status, expected):
+        """The critic reads the same sentence the record and step 9 carry,
+        and is told to verify every finding itself when nothing evidences
+        the reconciliator's reads — an UNVERIFIED measurement or none."""
+        state = {"completed_steps": [], "ledger_status": "ok"}
+        if status is not None:
+            state["reconciliation_verification"] = {
+                "verified_concern_count": 3, "repository_reads": reads, "status": status,
+            }
+        g = mod.get_step_guidance(10, "pr", state, {}, output_dir=str(tmp_path))
+        block = self._prompt_block(g)
+        assert f"Reconciliation verification: {expected}" in block
+        advised = "Verify every finding against the source yourself" in block
+        assert advised == (status in (None, "unverified"))
 
     def test_dispatches_decision_reviewer(self, mod, tmp_path):
         state = {"completed_steps": []}
@@ -3106,7 +3178,57 @@ class TestStep11ReportAuthoring:
 
     def test_no_coverage_mention_without_a_measurement(self, mod):
         text = "\n".join(self._guidance(mod)["actions"])
-        assert "Review coverage" not in text
+        assert "**⚠ Review coverage.**" not in text
+
+    def test_coverage_facts_are_confined_to_the_record(self, mod, tmp_path):
+        text = "\n".join(
+            self._guidance(mod, output_dir=str(tmp_path))["actions"]
+        )
+        assert "**Coverage and scope facts come only from the record.**" in text
+        assert "`## Review coverage`" in text and "run notes" in text
+        assert "must not enter the report" in text
+
+    def test_names_the_paths_the_critic_prose_reaches_outside_the_diff(
+        self, mod, tmp_path
+    ):
+        state = {"critic_prose_paths_outside_diff": [
+            "includes/class-wc-cart.php", "wp-includes/formatting.php",
+        ]}
+        text = "\n".join(
+            self._guidance(
+                mod, state=state, output_dir=str(tmp_path)
+            )["actions"]
+        )
+        assert "The critic's findings name 2 path(s) not in this diff: `includes/class-wc-cart.php`, `wp-includes/formatting.php`." in text
+        assert "not a fact about this review's reach" in text
+
+    def test_caps_the_named_paths(self, mod, tmp_path):
+        state = {
+            "critic_prose_paths_outside_diff": [
+                f"lib/f{i:02d}.py" for i in range(15)
+            ]
+        }
+        text = "\n".join(
+            self._guidance(
+                mod, state=state, output_dir=str(tmp_path)
+            )["actions"]
+        )
+        assert "`lib/f09.py` (+5 more)" in text
+        assert "lib/f10.py" not in text
+
+    def test_silent_when_nothing_was_measured_or_found(self, mod, tmp_path):
+        for state in (
+            {},
+            {"critic_prose_paths_outside_diff": None},
+            {"critic_prose_paths_outside_diff": []},
+        ):
+            text = "\n".join(
+                self._guidance(
+                    mod, state=state, output_dir=str(tmp_path)
+                )["actions"]
+            )
+            assert "The critic's findings name" not in text
+            assert "**Coverage and scope facts come only from the record.**" in text
 
     def test_bot_mode_says_the_report_is_the_posted_comment(self, mod):
         text = "\n".join(self._guidance(
