@@ -47,28 +47,22 @@ from typing import Optional
 # and rendering without a second hand-spelled list to remember.
 _ANALYSIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_ANALYSIS_DIR))
+from analysis.review_transcript import usage_summary_for_transcript  # noqa: E402
 from review.verdict_rules import VALID_SEVERITIES  # noqa: E402
 
 
 # -- Known reviewer agent types --
-KNOWN_REVIEWER_AGENTS = [
-    "security-reviewer",
-    "architecture-reviewer",
-    "patterns-reviewer",
-    "history-insights-reviewer",
-    "dead-code-reviewer",
-    "performance-reviewer",
-    "code-reviewer",
-    "js-tests-reviewer",
-    "php-tests-reviewer",
-    "e2e-tests-reviewer",
-    "wp-architecture-reviewer",
-    "a11y-reviewer",
-    "gemini-reviewer",
-    "codex-reviewer",
-    "go-tests-reviewer",
-    "mutation-reviewer",
-]
+def _registry_agent_names():
+    """Every agent the registry declares, plus the reconciliator, which is
+    dispatched outside the registry. One source: a hand-spelled subset here
+    once mapped `code-clarity-reviewer` onto `code-reviewer` by prefix."""
+    path = os.path.join(os.path.dirname(_ANALYSIS_DIR), "review", "agent_registry.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        agents = json.load(handle)["agents"]
+    return tuple(sorted(agents)) + ("review-reconciliator",)
+
+
+KNOWN_REVIEWER_AGENTS = _registry_agent_names()
 
 # Patterns to infer agent type from free-form prompts (older sessions
 # that don't use bootstrap.py).  More-specific patterns must
@@ -364,11 +358,28 @@ def identify_agent_type(filepath: str) -> Optional[str]:
     Identify the agent type from a subagent JSONL file.
 
     Strategy:
+    0. Read plugin-qualified agent metadata beside the transcript
     1. Look for bootstrap.py --agent <name> in first 15 lines
     2. Infer from user prompt keywords in first message
     3. Return None if unidentifiable (caller decides whether to include)
     """
     first_user_content = ""
+
+    # Strategy 0: the host writes the dispatched agent type beside the
+    # transcript (`agent-<id>.meta.json`, `agentType`); a plugin-qualified
+    # name such as `pirategoat-tools:security-reviewer` is the identity.
+    meta_path = re.sub(r"\.jsonl$", ".meta.json", filepath)
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            agent_type = json.load(handle).get("agentType")
+    except (OSError, ValueError, AttributeError):
+        agent_type = None
+    # The meta file is exact: match it against the registry as written and
+    # never through the fuzzy normaliser meant for LLM-typed names.
+    if isinstance(agent_type, str) and ":" in agent_type:
+        name = agent_type.rsplit(":", 1)[1]
+        if name in KNOWN_REVIEWER_AGENTS:
+            return name
 
     try:
         with open(filepath, "r") as f:
@@ -435,8 +446,9 @@ def extract_subagent_metrics(filepath: str) -> dict:
     """
     Extract operational metrics from a single subagent JSONL file.
 
-    Processes line-by-line with regex for efficiency — never loads full file
-    into memory.  Works for any Claude Code subagent, not just reviewers.
+    Streams non-token fields line-by-line with regex for efficiency. Token
+    accounting uses the canonical transcript parser so streamed responses are
+    counted once. Works for any Claude Code subagent, not just reviewers.
 
     Returns a dict with:
       - input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
@@ -475,16 +487,6 @@ def extract_subagent_metrics(filepath: str) -> dict:
         with open(filepath, "r") as f:
             for line_num, line in enumerate(f):
                 metrics["line_count"] = line_num + 1
-
-                # Token usage — regex on raw text for speed
-                for m in re.finditer(r'"input_tokens"\s*:\s*(\d+)', line):
-                    metrics["input_tokens"] += int(m.group(1))
-                for m in re.finditer(r'"output_tokens"\s*:\s*(\d+)', line):
-                    metrics["output_tokens"] += int(m.group(1))
-                for m in re.finditer(r'"cache_read_input_tokens"\s*:\s*(\d+)', line):
-                    metrics["cache_read_tokens"] += int(m.group(1))
-                for m in re.finditer(r'"cache_creation_input_tokens"\s*:\s*(\d+)', line):
-                    metrics["cache_creation_tokens"] += int(m.group(1))
 
                 # Model
                 model_match = re.search(r'"model"\s*:\s*"([^"]+)"', line)
@@ -532,6 +534,12 @@ def extract_subagent_metrics(filepath: str) -> dict:
     except (IOError, OSError) as e:
         print(f"Error reading {filepath}: {e}", file=sys.stderr)
         return metrics
+
+    summary = usage_summary_for_transcript(filepath)["usage"]
+    metrics["input_tokens"] = summary["input_tokens"]
+    metrics["output_tokens"] = summary["output_tokens"]
+    metrics["cache_read_tokens"] = summary["cache_read_input_tokens"]
+    metrics["cache_creation_tokens"] = summary["cache_creation_input_tokens"]
 
     # Compute duration from timestamps
     if first_timestamp and last_timestamp:

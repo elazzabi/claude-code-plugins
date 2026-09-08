@@ -50,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
 - The reconciliation context reads the pre-change snippet for every surviving file whose diff removed or replaced lines, not only for the files that shrank.
 - The repository-read detector counts only reads the shell certainly ran, leaves incomplete transcript evidence unmeasured, and words a measured zero as no read observed.
+- `session_metrics.py` and the session-analysis skill count tokens with the pipeline's transcript parser, which counts a streamed response once; the previous per-record sums over-counted by 45–84 %.
 - Shared telemetry discloses host names, versions and commits but never paths or branch names, and a wp-env pin's `#ref` is recorded as a version only when it is version-shaped.
 - A host the repository itself provides — WooCommerce, in its own monorepo — is never resolved from the ecosystem cache, and the reviewer protocol says a mounted host proves only that the local site mounts it.
 - The published TypeScript review-output contract exposes the reconciliation evidence and recommendation-adjudication fields the Python ledger reader already accepted.
