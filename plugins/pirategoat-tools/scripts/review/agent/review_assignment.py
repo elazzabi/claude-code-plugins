@@ -37,7 +37,7 @@ ASSIGNMENT_SCHEMA = 5
 def normalize_review_path(path: object, api_name: str) -> str:
     """Normalize one repository-relative path in the review-path grammar."""
     if not isinstance(path, str) or not path.strip():
-        raise ReviewAssignmentError(f"{api_name} requires a non-empty file path")
+        raise ReviewAssignmentError(f"{api_name} requires a non-empty file path (got {path!r})")
     raw = path.strip().replace("\\", "/")
     segments = raw.split("/")
     normalized = posixpath.normpath(raw)

@@ -1678,7 +1678,7 @@ class TestReviewOutputBuilderAPIExample:
 
     def test_output_uses_positive_claims_as_the_only_coverage_input(self, tmp_path):
         output = self._build(tmp_path)
-        assert 'builder.claim_files_reviewed("path/read1.py", "path/read2.py")' in output
+        assert "# No review-claimable files in this assignment: do not call claim_files_reviewed()." in output
         assert "builder.add_un" + "reviewed" not in output
         assert "builder.set_files_" + "reviewed" not in output
 
@@ -2659,3 +2659,40 @@ class TestEveryReviewerMandatesBootstrap:
         assert f"bootstrap.py --agent {agent}" in text, agent
 
 
+class TestBuilderSnippetSignatures:
+    """Run e582 and 6e6a: both Opus reviewers called add_observation with
+    one positional string, copied from the add_positive_observation
+    example, and failed their first save with
+    'missing 1 required positional argument: note'."""
+
+    def _build(self, tmp_path, review_claimable_count):
+        return build_output(
+            agent_name="security-reviewer",
+            plugin_root="/fake/root",
+            status="OK",
+            review_rules="rules",
+            domain_rules=None,
+            scope_output="=== FILES ===\n=== DIFFS ===",
+            exploration_scope=None,
+            output_dir=str(tmp_path),
+            pr_number="42",
+            reviewer_name="security",
+            review_claimable_count=review_claimable_count,
+            has_php=False,
+        )
+
+    def test_snippet_shows_add_observation_with_its_real_signature(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=0)
+        assert 'builder.add_observation(file="path/to/file.py",' in output
+        assert 'note="' in output
+        assert 'category="tradeoff")' in output
+
+    def test_claim_example_present_when_files_are_claimable(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=3)
+        assert 'builder.claim_files_reviewed("path/read1.py", "path/read2.py")' in output
+        assert "do not call claim_files_reviewed()" not in output
+
+    def test_claim_example_replaced_when_nothing_is_claimable(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=0)
+        assert 'builder.claim_files_reviewed("path/read1.py"' not in output
+        assert "# No review-claimable files in this assignment: do not call claim_files_reviewed()." in output

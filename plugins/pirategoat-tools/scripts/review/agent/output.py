@@ -875,6 +875,10 @@ class ReviewOutputBuilder:
         not three — and the positive-claim caller has a second error class to
         report in the same raise.
         """
+        # One list or tuple is the batch: the intent is unambiguous, and
+        # refusing it as a mis-typed path aborts the whole publication script.
+        if len(files) == 1 and isinstance(files[0], (list, tuple)):
+            files = tuple(files[0])
         if not files:
             raise ValueError(f"{api_name} requires at least one file path")
         normalized: List[str] = []
@@ -1163,6 +1167,21 @@ class ReviewOutputBuilder:
         )
         print(f"DRAFT SAVED: verdict {review['verdict']}")
         print(f"DRAFT TOTALS: {' | '.join(totals)}")
+        if not (
+            review["findings"] or review["checks"]
+            or review.get("observations") or review.get("positive_observations")
+        ):
+            # An approve that records nothing reads downstream as a clean
+            # approve. The one seen in the field followed a builder script
+            # that raised after its content was added.
+            print(
+                f"NOTE: verdict {review['verdict']} with nothing recorded — no "
+                "finding, check, observation or positive observation. If an "
+                "earlier builder script raised, re-run the whole script with "
+                "its content, not only the save; if the review truly found "
+                "nothing to record, say what you checked with record_check().",
+                file=sys.stderr,
+            )
         unclaimed = list(review["unclaimed_review_files"])
         if unclaimed:
             shown = ", ".join(unclaimed[:3])

@@ -1274,6 +1274,31 @@ class TestSaveDraft:
             assert "DRAFT TOTALS: findings 0" in out
             assert "DRAFT SAVED: verdict approve" in out
 
+    def test_an_approve_with_nothing_recorded_gets_a_stderr_note(self, capsys):
+        """php-tests-reviewer on wpcom PR #239373 published an approve with
+        no findings, checks, observations or positives after its first
+        builder script raised; downstream it read as a clean approve. The
+        receipt says so on stderr, where the reviewer sees it."""
+        with tempfile.TemporaryDirectory() as d:
+            b = ReviewOutputBuilder(pr_id="1", reviewer="security")
+            _write_required_assignment(d, "security")
+            _save_draft(b, d)
+            err = capsys.readouterr().err
+            assert "NOTE: verdict approve with nothing recorded" in err
+
+    @pytest.mark.parametrize("record", [
+        lambda b: b.record_check("q", "m", "r"),
+        lambda b: b.add_positive_observation("good"),
+        lambda b: b.add_observation("c.py", "FYI"),
+    ])
+    def test_any_recorded_evidence_silences_the_note(self, capsys, record):
+        with tempfile.TemporaryDirectory() as d:
+            b = ReviewOutputBuilder(pr_id="1", reviewer="security")
+            record(b)
+            _write_required_assignment(d, "security")
+            _save_draft(b, d)
+            assert "nothing recorded" not in capsys.readouterr().err
+
     _MUTATORS = {
         "add_finding": lambda b: b.add_finding(
             "low", "new", "src/a.py", "d", "r", line=2
@@ -1569,11 +1594,27 @@ class TestReviewedFileClaims:
         _write_assignment(tmp_path, "sec", claimable)
         return ReviewOutputBuilder.open(tmp_path, "1", "sec")
 
-    @pytest.mark.parametrize("bad", ["", "   ", None, 42, ["src/a.py"]])
+    @pytest.mark.parametrize("bad", ["", "   ", None, 42, [42], ("src/a.py", None)])
     def test_rejects_non_path_values(self, bad):
         b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
         with pytest.raises(ValueError):
             b.claim_files_reviewed(bad)
+
+    @pytest.mark.parametrize("batch", [["src/a.py", "src/b.py"], ("src/a.py", "src/b.py")])
+    def test_one_list_argument_is_the_batch(self, batch):
+        """Two of sixteen wpcom reviewers on PR #239373 called
+        `claim_files_reviewed([path])`; the varargs refusal aborted their
+        whole publication script and one of them retried with an empty
+        approve. The intent of a single list is unambiguous, so it is the
+        batch, not a wrong-typed path."""
+        b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
+        b.claim_files_reviewed(batch)
+        assert b.reviewed_file_claims == ["src/a.py", "src/b.py"]
+
+    def test_wrong_type_message_names_the_value(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
+        with pytest.raises(ValueError, match=r"non-empty file path \(got 42\)"):
+            b.claim_files_reviewed(42)
 
     @pytest.mark.parametrize(
         "bad",
