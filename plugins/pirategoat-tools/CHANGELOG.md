@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - PR and branch reviews fetch the base branch before computing the review range, and a PR review compares its local changed-file list with GitHub's — path for path when GitHub returns the whole list, by count otherwise.
 - The step-3 briefing states the base fetch outcome, any scope mismatch, merge commits that bring in work from other branches, and whether the PR targets a branch other than the default.
+- A reviewer check may name the Verify items it settles (`record_check(..., verifies=["V2"])`), rendered as `Settles:` and kept as a union when the reconciliator merges checks.
+- The findings ledger carries an evidence trail: every reconciled finding and check names the source findings and checks it merged, and every source the reconciliator read but did not carry forward is recorded with a reason and evidence.
+- The ledger save is rejected when a source is unaccounted for, a merged check drops a source's method text, or a severity matches no source without a note.
 - The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
 - Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
 ### Changed

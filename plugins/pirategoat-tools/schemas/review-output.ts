@@ -82,6 +82,7 @@ export interface ReviewCheck {
     method: string;
     result: string;
     source_reviewers: string[];
+    verifies?: string[]; // Verify item ids (V1, V2, …) from the change purpose this check settles; absent when it cites none.
     // Present only after critic_adjustments.py corrected this check, or on a
     // complete check moved into checks_removed_by_critic.
     critic_adjustment?: CheckCriticAdjustment;

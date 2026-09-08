@@ -375,6 +375,8 @@ def render_review_body(data: Dict) -> str:
                 + ", ".join(check['source_reviewers'])
                 + "\n"
             )
+            if check.get("verifies"):
+                md.append("  - Settles: " + ", ".join(check["verifies"]) + "\n")
         md.append("\n")
 
     removed_checks = data.get('checks_removed_by_critic')

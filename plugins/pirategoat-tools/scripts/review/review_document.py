@@ -101,6 +101,11 @@ REQUIRED_FINDING_FIELDS = frozenset({
 REQUIRED_CHECK_FIELDS = frozenset({
     "id", "question", "method", "result", "source_reviewers",
 })
+# Optional on a check: the Verify item ids from the change purpose the
+# check settles. Additive, absent when the reviewer cited nothing —
+# `REVIEW_OUTPUT_SCHEMA` stays 2 (an absent key reads as "cites nothing",
+# the released telemetry schema-3 precedent for additive keys).
+OPTIONAL_CHECK_FIELDS = frozenset({"verifies"})
 _REQUIRED_META_FIELDS = frozenset({
     "review_duration_ms",
     "confidence_score",
@@ -151,6 +156,24 @@ def _is_string_list(value):
     return isinstance(value, list) and all(
         isinstance(item, str) for item in value
     )
+
+
+# A Verify item id from the change purpose (`scripts/review/change_purpose.py`)
+# — the value a check's optional `verifies` list carries. Owned here, beside
+# the fN/cN grammar, because this module is the check's shape authority.
+VERIFY_ITEM_ID_RE = re.compile(r"V[1-9][0-9]*")
+# A citation of a resolved host in the protocol's form, `<host>@<version,
+# commit or unknown>:<upstream-relative path>:<line>`. A finding carries one
+# in `source_cited`; a check writes them into its method and result prose.
+# Only the host name is captured.
+HOST_CITATION_RE = re.compile(r"(?<![\w/.-])([A-Za-z0-9_./-]+)@[^\s:`]+:[^\s:`]+:\d+")
+
+
+def cited_hosts(text) -> set:
+    """The distinct host names `text` cites in the protocol's form."""
+    if not isinstance(text, str):
+        return set()
+    return {match.group(1) for match in HOST_CITATION_RE.finditer(text)}
 
 
 def _canonical_id_number(value, prefix, label):
@@ -250,10 +273,23 @@ def validate_finding_shape(finding, index):
         )
 
 
+def normalize_verifies(value, label):
+    """A check's `verifies` list: unique Verify item ids in first-seen order."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label}.verifies must be a non-empty list of Verify item ids such as 'V2'")
+    normalized = []
+    for item in value:
+        if not isinstance(item, str) or not VERIFY_ITEM_ID_RE.fullmatch(item.strip()):
+            raise ValueError(f"{label}.verifies must be a non-empty list of Verify item ids such as 'V2'")
+        if item.strip() not in normalized:
+            normalized.append(item.strip())
+    return normalized
+
+
 def validate_check_shape(check, index):
     """Validate one canonical check without inferring materiality."""
     required = REQUIRED_CHECK_FIELDS
-    allowed = required | {"critic_adjustment"}
+    allowed = required | {"critic_adjustment"} | OPTIONAL_CHECK_FIELDS
     if not isinstance(check, dict):
         raise ValueError(f"review check {index} must be an object")
     if not required <= set(check) or not set(check) <= allowed:
@@ -287,6 +323,12 @@ def validate_check_shape(check, index):
             f"review check {index}.source_reviewers must be unique "
             "non-empty strings"
         )
+    if "verifies" in check:
+        normalized = normalize_verifies(check["verifies"], f"review check {index}")
+        if normalized != check["verifies"]:
+            raise ValueError(
+                f"review check {index}.verifies must be unique Verify item ids such as 'V2'"
+            )
 
 
 def validate_ledger_ids(

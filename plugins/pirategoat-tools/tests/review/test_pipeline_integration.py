@@ -1210,6 +1210,76 @@ class TestStep3Orchestration:
         # Should succeed even without a git repo — subprocess failure is tolerated
         assert r.returncode == 0
 
+    def test_incremental_step_3_points_at_the_previous_runs_change_purpose(self, mod, tmp_path, monkeypatch):
+        previous = tmp_path / "previous-run"
+        (_artifact(previous, "change_purpose")).write_text("## Verify\nNone.\n")
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(json.dumps({
+            "last_reviewed_sha": "0000000", "review_count": 1,
+            "last_run_dir": str(previous),
+        }))
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert state["previous_change_purpose"] == str(_artifact(previous, "change_purpose"))
+
+    def test_incremental_step_3_without_a_previous_run_records_nothing(self, mod, tmp_path, monkeypatch):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(json.dumps({
+            "last_reviewed_sha": "0000000", "review_count": 1,
+        }))
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert "previous_change_purpose" not in state
+
+    @pytest.mark.parametrize("baseline", [
+        json.dumps({"last_reviewed_sha": "0000000", "last_run_dir": "<missing>"}),
+        json.dumps([]),
+        "not json",
+    ])
+    def test_incremental_step_3_tolerates_a_useless_baseline(self, mod, tmp_path, monkeypatch, baseline):
+        """A recorded run dir with no change purpose in it, a baseline that
+        is not an object, or one that is not JSON all mean "no pointer"."""
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(
+            baseline.replace("<missing>", str(tmp_path / "gone"))
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert "previous_change_purpose" not in state
+
     def test_step_3_allows_known_ecosystem_cache_refreshes_to_finish(
         self, mod, orchestration_mod, tmp_path, monkeypatch
     ):
@@ -1401,6 +1471,49 @@ class TestStep5Orchestration:
         _init_git_repo(repo)
         _add_commit(repo)
         return repo
+
+    def test_step_5_parses_the_change_purpose_into_state(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        out = tmp_path / "out"
+        run_pipeline("--step", "1", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        ctx = {
+            "git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                    "changed_files": ["a.py"], "commit_count": 1},
+            "pr_size": {"files": 1, "lines": 10, "category": "tiny"},
+        }
+        (out / "review-context.json").write_text(json.dumps(ctx))
+        purpose = _artifact(out, "change_purpose")
+        purpose.parent.mkdir(parents=True, exist_ok=True)
+        purpose.write_text(
+            "## Verify\nV1. claim — source: PR description\n"
+            "## Context\nC1. fact — source: inferred from the diff\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        run_pipeline("--step", "5", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        state = json.loads((_artifact(out, "pipeline_state")).read_text())
+        assert state["change_purpose_items"]["structured"] is True
+        assert [i["id"] for i in state["change_purpose_items"]["verify"]] == ["V1"]
+        assert state["change_purpose_items"]["problems"] == [
+            "C1 is inferred from the diff and may not be Context"
+        ]
+
+    def test_step_5_without_a_change_purpose_records_none(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        out = tmp_path / "out"
+        run_pipeline("--step", "1", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        ctx = {
+            "git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                    "changed_files": ["a.py"], "commit_count": 1},
+            "pr_size": {"files": 1, "lines": 10, "category": "tiny"},
+        }
+        (out / "review-context.json").write_text(json.dumps(ctx))
+        run_pipeline("--step", "5", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        state = json.loads((_artifact(out, "pipeline_state")).read_text())
+        assert state["change_purpose_items"] is None
 
     def test_step_5_stores_dispatch_plan_summary(self, tmp_path):
         """Step 5 should store dispatch plan summary in state."""
@@ -1860,6 +1973,17 @@ class TestStep7Orchestration:
         baseline_path = tmp_path / ".branch-review-baseline.json"
         result = grade_review_baseline(str(baseline_path))
         assert result.passed, f"Baseline grading failed: {result.failures}"
+
+    def test_step_7_records_the_run_directory_for_the_next_incremental_review(self, tmp_path):
+        (tmp_path / "run-config.json").write_text(json.dumps({"target_dir": str(tmp_path)}))
+        run_pipeline("--step", "1", "--mode", "incremental",
+                   "--output-dir", str(tmp_path), cwd=tmp_path)
+        ctx = {"git": {"git_range": "abc..HEAD", "base_ref": "main"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        run_pipeline("--step", "7", "--mode", "incremental",
+                   "--output-dir", str(tmp_path), cwd=tmp_path)
+        baseline = json.loads((tmp_path / ".branch-review-baseline.json").read_text())
+        assert baseline["last_run_dir"] == str(tmp_path)
 
     def test_step_7_requires_host_completion_before_draft_finalization(
         self, mod, tmp_path

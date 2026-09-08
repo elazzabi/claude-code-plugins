@@ -16,6 +16,7 @@ try:
     from .review_document import load_review_document
     from .reviewer_names import derive_reviewer_name
     from .reviewer_lifecycle import is_scope_summary_name, review_paths
+    from .change_purpose import parse_change_purpose
     from .run_paths import REVIEWERS_SUBDIR, artifact_path
     from .dependency_refresh import (
         EXIT_STATUSES,
@@ -46,6 +47,7 @@ except ImportError:
     from review.review_document import load_review_document
     from review.reviewer_names import derive_reviewer_name
     from review.reviewer_lifecycle import is_scope_summary_name, review_paths
+    from review.change_purpose import parse_change_purpose
     from review.run_paths import REVIEWERS_SUBDIR, artifact_path
     from review.dependency_refresh import (
         EXIT_STATUSES,
@@ -170,6 +172,19 @@ def read_artifact_file(output_dir: str, key: str) -> Optional[dict]:
     return _read_json_path(str(artifact_path(output_dir, key)))
 
 
+
+
+def read_change_purpose(output_dir: str) -> Optional[dict]:
+    """The parsed `change_purpose` artifact, or None when it cannot be read.
+
+    Parsed wherever it is needed rather than cached in state, because the
+    orchestrator may edit the file between steps.
+    """
+    try:
+        text = artifact_path(output_dir, "change_purpose").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return parse_change_purpose(text)
 
 
 def safe_dispatch_string(value: Any) -> Optional[str]:

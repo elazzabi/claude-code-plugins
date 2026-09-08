@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
+    from .change_purpose import CARRIED_OVER_MARKER, PROVENANCE
     from .pipeline_contract import (
         DEFAULT_AGENT_TIMEOUT,
         HOST_CODEX,
@@ -29,6 +30,7 @@ except ImportError:
     _scripts_parent = str(Path(__file__).resolve().parent.parent)
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
+    from review.change_purpose import CARRIED_OVER_MARKER, PROVENANCE
     from review.pipeline_contract import (
         DEFAULT_AGENT_TIMEOUT,
         HOST_CODEX,
@@ -601,16 +603,33 @@ def _format_linked_issues(context):
     return top_lines, bottom_lines
 
 
-def _change_purpose_handoff(output_dir):
+def _change_purpose_handoff(output_dir, mode="pr"):
     """Shared handoff instructions for writing the change-purpose artifact."""
-    return [
+    lines = [
         f"Write a brief change-purpose summary to `{_artifact_display(output_dir, 'change_purpose')}`.",
-        "Include: what the change does, why it's being made, and what to focus on during review.",
+        "Include: what the change does and why it's being made. What to verify goes under the "
+        "`## Verify` and `## Context` headings below, not in a separate focus list.",
         "Attribute intent to its source (\"the PR description states...\", \"the linked issue asks for...\") "
         "and keep author-asserted discriminators, assumptions, and likelihood claims recognizable as "
         "claims — downstream stages treat this summary as material to verify, not as established fact.",
-        "Verify the file exists before proceeding.",
+        "End the file with three headings the pipeline parses (`scripts/review/change_purpose.py`); "
+        "every reviewer's REVIEW FOCUS states the tiers and the record tables who verified what:",
+        "- `## Verify` — the claims the verdict rests on, a handful at most, one per line as "
+        "`V1. <claim> — where: <file:line> — settled by: <what evidence settles it> — source: <provenance>`. "
+        "Reviewers cite the id when they record the check that settles it. Write `None.` when nothing is load-bearing.",
+        "- `## Context` — facts reviewers take as given, one per line as `C1. <fact> — source: <provenance>`. "
+        "A fact whose source is `inferred from the diff` may never be Context: in branch mode your inferences are questions, not facts.",
+        "- `## Author's description (extracted)` — the substantive parts of the PR description (branch mode: the commit bodies) "
+        "quoted, template boilerplate dropped by your judgement. Bootstrap points every reviewer here instead of pasting the raw body.",
+        "Provenance vocabulary: " + ", ".join(f"`{p}`" for p in PROVENANCE) + ".",
     ]
+    if mode == "incremental":
+        lines.append(
+            "Incremental review: write every item fresh for this range; an item kept from the previous "
+            f"review's change purpose ends with `{CARRIED_OVER_MARKER}`."
+        )
+    lines.append("Verify the file exists before proceeding.")
+    return lines
 
 
 def _dependency_refresh_briefing(state, config, output_dir):
@@ -744,6 +763,15 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
         situation.append("")
 
     # Host context status — if present, show a one-line summary.
+    previous = state.get("previous_change_purpose")
+    if previous:
+        situation.append(
+            f"**Previous review's change purpose:** `{previous}` — read it before writing this one; "
+            f"carry an item forward only with `{CARRIED_OVER_MARKER}` at its end, and write everything "
+            "else fresh for this range."
+        )
+        situation.append("")
+
     host_context = context.get("host_context")
     if host_context:
         banner = host_context.get("banner") or {}
@@ -780,7 +808,7 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
     if not has_unfetched:
         if handoff_lines:
             handoff_lines.append("")
-        handoff_lines.extend(_change_purpose_handoff(output_dir))
+        handoff_lines.extend(_change_purpose_handoff(output_dir, mode))
     handoff = handoff_lines or None
 
     return {
@@ -817,7 +845,7 @@ def _step_4_fetch_issues(mode, state, context, config, output_dir):
     actions.append("")
     actions.append("After fetching, you'll have enough context to write the change purpose.")
 
-    handoff = _change_purpose_handoff(output_dir)
+    handoff = _change_purpose_handoff(output_dir, mode)
 
     return {
         "phase": "SETUP",
@@ -876,6 +904,30 @@ def _step_5_dispatch_plan(mode, state, context, config, output_dir):
     if plan_warnings:
         for w in plan_warnings:
             situation.append(f"⚠️  {w}")
+        situation.append("")
+
+    purpose = state.get("change_purpose_items")
+    if isinstance(purpose, dict):
+        problems = purpose.get("problems") or []
+        if purpose.get("structured"):
+            situation.append(
+                f"Change purpose: {len(purpose.get('verify') or [])} Verify item(s), "
+                f"{len(purpose.get('context') or [])} Context item(s)."
+            )
+        else:
+            situation.append(
+                "⚠️  Change purpose: no `## Verify` / `## Context` / "
+                "`## Author's description (extracted)` headings — reviewers get no "
+                "tiers and the record cannot table who verified what. Rewrite it in "
+                "the step-3 shape before dispatch."
+            )
+        for problem in problems:
+            situation.append(f"⚠️  Change purpose: {problem}.")
+        if problems:
+            situation.append(
+                f"Fix `{_artifact_display(od, 'change_purpose')}` before dispatch; every "
+                "reviewer's REVIEW FOCUS and the record's verify-item table are built from it."
+            )
         situation.append("")
 
     if plan_summary:
@@ -1602,8 +1654,16 @@ def _step_9_review_record(mode, state, context, config, output_dir):
     change_purpose = state.get("change_purpose")
     commit_messages = state.get("commit_messages", [])
 
+    # Rendered once, at step 8. The orchestrator wrote this text itself at
+    # step 4 and the reconciliation context carries it; run 3's
+    # transcript held four copies of an 8.1 KB purpose. Point, don't paste.
     if change_purpose:
-        situation.append(f"**Change purpose (author-stated — the reconciled findings, not this framing, are the source of truth):** {change_purpose}")
+        situation.append(
+            "**Change purpose:** written by you at step 4 to "
+            f"`{_artifact_display(od, 'change_purpose')}` and carried in the "
+            "reconciliation context — the reconciled findings, not that "
+            "framing, are the source of truth."
+        )
     elif commit_messages:
         situation.append(f"**Change purpose (from commits — the reconciled findings, not this framing, are the source of truth):** {'; '.join(commit_messages[:3])}")
 

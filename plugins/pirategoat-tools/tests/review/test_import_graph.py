@@ -29,8 +29,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 # ReviewOutputBuilder light as well.
 ALLOWED_LOCAL_IMPORTS = frozenset({("agent/output.py", "telemetry")})
 
-LEAF_MODULES = ("review_document.py", "verdict_rules.py", "run_paths.py")
-LEAF_ALLOWED = frozenset({"review_document", "verdict_rules", "run_paths"})
+LEAF_MODULES = ("review_document.py", "verdict_rules.py", "run_paths.py", "triage_sources.py", "change_purpose.py")
+LEAF_ALLOWED = frozenset({"review_document", "verdict_rules", "run_paths", "triage_sources", "change_purpose"})
 
 
 def _review_modules():

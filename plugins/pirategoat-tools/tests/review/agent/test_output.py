@@ -698,6 +698,30 @@ class TestRecordCheck:
         b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
         assert b.to_dict()["checks"] == []
 
+    def test_verifies_names_the_change_purpose_items_a_check_settles(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        b.record_check("q", "m", "r", verifies=["V2", " V1 ", "V2"])
+        assert b.to_dict()["checks"][0]["verifies"] == ["V2", "V1"]
+
+    def test_a_check_without_a_citation_carries_no_verifies_key(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        b.record_check("q", "m", "r")
+        assert "verifies" not in b.to_dict()["checks"][0]
+
+    @pytest.mark.parametrize("bad", [[], ["v2"], ["V0"], ["V2", 3], "V2", ["C1"]])
+    def test_verifies_must_be_verify_item_ids(self, bad):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        with pytest.raises(ValueError, match="verifies"):
+            b.record_check("q", "m", "r", verifies=bad)
+
+    def test_update_check_can_add_a_citation(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        cid = b.record_check("q", "m", "r")
+        b.update_check(cid, verifies=["V3"])
+        assert b.checks[0]["verifies"] == ["V3"]
+        b.update_check(cid, result="changed")
+        assert b.checks[0]["verifies"] == ["V3"]
+
     def test_empty_question_raises(self):
         b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
         with pytest.raises(ValueError):
@@ -2610,6 +2634,12 @@ class TestTypeScriptContractLockstep:
         match = re.search(r"^\s*schema:\s*([^;]+);", interface, re.MULTILINE)
         assert match is not None
         assert match.group(1).strip() == "number"
+
+    def test_review_check_declares_the_optional_citation(self):
+        interface = self._interface_body("ReviewCheck")
+        assert re.search(r"^\s*verifies\?:\s*string\[\];", interface, re.MULTILINE), (
+            "ReviewCheck.verifies?: string[] must be declared beside source_reviewers"
+        )
 
     def test_plugin_version_is_declared_nullable(self):
         """Absence is part of the contract, not an error state."""

@@ -350,6 +350,39 @@ class TestStep3GatherContext:
         text = "\n".join(g["handoff"])
         assert "change-purpose.md" in text
 
+    def test_handoff_requires_the_three_parsed_headings(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx, output_dir=str(tmp_path))["handoff"])
+        assert "## Verify" in text
+        assert "## Context" in text
+        assert "## Author's description (extracted)" in text
+        assert "V1. <claim> — where: <file:line> — settled by: <what evidence settles it> — source: <provenance>" in text
+        assert "inferred from the diff` may never be Context" in text
+        assert "Attribute intent to its source" in text
+        assert "(carried over)" not in text
+
+    def test_incremental_handoff_states_the_carried_over_rule(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "incremental", state, ctx, output_dir=str(tmp_path))["handoff"])
+        assert "ends with `(carried over)`" in text
+
+    def test_incremental_situation_points_at_the_previous_purpose(self, mod, tmp_path):
+        previous = str(tmp_path / "prev" / "pipeline" / "change-purpose.md")
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1],
+                 "previous_change_purpose": previous}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "incremental", state, ctx, output_dir=str(tmp_path))["situation"])
+        assert f"**Previous review's change purpose:** `{previous}`" in text
+        assert "carry an item forward only with `(carried over)`" in text
+
     def test_no_handoff_when_linear_issues(self, mod, tmp_path):
         """When Linear issues detected, step 3 defers handoff to step 4."""
         state = {"resolved_params": {"has_unfetched_issues": True}, "completed_steps": [1, 2]}
@@ -725,6 +758,12 @@ class TestStep4FetchLinearIssues:
         text = "\n".join(g["handoff"])
         assert "change-purpose.md" in text
 
+    def test_step_4_handoff_carries_the_same_headings(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": True}, "completed_steps": [1, 2, 3]}
+        g = mod.get_step_guidance(4, "pr", state, COMPLETE_CONTEXT, output_dir=str(tmp_path))
+        text = "\n".join(g["handoff"])
+        assert "## Verify" in text and "## Author's description (extracted)" in text
+
     def test_change_purpose_handoff_requires_attribution(self, mod, tmp_path):
         """Both change-purpose handoffs must instruct attributing intent to its
         source so downstream stages treat the summary as claims to verify."""
@@ -820,6 +859,36 @@ class TestStep5DispatchPlan:
         assert "dispatch-plan.json" in text
         assert "DISPATCH_OVERRIDE" in text
         assert "SKIPPED_OVERRIDE" in text
+
+    def test_change_purpose_problems_are_warnings_before_dispatch(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4],
+            "dispatch_plan_summary": {"dispatched": 3, "skipped": 1, "conditional": 1},
+            "dispatch_plan_agents": [],
+            "change_purpose_items": {
+                "verify": [{"id": "V1"}], "context": [], "structured": True,
+                "problems": ["V1 names no source", "C2 is inferred from the diff and may not be Context"],
+            },
+        }
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "⚠️  Change purpose: V1 names no source." in text
+        assert "⚠️  Change purpose: C2 is inferred from the diff and may not be Context." in text
+        assert "change-purpose.md" in text and "before dispatch" in text
+        assert "Change purpose: 1 Verify item(s), 0 Context item(s)." in text
+
+    def test_an_unstructured_change_purpose_is_one_warning(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4],
+            "dispatch_plan_summary": {}, "dispatch_plan_agents": [],
+            "change_purpose_items": {"verify": [], "context": [], "problems": [], "structured": False},
+        }
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "⚠️  Change purpose: no `## Verify`" in text
+
+    def test_no_parsed_purpose_renders_no_purpose_lines(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2, 3, 4], "dispatch_plan_summary": {}, "dispatch_plan_agents": []}
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "Change purpose:" not in text
 
 
 class TestStep5QuickMode:
@@ -2067,13 +2136,28 @@ class TestStep9ReviewRecord:
             g = mod.get_step_guidance(9, "pr", state, {})
             assert "source of truth" in "\n".join(g["situation"])
 
-    def test_reinjects_change_purpose(self, mod, tmp_path):
-        state = {
-            "completed_steps": [],
-            "change_purpose": "Adds retry logic to the payment gateway.",
-        }
+    def test_points_at_the_change_purpose_instead_of_repeating_it(self, mod, tmp_path):
+        """Run 3's orchestrator read its own 8.1 KB change purpose three
+        times after writing it; step 9 is the copy that carries nothing
+        the orchestrator does not already hold."""
+        purpose = "Adds retry logic to the payment gateway so a stale click cannot double-charge."
+        state = {"completed_steps": [], "change_purpose": purpose}
         g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
-        assert "retry logic" in "\n".join(g["situation"] + g["actions"]).lower()
+        text = "\n".join(g["situation"])
+        assert "**Change purpose:** written by you at step 4 to `" in text
+        assert "change-purpose.md" in text
+        assert "carried in the reconciliation context" in text
+        assert "the reconciled findings, not that framing, are the source of truth" in text
+        assert "retry logic" not in text
+
+    def test_commit_subject_fallback_stays_when_no_purpose_was_written(self, mod, tmp_path):
+        state = {"completed_steps": [], "change_purpose": None,
+                 "commit_messages": ["feat: add retry", "test: cover retry", "docs: note", "chore: x"]}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "**Change purpose (from commits" in text
+        assert "feat: add retry; test: cover retry; docs: note" in text
+        assert "chore: x" not in text
 
     def test_reinjects_commit_messages_when_no_change_purpose(
         self, mod, tmp_path

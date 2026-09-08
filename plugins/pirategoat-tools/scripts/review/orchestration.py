@@ -26,6 +26,7 @@ try:
         load_dependency_refresh_report,
         observe_tracked_worktree,
     )
+    from .change_purpose import checks_settling, ledger_citations, undeclared_citations
     from . import agents_status
     from . import atomic_io
     from .atomic_io import atomic_write_json, atomic_write_text
@@ -69,6 +70,7 @@ except ImportError:
         load_dependency_refresh_report,
         observe_tracked_worktree,
     )
+    from review.change_purpose import checks_settling, ledger_citations, undeclared_citations
     from review import agents_status
     from review import atomic_io
     from review.atomic_io import atomic_write_json, atomic_write_text
@@ -419,6 +421,50 @@ def _render_record_verdict_line(findings: dict) -> str:
         "from findings."
     )
 
+def _table_cell(text):
+    return " ".join(str(text or "").split()).replace("|", "\\|")
+
+
+def _render_verify_items(state, findings):
+    """The change purpose's Verify items and the ledger checks that settle
+    each, or "" when the purpose declared none. Derived from the ledger,
+    not the reconciliation context: this is what survived reconciliation
+    and adjudication, which is what the critic is stress-testing."""
+    items = (state.get("change_purpose_items") or {}).get("verify") or []
+    if not items:
+        return ""
+    labelled = ledger_citations(findings)
+    settled = checks_settling(items, labelled)
+    lines = [
+        "## Verify items", "",
+        "*The claims the orchestrator said the verdict rests on, and the "
+        "surviving checks and confirmed orchestrator notes that cite each. "
+        "An item nobody settled is a claim the review rests on unverified.*", "",
+        "| Item | Claim | Source | Settled by |",
+        "|---|---|---|---|",
+    ]
+    for item in items:
+        cites = settled.get(item["id"]) or []
+        settled_by = (
+            "; ".join(f"`{c['id']}` ({c['reviewer']})" for c in cites)
+            if cites else "no surviving check or confirmed note — unverified"
+        )
+        marker = " (carried over)" if item.get("carried_over") else ""
+        lines.append(
+            f"| {item['id']}{marker} | {_table_cell(item.get('text'))} | "
+            f"{_table_cell(item.get('source') or 'no source')} | {settled_by} |"
+        )
+    # A citation of an id the purpose never declared is the trace of a
+    # renumbering after dispatch or a wrong-tier id; dropping it would
+    # leave the real item reading as unverified with nothing to explain.
+    for citation in undeclared_citations(items, labelled):
+        lines.append("")
+        lines.append(
+            f"- `{citation['id']}` ({citation['reviewer']}) cites "
+            f"{citation['cites']}, which the change purpose does not declare."
+        )
+    return "\n".join(lines)
+
 
 def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
     """Assemble the review record from the ledger and the run's own facts.
@@ -474,6 +520,9 @@ def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
             "",
             _render_run_notes(state),
         ]
+        verify_items = _render_verify_items(state, findings)
+        if verify_items:
+            sections.extend(["", verify_items])
         file_review = _render_file_review_section(
             state.get("file_review")
         )
@@ -896,6 +945,21 @@ def _check_worktree_hygiene(output_dir):
     return result
 
 
+def _previous_change_purpose(config, output_dir):
+    """The previous run's change-purpose path from the incremental baseline,
+    or None when there is no baseline, no recorded run, or no such file."""
+    try:
+        with open(baseline_path(config, output_dir), encoding="utf-8") as handle:
+            baseline = json.load(handle)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    last_run_dir = baseline.get("last_run_dir") if isinstance(baseline, dict) else None
+    if not isinstance(last_run_dir, str) or not last_run_dir:
+        return None
+    path = artifact_path(last_run_dir, "change_purpose")
+    return str(path) if os.path.isfile(path) else None
+
+
 def _orchestrate_step_3(mode, config, state, context, output_dir):
     context_path = artifact_path(output_dir, "review_context")
 
@@ -936,6 +1000,11 @@ def _orchestrate_step_3(mode, config, state, context, output_dir):
     if config.get("refresh_dependencies"):
         state["dependency_refresh_precheck"] = _dependency_refresh_safety_state()
 
+    if mode == "incremental":
+        previous = _previous_change_purpose(config, output_dir)
+        if previous:
+            state["previous_change_purpose"] = previous
+
     # Baseline for the step-11 hygiene comparison. Taken at the end of
     # context gathering — the earliest point the run has a settled view of
     # the tree — so everything already there is recorded as the user's
@@ -948,6 +1017,7 @@ def _orchestrate_step_3(mode, config, state, context, output_dir):
 
 
 def _orchestrate_step_5(mode, config, state, context, output_dir):
+    state["change_purpose_items"] = manifest_sections.read_change_purpose(output_dir)
     if config.get("refresh_dependencies"):
         try:
             report = load_dependency_refresh_report(output_dir)
@@ -1089,6 +1159,9 @@ def _orchestrate_step_7(mode, config, state, context, output_dir):
         "review_count": review_count + 1,
         "base_ref": base_ref,
         "git_range_used": git_range or f"{head_sha}..HEAD",
+        # Where this run's artifacts live, so the next incremental review
+        # can point the orchestrator at this change purpose (plan C, item 12e).
+        "last_run_dir": output_dir,
     }
     with open(review_baseline_path, "w") as f:
         json.dump(baseline, f, indent=2)
@@ -1226,6 +1299,7 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
                 state["change_purpose"] = f.read().strip()
         except OSError:
             pass
+    state["change_purpose_items"] = manifest_sections.read_change_purpose(output_dir)
 
     git = context.get("git", {})
     git_range = state.get("resolved_params", {}).get("git_range") or git.get("git_range", "")

@@ -45,7 +45,9 @@ if _SCRIPTS_DIR not in sys.path:
 from review.reviewer_names import derive_reviewer_name
 from review.agent.review_assignment import ASSIGNMENT_SCHEMA, derive_reviewed_files
 from review.atomic_io import atomic_write_json
+from review.change_purpose import parse_change_purpose
 from review.run_paths import artifact_path
+from review.triage_sources import strip_html_comments
 from review.reviewer_lifecycle import (
     review_paths,
     scope_summary_path,
@@ -428,11 +430,15 @@ def budget_was_capped(changed_lines: int) -> bool:
     return (BUDGET_BASE + (changed_lines // BUDGET_LINES_PER_CALL)) > BUDGET_CAP
 
 
-def load_pr_intent(output_dir: str) -> Optional[str]:
+def load_pr_intent(output_dir: str, change_purpose: Optional[str] = None) -> Optional[str]:
     """Load PR intent from the run's review context.
 
-    Extracts PR title, body, and linked issues to build a concise intent
-    block that helps specialist reviewers calibrate severity.
+    Title, author, and linked issues, plus the author's description: a
+    pointer to the change purpose's "Author's description (extracted)"
+    section when the orchestrator wrote one (the sanctioned channel — it
+    dropped the template by judgement), otherwise the whole body with its
+    HTML comments removed, never cut to a length that would leave only
+    the template's checklist.
 
     Returns formatted intent string, or None if no context is available.
     """
@@ -460,11 +466,15 @@ def load_pr_intent(output_dir: str) -> Optional[str]:
     parts.append(f"PR Title: {title}")
     if author:
         parts.append(f"PR Author: {author}")
-    if body:
-        # Truncate long bodies to keep the intent section concise
-        if len(body) > 500:
-            body = body[:500] + "..."
-        parts.append(f"PR Description: {body}")
+    extracted = parse_change_purpose(change_purpose or "")["author_description"]
+    if extracted:
+        parts.append(
+            'PR Description: extracted by the orchestrator, by judgement, under '
+            'REVIEW FOCUS → "Author\'s description (extracted)"; the raw body is '
+            'not repeated here.'
+        )
+    elif body:
+        parts.append(f"PR Description: {strip_html_comments(body).strip()}")
     if linked_issues:
         parts.append(f"Linked Issues: {', '.join(linked_issues)}")
 
@@ -959,9 +969,26 @@ def build_output(
     # Review Focus — the main session's distilled understanding of the change.
     # Supplements PR INTENT (author's raw metadata) with richer synthesis:
     # what changed, why, and what to focus on during review.
+    parsed_purpose = parse_change_purpose(change_purpose) if change_purpose else None
     if change_purpose:
         lines.append("=== REVIEW FOCUS (pipeline synthesis) ===")
         lines.append("Pipeline-distilled summary of what changed, why, and review focus areas.")
+        if parsed_purpose["structured"]:
+            if parsed_purpose["verify"]:
+                verify_sentence = (
+                    "`## Verify` items are load-bearing claims: when one touches your "
+                    "domain, verify it against the code and record the result with "
+                    '`builder.record_check(..., verifies=["V2"])` naming the item. '
+                )
+            else:
+                verify_sentence = "`## Verify` declares nothing load-bearing for this change. "
+            lines.append(
+                "Two tiers. " + verify_sentence
+                + "`## Context` items are facts to take as given; do not re-derive them. "
+                "If the code contradicts one, record a finding as you would for any "
+                "defect and name the item — the purpose asserting otherwise is not a "
+                "reason to drop it."
+            )
         lines.append("")
         lines.append(change_purpose)
         lines.append("")
@@ -1172,11 +1199,15 @@ def build_output(
     lines.append(f'    description="What is wrong", recommendation="How to fix",')
     lines.append(f'    category="category-name", line=42, confidence=0.9)')
     lines.append(f'builder.add_positive_observation("Positive observation text")')
-    lines.append(f'builder.record_check(question="Does anything depend on the removed X?",')
-    lines.append(f'    method="exact searches run / files read",')
-    lines.append(f'    result="hit counts and file:line evidence")')
     lines.append(f'# builder.claim_files_reviewed("path/read1.py", "path/read2.py")  # uncomment with actual NOT DIFFED paths you read')
     lines.append(f'builder.set_confidence(0.85)')
+    lines.append('builder.record_check(question="Does anything depend on the removed X?",')
+    lines.append('    method="exact searches run / files read",')
+    if parsed_purpose and parsed_purpose["verify"]:
+        lines.append('    result="hit counts and file:line evidence",')
+        lines.append('    verifies=["V1"])  # the Verify item(s) this check settles; omit when none applies')
+    else:
+        lines.append('    result="hit counts and file:line evidence")')
     lines.append('builder.save_draft()')
     lines.append("PY")
     lines.append(f"")
@@ -1811,11 +1842,12 @@ def main():
             reviewer_name=reviewer_name,
         )
 
-    # Load PR intent from review context (if available)
-    pr_intent = load_pr_intent(output_dir)
-
     # Load the main session's distilled change-purpose synthesis, if available
     change_purpose = load_change_purpose(output_dir)
+
+    # Load PR intent from review context (if available); the extracted
+    # author description in the change purpose replaces the raw body.
+    pr_intent = load_pr_intent(output_dir, change_purpose)
 
     # Load additional instructions from caller configuration, if provided
     additional_instructions = load_additional_instructions(output_dir)
