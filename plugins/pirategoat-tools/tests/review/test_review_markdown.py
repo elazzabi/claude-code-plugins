@@ -25,7 +25,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from review import critic_adjustments
 from review import review_markdown as review_markdown_mod
 from review.agent.output import ReviewOutputBuilder, finalize_review
-from review.review_markdown import materialize_markdown, render_markdown
+from review.review_markdown import materialize_markdown, render_markdown, render_review_body
 from review.reviewer_lifecycle import review_paths, reviewer_markdown_path
 
 sys.path.insert(0, str(TESTS_DIR))
@@ -83,6 +83,18 @@ class TestRenderMarkdown:
         md = render_markdown(b.to_dict())
         assert "## Info Findings" in md
         assert "Anchored info finding" in md
+
+    def test_non_empty_source_cited_renders_as_upstream_evidence(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="ecosystem")
+        b.add_finding(
+            "high", "Upstream mismatch", "src/plugin.php", "desc", "rec",
+            line=3,
+            source_cited="wordpress@unknown:src/wp-includes/post.php:1234",
+        )
+
+        md = render_markdown(b.to_dict())
+
+        assert "**Upstream evidence:** `wordpress@unknown:src/wp-includes/post.php:1234`" in md
 
     def test_round_trips_through_serialized_json(self):
         """Rendering from the FILE representation — what materialization
@@ -711,7 +723,7 @@ class TestRemovedByCriticSection:
                 "rationale": "The guard on line 9 already prevents it.",
             },
         }]))
-        assert "## Removed by the Decision Critic" in rendered
+        assert "## Findings Removed by the Decision Critic" in rendered
         assert "Phantom leak" in rendered
         assert "The guard on line 9 already prevents it." in rendered
         assert "`b.py`" in rendered
@@ -803,3 +815,112 @@ class TestRendererFaithfulness:
         data = self._base()
         data["recommendations"] = {"immediate": [], "urgent": []}
         assert "## Recommendations" not in render_markdown(data)
+
+
+class TestEvidenceTrailSections:
+    def test_a_check_renders_the_items_it_settles(self):
+        doc = canonical_findings_ledger(("high",), checks=[{
+            "id": "c1",
+            "question": "Does the cache read see unpublished coupons?",
+            "method": "read wc_get_coupon_id_by_code and the data store",
+            "result": "publish-only, verified",
+            "source_reviewers": ["security-reviewer"],
+            "verifies": ["V1", "V3"],
+        }])
+        text = render_review_body(doc)
+        assert "  - Source reviewers: security-reviewer\n  - Settles: V1, V3\n" in text
+
+    def test_a_check_without_citations_renders_no_settles_line(self):
+        doc = canonical_findings_ledger(("high",), checks=[{
+            "id": "c1", "question": "q", "method": "m", "result": "r",
+            "source_reviewers": ["security-reviewer"],
+        }])
+        assert "Settles:" not in render_review_body(doc)
+
+    def _ledger(self):
+        doc = canonical_findings_ledger(("high",), checks=[{
+            "id": "c1", "question": "Callers?", "method": "git grep foo",
+            "result": "0", "source_reviewers": ["security"],
+            "sources": [{"reviewer": "security-review", "id": "c1"}],
+        }])
+        doc["findings"][0]["sources"] = [
+            {"reviewer": "security-review", "id": "f2", "severity": "high"},
+            {"reviewer": "code-review", "id": "f1", "severity": "medium"},
+        ]
+        doc["findings"][0]["severity_note"] = "Reachable from GET."
+        doc["dropped_findings"] = [
+            {"reviewer": "code-review", "id": "f3", "reason": "false_positive",
+             "evidence": "src/a.php:9 escapes it"},
+            {"reviewer": "code-review", "id": "f4", "reason": "prefiltered",
+             "scope_status": "OUT_OF_SCOPE:file_not_in_diff"},
+        ]
+        doc["dropped_checks"] = [
+            {"reviewer": "code-review", "id": "c2", "reason": "void",
+             "evidence": "searched the class name, not the hook name"},
+        ]
+        doc["orchestrator_notes"] = [
+            {"id": "n1", "note": "security f2 and code f1 are one concern",
+             "outcome": "confirmed", "evidence": "same sink at src/a.php:4"},
+        ]
+        return doc
+
+    def test_sources_render_under_the_finding(self):
+        text = render_markdown(self._ledger())
+        assert "**Sources:** security-review f2 (high), code-review f1 (medium)" in text
+        assert "**Severity note:** Reachable from GET." in text
+
+    def test_drops_render_with_reason_and_evidence(self):
+        text = render_markdown(self._ledger())
+        section = text.split("## Dropped by the Reconciliator", 1)[1]
+        section = section.split("## Orchestrator Notes", 1)[0]
+        assert "- Finding code-review f3 — false_positive: src/a.php:9 escapes it" in section
+        assert "- Finding code-review f4 — prefiltered: OUT_OF_SCOPE:file_not_in_diff" in section
+        assert "- Check code-review c2 — void: searched the class name, not the hook name" in section
+
+    def test_notes_render_with_outcome_and_evidence(self):
+        text = render_markdown(self._ledger())
+        section = text.split("## Orchestrator Notes", 1)[1]
+        assert "- **n1** — security f2 and code f1 are one concern" in section
+        assert "  - Outcome: confirmed" in section
+        assert "  - Evidence: same sink at src/a.php:4" in section
+
+    def test_a_note_that_settles_verify_items_says_so(self):
+        doc = self._ledger()
+        doc["orchestrator_notes"][0]["verifies"] = ["V2", "V3"]
+        text = render_markdown(doc)
+        section = text.split("## Orchestrator Notes", 1)[1]
+        assert "  - Settles: V2, V3" in section
+
+    def test_sections_are_absent_without_the_fields(self):
+        text = render_markdown(canonical_findings_ledger(("high",)))
+        assert "Dropped by the Reconciliator" not in text
+        assert "Orchestrator Notes" not in text
+        assert "**Sources:**" not in text
+
+    def test_sections_sit_between_the_critic_removal_sections(self):
+        doc = self._ledger()
+        doc["checks_removed_by_critic"] = [{
+            "id": "c7", "question": "q", "method": "m", "result": "r",
+            "source_reviewers": ["x"],
+            "critic_adjustment": {"action": "remove", "rationale": "void"},
+        }]
+        doc["findings_removed_by_critic"] = [{
+            "id": "f9", "category": "c", "severity": "low", "title": "t",
+            "description": "d", "file": "f", "line": 1, "recommendation": "r",
+            "confidence": 0.5,
+            "critic_adjustment": {"action": "remove", "rationale": "false"},
+        }]
+        doc["applied_critic_adjustments"] = [
+            {"adjustment_id": "a1", "outcome": "verified"},
+        ]
+        doc["meta"]["next_finding_number"] = 10
+        doc["meta"]["next_check_number"] = 8
+        text = render_markdown(doc)
+        order = [
+            "## Checks Removed by the Decision Critic",
+            "## Dropped by the Reconciliator",
+            "## Orchestrator Notes",
+            "## Findings Removed by the Decision Critic",
+        ]
+        positions = [text.index(marker) for marker in order]
+        assert positions == sorted(positions)

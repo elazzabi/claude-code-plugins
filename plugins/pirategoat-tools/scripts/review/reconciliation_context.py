@@ -45,7 +45,7 @@ except ImportError:
     from review.verdict_rules import VALID_SEVERITIES
     from review.review_document import coerce_text, load_review_document
 
-RECONCILIATION_CONTEXT_SCHEMA = 3
+RECONCILIATION_CONTEXT_SCHEMA = 4
 
 _SEVERITY_FLOOR_MARKER_RE = re.compile(
     r"(?im)Severity-floor:[ \t]*"
@@ -353,7 +353,7 @@ def read_source_snippets(
     When a file doesn't exist in the working tree (deleted by this patch),
     falls back to reading from ``base_ref`` via ``git show``.
 
-    For files that still exist but have deletion hunks (listed in
+    For files that still exist but lost or replaced lines (listed in
     *old_side_files*), also reads the pre-change version from ``base_ref``
     and includes it as a separate ``"[pre-change] file"`` entry.  This
     ensures the reconciliator has evidence for findings about deleted code
@@ -368,10 +368,10 @@ def read_source_snippets(
             is launched from a subdirectory).
         base_ref: Git ref for old-side content (e.g., merge base). Used
             to recover snippets for files deleted by the patch.
-        old_side_files: Set of repo-relative file paths that have deletion
-            hunks (old_count > new_count). When ``base_ref`` is also
-            available, pre-change content is read and included alongside
-            the working-tree snippet.
+        old_side_files: Set of repo-relative file paths with at least one
+            hunk that removes or replaces lines (old_count > 0). When
+            ``base_ref`` is also available, pre-change content is read and
+            included alongside the working-tree snippet.
 
     Returns:
         Dict mapping original file paths to snippet text with line numbers.
@@ -449,8 +449,9 @@ def read_source_snippets(
             prefix = "[deleted] " if deleted else ""
             snippets[file_path] = prefix + "\n".join(snippet_parts)
 
-        # For surviving files with deletion hunks, also read pre-change
-        # content so the reconciliator has evidence for deleted-code findings.
+        # For surviving files that lost or replaced lines, also read
+        # pre-change content so the reconciliator has evidence for findings
+        # about the code that is gone.
         if not deleted and base_ref and _file_in_old_side(file_path, _old_side):
             old_lines = _read_git_content(file_path, base_ref, git_root)
             if old_lines:
@@ -529,8 +530,11 @@ def _parse_diff_hunks(
         - Dict mapping repo-relative file paths to lists of ``(start, end)``
           tuples.  Each hunk may contribute up to two entries (old-side
           and new-side), so the list may contain overlapping ranges.
-        - Set of file paths that have at least one deletion hunk
-          (old_count > new_count), used to trigger old-side snippet reads.
+        - Set of file paths with at least one hunk whose old side is not
+          empty (old_count > 0), used to trigger old-side snippet reads.
+          With ``--unified=0`` every old-side line of a hunk was removed
+          or replaced, so a one-for-one or addition-heavy replacement
+          counts as much as a net deletion.
         Returns ``({}, set())`` if git diff fails or times out.
     """
     try:
@@ -564,7 +568,7 @@ def _parse_diff_hunks(
                 new_start = int(m.group(3))
                 new_count = int(m.group(4)) if m.group(4) else 1
 
-                if old_count > new_count:
+                if old_count > 0:
                     files_with_deletions.add(current_file)
 
                 if old_count == 0 and new_count == 0:
@@ -854,6 +858,20 @@ def main() -> int:
             reviews_by_agent, scope_annotations
         )
 
+        # The change purpose's tiers, with the reviewer checks that cite
+        # each Verify item — the reconciliator's pre-merge view. The record
+        # re-derives the post-merge view from the ledger.
+        parsed_purpose = parse_change_purpose(change_purpose)
+        settled = checks_settling(parsed_purpose["verify"], (
+            (stem, check)
+            for stem, review in reviews_by_agent.items()
+            for check in (review.get("checks") or [])
+            if isinstance(check, dict)
+        ))
+        verify_items = [
+            dict(item, checks=settled[item["id"]]) for item in parsed_purpose["verify"]
+        ]
+
         # Build the context object
         context: Dict[str, Any] = {
             "schema": RECONCILIATION_CONTEXT_SCHEMA,
@@ -862,6 +880,12 @@ def main() -> int:
             "scope_annotations": scope_annotations,
             "changed_files": changed_files,
             "change_purpose": change_purpose,
+            # Schema stays 4: introduced in this unreleased window, and an
+            # absent key reads as "no tiers declared" (AGENTS.md, Artifact
+            # Schemas, the in-window carve-out).
+            "verify_items": verify_items,
+            "context_items": parsed_purpose["context"],
+            "change_purpose_problems": parsed_purpose["problems"],
             "pr_id": pr_id,
             # The degraded-host banner from the local snapshot. Reviewers'
             # claims were scoped by its presence, and findings_save.py
@@ -876,6 +900,11 @@ def main() -> int:
             # carrying `prefiltered`; this count is what makes that
             # obedience checkable.
             "prefiltered_out_of_scope": prefiltered,
+            # Claims the orchestrator registers between context build and
+            # reconciliator dispatch (reconciliation_notes.py). Always a
+            # list: the save gate reads it, and an absent key would be a
+            # third state between "none registered" and "unknown".
+            "orchestrator_notes": [],
         }
         if host_context is not None:
             context["host_context"] = host_context

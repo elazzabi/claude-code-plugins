@@ -46,6 +46,37 @@ export type ConfidenceScore = number; // 0.0 - 1.0
 export type FindingId = `f${number}`;
 export type CheckId = `c${number}`;
 
+/** Source identity in reconciliation evidence; reviewer is a review stem. */
+export interface ReviewSource {
+    reviewer: string;
+    id: FindingId | CheckId;
+}
+
+export interface FindingSource extends ReviewSource {
+    severity?: Severity; // Stamped from the source review by findings_save.py.
+}
+
+export interface DroppedFindingSource extends ReviewSource {
+    scope_status?: string; // Stamped scope evidence, when available.
+}
+
+export type DroppedFinding = DroppedFindingSource & (
+    | { reason: 'false_positive' | 'out_of_scope'; evidence: string }
+    | { reason: 'prefiltered'; evidence?: string }
+);
+
+export interface DroppedCheck extends ReviewSource {
+    reason: 'void';
+    evidence: string;
+}
+
+export interface OrchestratorNote {
+    id: `n${number}`; // Runtime requires a positive integer without leading zero.
+    outcome: 'confirmed' | 'refuted' | 'not_checked';
+    evidence: string;
+    note?: string; // Original claim stamped from reconciliation context.
+}
+
 /**
  * Verdict-bearing finding common to all review types.
  */
@@ -64,8 +95,10 @@ export interface Finding {
     confidence: ConfidenceScore;
     references?: string[]; // Links to docs, patterns, skills
     behavior_evidence?: 'cited' | 'inferred';
-    source_cited?: string; // "<file>:<line>" pointer to upstream evidence
+    source_cited?: string; // "<host>@<version, commit, or unknown>:<upstream-relative path>:<line>" for resolved hosts, otherwise upstream-relative "<file>:<line>"
     channel?: 'blocking' | 'advisory'; // Exact accepted input vocabulary. 'blocking' is the default and is canonicalized to absence; entitled 'advisory' findings remain listed but are excluded from the verdict.
+    sources?: FindingSource[]; // Non-empty source trail when reconciliation recorded it.
+    severity_note?: string; // Explains a reconciled severity that matches no source.
     // Present when a decision-critic batch touched this finding: promoted,
     // demoted, rescoped, corrected, or added it, or (on entries moved into
     // `findings_removed_by_critic` below) removed it. Absent on every finding no
@@ -83,6 +116,7 @@ export interface ReviewCheck {
     result: string;
     source_reviewers: string[];
     verifies?: string[]; // Verify item ids (V1, V2, …) from the change purpose this check settles; absent when it cites none.
+    sources?: ReviewSource[]; // Non-empty source trail; checks never stamp severity.
     // Present only after critic_adjustments.py corrected this check, or on a
     // complete check moved into checks_removed_by_critic.
     critic_adjustment?: CheckCriticAdjustment;
@@ -113,7 +147,7 @@ export type FindingAddTarget = { kind: 'finding'; id?: never };
  */
 export type CriticProposalAdjustment =
     | { action: 'add'; target: FindingAddTarget; fields: FindingAddFields; rationale: string }
-    | { action: 'promote' | 'demote'; target: FindingTarget; fields: Pick<Finding, 'severity'>; rationale: string }
+    | { action: 'promote' | 'demote'; target: FindingTarget; fields: FindingSeverityChangeFields; rationale: string }
     | { action: 'rescope'; target: FindingTarget; fields: Pick<Finding, 'file' | 'line'>; rationale: string }
     | { action: 'correct'; target: FindingTarget; fields: FindingCorrectionFields; rationale: string }
     | { action: 'correct'; target: CheckTarget; fields: CheckCorrectionFields; rationale: string }
@@ -143,7 +177,7 @@ export type CriticAdjustmentsDocument = {
  */
 export type FindingCriticAdjustment =
     | { action: 'add' | 'remove'; rationale: string; prior?: never }
-    | { action: 'promote' | 'demote'; rationale: string; prior: Pick<Finding, 'severity'> }
+    | { action: 'promote' | 'demote'; rationale: string; prior: FindingSeverityChangeFields }
     | { action: 'rescope'; rationale: string; prior: AtLeastOne<Pick<Finding, 'file' | 'line'>> }
     | { action: 'correct'; rationale: string; prior: FindingCorrectionFields };
 
@@ -328,6 +362,11 @@ export interface FindingsLedger extends ReviewContent {
     // the producer gate. Present only when upstream host discovery was
     // degraded. Rendered as a blockquote directly under the H1.
     host_context_banner?: HostContextBanner;
+
+    // Reconciliation evidence remains optional for ledgers predating its introduction.
+    dropped_findings?: DroppedFinding[];
+    dropped_checks?: DroppedCheck[];
+    orchestrator_notes?: OrchestratorNote[];
 
     // Decision-critic provenance — present only once critic_adjustments.py
     // has applied a batch.

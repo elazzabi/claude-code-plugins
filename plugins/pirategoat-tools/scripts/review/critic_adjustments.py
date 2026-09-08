@@ -33,18 +33,28 @@ try:
     from . import atomic_io
     from .review_document import (
         CHECK_TEXT_FIELDS,
+        normalize_verifies,
+        OPTIONAL_CHECK_FIELDS,
+        RECOMMENDATION_PRIORITIES,
         REQUIRED_CHECK_FIELDS,
         REQUIRED_FINDING_FIELDS,
+        normalize_bounded_text,
         validate_finding_content_field,
         validate_ledger_ids,
         validate_review_content,
     )
     from .dispatch_status import AGENT_NAME_RE
     from .findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
         LEDGER_SCHEMA,
+        NOTE_ID_RE,
+        NOTE_OUTCOMES,
         RECONCILIATION_AGENT_LIST_FIELDS,
         RECONCILIATION_COUNT_FIELDS,
         RECONCILIATION_FIELDS,
+        SOURCE_ID_RE,
+        normalized_sources,
     )
     from .verdict_rules import (
         LEDGER_VERDICTS,
@@ -59,18 +69,28 @@ except ImportError:
     from review import atomic_io
     from review.review_document import (
         CHECK_TEXT_FIELDS,
+        normalize_verifies,
+        OPTIONAL_CHECK_FIELDS,
+        RECOMMENDATION_PRIORITIES,
         REQUIRED_CHECK_FIELDS,
         REQUIRED_FINDING_FIELDS,
+        normalize_bounded_text,
         validate_finding_content_field,
         validate_ledger_ids,
         validate_review_content,
     )
     from review.dispatch_status import AGENT_NAME_RE
     from review.findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
         LEDGER_SCHEMA,
+        NOTE_ID_RE,
+        NOTE_OUTCOMES,
         RECONCILIATION_AGENT_LIST_FIELDS,
         RECONCILIATION_COUNT_FIELDS,
         RECONCILIATION_FIELDS,
+        SOURCE_ID_RE,
+        normalized_sources,
     )
     from review.verdict_rules import (
         LEDGER_VERDICTS,
@@ -649,13 +669,20 @@ _LEDGER_EXTENSION_FIELDS = frozenset({
     "checks_removed_by_critic",
     REJECTED_ADJUSTMENTS_KEY,
     INVALIDATED_ASSESSMENTS_KEY,
+    "dropped_findings",
+    "dropped_checks",
+    "orchestrator_notes",
 })
 _BASE_FINDING_FIELDS = REQUIRED_FINDING_FIELDS
 _OPTIONAL_FINDING_FIELDS = frozenset({
     "severity_floor", "scope", "code_snippet", "references",
     "behavior_evidence", "source_cited", "channel", "critic_adjustment",
+    "sources", "severity_note",
 })
-_CHECK_FIELDS = REQUIRED_CHECK_FIELDS | {"critic_adjustment"}
+_CHECK_FIELDS = (
+    REQUIRED_CHECK_FIELDS | OPTIONAL_CHECK_FIELDS
+    | {"critic_adjustment", "sources"}
+)
 
 
 def _require_nonnegative_integer(value, label):
@@ -694,31 +721,6 @@ def _validate_agent_names(value, label, *, nullable=False):
         )
 
 
-def _validate_bounded_text(value, label):
-    """Non-empty prose bounded for the machine readers that carry it on.
-
-    The ledger is the authority on this text, so the bound lives here: the
-    reconciliation block flows verbatim into the telemetry manifest and from
-    there into offline metrics reports, whose sanitizer drops the whole block
-    rather than one oversized or control-character-bearing string.
-    """
-    if (
-        not isinstance(value, str)
-        or not value.strip()
-        or len(value) > MAX_LEDGER_TEXT_LENGTH
-        or "\x00" in value
-        or any(
-            character not in ("\n", "\t")
-            and unicodedata.category(character) in ("Cc", "Cf")
-            for character in value
-        )
-    ):
-        raise ValueError(
-            f"{label} must be non-empty text of at most "
-            f"{MAX_LEDGER_TEXT_LENGTH} characters with no control characters"
-        )
-
-
 def _validate_reconciliation(value):
     label = f"{FINDINGS_FILENAME}: meta.reconciliation"
     if not isinstance(value, dict) or set(value) != RECONCILIATION_FIELDS:
@@ -751,7 +753,7 @@ def _validate_reconciliation(value):
             raise ValueError(f"{entry} is malformed")
         if not _is_agent_name(agent["name"]):
             raise ValueError(f"{entry}.name must be a lowercase agent name")
-        _validate_bounded_text(agent["skip_reason"], f"{entry}.skip_reason")
+        normalize_bounded_text(agent["skip_reason"], f"{entry}.skip_reason")
         names.append(agent["name"])
     if len(names) != len(set(names)):
         raise ValueError(f"{label}.not_applicable_agents contains duplicates")
@@ -806,6 +808,91 @@ def _validate_critic_provenance(value, label, *, removed):
         raise ValueError(f"{label}: critic_adjustment provenance is malformed")
 
 
+def _checks_without_sources(checks):
+    """Checks as the review-document validators know them: `sources` is a
+    ledger extension the document shape does not carry."""
+    return [
+        {key: value for key, value in check.items() if key != "sources"}
+        if isinstance(check, dict) else check
+        for check in checks
+    ]
+
+
+def _validate_sources(value, label, *, with_severity):
+    """`sources` on a ledger finding or check, in the builder's grammar.
+
+    A finding's entries may carry the source `severity` findings_save.py
+    stamps from the context; a check's never do.
+    """
+    normalized_sources(value, label, allow_severity=with_severity)
+
+
+def _validate_dropped(
+    value, label, *, reasons, evidence_optional_for, stamped_fields=frozenset()
+):
+    """`stamped_fields` are the pipeline-stamped extras this collection
+    carries: findings_save.py stamps `scope_status` on a dropped finding
+    and nothing on a dropped check."""
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    seen = set()
+    allowed = {"reviewer", "id", "reason", "evidence"} | set(stamped_fields)
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if (
+            not isinstance(entry, dict)
+            or not {"reviewer", "id", "reason"} <= set(entry)
+            or not set(entry) <= allowed
+            or not isinstance(entry["reviewer"], str)
+            or not entry["reviewer"].strip()
+            or not isinstance(entry["id"], str)
+            or SOURCE_ID_RE.fullmatch(entry["id"]) is None
+            or entry["reason"] not in reasons
+        ):
+            raise ValueError(f"{entry_label} is malformed")
+        if "evidence" in entry or entry["reason"] not in evidence_optional_for:
+            normalize_bounded_text(entry.get("evidence"), f"{entry_label}.evidence")
+        if "scope_status" in entry and (
+            not isinstance(entry["scope_status"], str)
+            or not entry["scope_status"].strip()
+        ):
+            raise ValueError(f"{entry_label}.scope_status is malformed")
+        key = (entry["reviewer"], entry["id"])
+        if key in seen:
+            raise ValueError(f"{entry_label} repeats {key[0]}:{key[1]}")
+        seen.add(key)
+
+
+def _validate_orchestrator_notes(value):
+    label = f"{FINDINGS_FILENAME}: orchestrator_notes"
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    seen = set()
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if (
+            not isinstance(entry, dict)
+            or not {"id", "outcome", "evidence"} <= set(entry)
+            or not set(entry) <= {"id", "outcome", "evidence", "note", "verifies"}
+            or not isinstance(entry["id"], str)
+            or NOTE_ID_RE.fullmatch(entry["id"]) is None
+            or entry["outcome"] not in NOTE_OUTCOMES
+        ):
+            raise ValueError(f"{entry_label} is malformed")
+        normalize_bounded_text(entry["evidence"], f"{entry_label}.evidence")
+        if "verifies" in entry:
+            # The builder's grammar: a present citation is a non-empty list
+            # of distinct canonical ids on a confirmed note, nothing else.
+            cited = normalize_verifies(entry["verifies"], entry_label)
+            if cited != entry["verifies"] or entry["outcome"] != "confirmed":
+                raise ValueError(f"{entry_label}.verifies is malformed")
+        if "note" in entry:
+            normalize_bounded_text(entry["note"], f"{entry_label}.note")
+        if entry["id"] in seen:
+            raise ValueError(f"{entry_label} repeats {entry['id']}")
+        seen.add(entry["id"])
+
+
 def _validate_ledger_finding(finding, index, *, removed=False):
     label = (
         f"{FINDINGS_FILENAME}: "
@@ -821,6 +908,10 @@ def _validate_ledger_finding(finding, index, *, removed=False):
         raise ValueError(f"{label} line scope is not canonical")
     if finding.get("channel") == "blocking":
         raise ValueError(f"{label}.channel must omit the blocking default")
+    if "sources" in finding:
+        _validate_sources(finding["sources"], label, with_severity=True)
+    if "severity_note" in finding:
+        normalize_bounded_text(finding["severity_note"], f"{label}.severity_note")
     _validate_critic_provenance(
         finding.get("critic_adjustment"), label, removed=removed
     )
@@ -833,6 +924,8 @@ def _validate_ledger_check(check, index, *, removed=False):
     )
     if not isinstance(check, dict) or not set(check) <= _CHECK_FIELDS:
         raise ValueError(f"{label} has unexpected fields")
+    if "sources" in check:
+        _validate_sources(check["sources"], label, with_severity=False)
     _validate_critic_provenance(
         check.get("critic_adjustment"), label, removed=removed
     )
@@ -880,6 +973,9 @@ def validate_findings_document(document):
         for field in _LEDGER_EXTENSION_FIELDS
         if field in base
     }
+    checks_in = base.get("checks")
+    if isinstance(checks_in, list):
+        base["checks"] = _checks_without_sources(checks_in)
     meta = base.get("meta")
     reconciliation = None
     if isinstance(meta, dict):
@@ -904,6 +1000,18 @@ def validate_findings_document(document):
     _validate_reconciliation(reconciliation)
     if "host_context_banner" in extensions:
         _validate_host_context_banner(extensions["host_context_banner"])
+    _validate_dropped(
+        extensions.get("dropped_findings", []),
+        f"{FINDINGS_FILENAME}: dropped_findings",
+        reasons=DROP_REASONS_FINDING, evidence_optional_for={"prefiltered"},
+        stamped_fields={"scope_status"},
+    )
+    _validate_dropped(
+        extensions.get("dropped_checks", []),
+        f"{FINDINGS_FILENAME}: dropped_checks",
+        reasons=DROP_REASONS_CHECK, evidence_optional_for=set(),
+    )
+    _validate_orchestrator_notes(extensions.get("orchestrator_notes", []))
 
     live_findings = document["findings"]
     live_checks = document["checks"]
@@ -932,9 +1040,10 @@ def validate_findings_document(document):
     for index, check in enumerate(removed_checks):
         _validate_ledger_check(check, index, removed=True)
     try:
+        checks_for_ids = _checks_without_sources(live_checks + removed_checks)
         validate_ledger_ids(
             live_findings + removed_findings,
-            live_checks + removed_checks,
+            checks_for_ids,
             base["meta"]["next_finding_number"],
             base["meta"]["next_check_number"],
         )

@@ -1063,7 +1063,9 @@ class TestParseDiffHunks:
         assert "src/auth.py" in hunks
         # Separate: old=(10,12), new=(10,14) → two entries
         assert hunks["src/auth.py"] == [(10, 12), (10, 14)]
-        assert deletions == set()  # new_count > old_count → no deletion
+        # Three old-side lines were replaced by five: the old code is gone
+        # and a finding about it needs the pre-change snippet.
+        assert deletions == {"src/auth.py"}
 
     def test_parses_multiple_hunks(self, mod, monkeypatch):
         """Parses multiple hunks in one file."""
@@ -1130,7 +1132,7 @@ class TestParseDiffHunks:
         )
         hunks, deletions = mod._parse_diff_hunks("abc..HEAD")
         assert hunks["src/a.py"] == [(5, 5)]
-        assert deletions == set()
+        assert deletions == {"src/a.py"}  # the one old line was replaced
 
     def test_pure_deletion_covers_old_side_range(self, mod, monkeypatch):
         """A pure deletion hunk covers the full old-side range.
@@ -1177,6 +1179,32 @@ class TestParseDiffHunks:
         # Separate: old=(10,29), new=(10,12)
         assert hunks["src/auth.py"] == [(10, 29), (10, 12)]
         assert "src/auth.py" in deletions
+
+    def test_one_for_one_replacement_marks_the_file_for_old_side_reads(self, mod, monkeypatch):
+        """A hunk that replaces a line with another (`-5 +5`) contains a
+        deleted line even though the net size is unchanged. A finding
+        about the replaced code needs the pre-change snippet, so the file
+        is marked; a pure insertion (`-9,0 +10,2`) is not."""
+        diff_output = (
+            "diff --git a/src/auth.py b/src/auth.py\n"
+            "--- a/src/auth.py\n"
+            "+++ b/src/auth.py\n"
+            "@@ -5 +5 @@\n"
+            "-old\n+new\n"
+            "diff --git a/src/new.py b/src/new.py\n"
+            "--- a/src/new.py\n"
+            "+++ b/src/new.py\n"
+            "@@ -9,0 +10,2 @@\n"
+            "+a\n+b\n"
+        )
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **kw: type("R", (), {
+                "returncode": 0, "stdout": diff_output, "stderr": ""
+            })()
+        )
+        _hunks, deletions = mod._parse_diff_hunks("abc..HEAD")
+        assert deletions == {"src/auth.py"}
 
     def test_git_failure_returns_empty(self, mod, monkeypatch):
         """Non-zero exit code returns empty tuple."""
@@ -1264,7 +1292,7 @@ class TestFullScript:
         Every key here has a reader in `agents/review-reconciliator.md`
         or `scripts/review/findings_save.py`. `git_range`, `output_dir`,
         and `output_builder_path` had none: the agent is handed the
-        directory and the builder path by the step-8 briefing, and it
+        output and plugin scripts directories by the step-8 briefing, and it
         never mentions the range at all. A key nobody reads is a key that
         can go stale without anything noticing.
         """
@@ -1294,28 +1322,75 @@ class TestFullScript:
             "scope_annotations",
             "changed_files",
             "change_purpose",
+            "verify_items",
+            "context_items",
+            "change_purpose_problems",
             "pr_id",
             "host_context_banner",
             "missing_agents",
             "prefiltered_out_of_scope",
+            "orchestrator_notes",
         }
-        assert ctx["schema"] == 3
+        assert ctx["schema"] == 4
         assert "security-review" in ctx["reviews_by_agent"]
         assert ctx["changed_files"] == ["src/auth.py", "src/db.py"]
         assert ctx["change_purpose"] == "Fix auth bug"
         assert ctx["pr_id"] == "42"
         assert ctx["host_context_banner"] is None
 
-    def test_the_banner_comes_from_the_caller_not_a_second_file_read(
+    def test_verify_items_carry_the_checks_that_cite_them(self, tmp_path):
+        review = _make_review_json(
+            reviewer="security",
+            findings=[_make_finding(file="src/auth.py", line=10)],
+        )
+        review["checks"] = [{
+            "id": "c1", "question": "q", "method": "m", "result": "0 hits",
+            "source_reviewers": ["security-reviewer"], "verifies": ["V1"],
+        }]
+        review["meta"]["next_check_number"] = 2
+        _write_review_json(tmp_path, "security", review)
+        purpose = (
+            "## Verify\nV1. Nothing else calls the helper — source: PR description\n"
+            "V2. Blocks is unaffected — source: inferred from the diff\n"
+            "## Context\nC1. Ships in 10.9 — source: version constant\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc123..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", purpose,
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        ctx = _read_reconciliation_context(tmp_path)
+        assert ctx["schema"] == 4
+        assert ctx["verify_items"] == [
+            {"id": "V1", "text": "Nothing else calls the helper", "source": "PR description",
+             "carried_over": False,
+             "checks": [{"reviewer": "security-review", "id": "c1", "result": "0 hits"}]},
+            {"id": "V2", "text": "Blocks is unaffected", "source": "inferred from the diff",
+             "carried_over": False, "checks": []},
+        ]
+        assert ctx["context_items"] == [
+            {"id": "C1", "text": "Ships in 10.9", "source": "version constant", "carried_over": False},
+        ]
+        assert ctx["change_purpose_problems"] == []
+
+    def test_an_unstructured_purpose_yields_empty_tiers(self, tmp_path):
+        _write_review_json(tmp_path, "security", _make_review_json(reviewer="security", findings=[]))
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc123..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", "Fix auth bug",
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        ctx = _read_reconciliation_context(tmp_path)
+        assert ctx["verify_items"] == [] and ctx["context_items"] == []
+        assert ctx["change_purpose_problems"] == []
+
+    def test_the_banner_comes_from_the_same_local_host_snapshot(
         self, tmp_path
     ):
-        """The orchestrator already holds the banner it passes.
-
-        `review-context.json` is the orchestrator's own artifact and it
-        is in memory at step 8. Re-reading it here gave the pipeline two
-        readers of one field, and the second one silently reported `null`
-        for any run whose context file was written elsewhere.
-        """
+        """The banner can be as large as the local map and must stay on disk."""
         (tmp_path / "review-context.json").write_text(json.dumps(
             {"host_context": {"banner": {"degraded": True, "message": "x"}}}
         ))

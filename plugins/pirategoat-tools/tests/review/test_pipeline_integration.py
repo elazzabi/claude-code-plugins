@@ -2170,6 +2170,82 @@ class TestStep8Orchestration:
         assert spawned == []
         assert state["agents"]["completed"] == ["code-reviewer"]
 
+    def test_step_8_keeps_oversized_host_context_out_of_reconciliation_argv(
+        self, mod, tmp_path, monkeypatch
+    ):
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "code-reviewer", "status": "DISPATCH"}],
+        }))
+        _save_and_finalize(tmp_path, "code")
+        host_context = {
+            "version": 1,
+            "resolved": [
+                {
+                    "name": f"wordpress-{index}",
+                    "kind": "runtime-host",
+                    "path": f"/repo/wordpress-{index}",
+                    "source": "ecosystem-cache",
+                    "version": None,
+                    "notes": {},
+                }
+                for index in range(9000)
+            ],
+            "unresolved": [],
+            "banner": None,
+        }
+        (_artifact(tmp_path, "review_context")).write_text(
+            json.dumps({"host_context": host_context})
+        )
+        commands = []
+
+        def reconciliation_succeeds(cmd, *_args, **_kwargs):
+            commands.append(list(cmd))
+            (_artifact(tmp_path, "reconciliation_context")).write_text("{}")
+            return "", True
+
+        monkeypatch.setitem(
+            mod._orchestrate_step_8.__globals__,
+            "_run_subprocess",
+            reconciliation_succeeds,
+        )
+
+        mod._orchestrate_step(
+            8,
+            "full",
+            {},
+            {},
+            {"resolved_params": {}, "host_context": host_context},
+            str(tmp_path),
+        )
+
+        command = commands[-1]
+        assert sum(len(argument) for argument in command) < 10_000
+
+    def test_step_8_re_parses_the_change_purpose_the_orchestrator_may_have_edited(
+        self, mod, tmp_path, monkeypatch
+    ):
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "code-reviewer", "status": "DISPATCH"}],
+        }))
+        _save_and_finalize(tmp_path, "code")
+        purpose = _artifact(tmp_path, "change_purpose")
+        purpose.parent.mkdir(parents=True, exist_ok=True)
+        purpose.write_text("## Verify\nV1. a — source: PR description\nV2. b — source: PR description\n## Context\nNone.\n## Author's description (extracted)\nq\n")
+        commands = []
+
+        def reconciliation_succeeds(cmd, *_args, **_kwargs):
+            commands.append(list(cmd))
+            (_artifact(tmp_path, "reconciliation_context")).write_text("{}")
+            return "", True
+
+        monkeypatch.setitem(
+            mod._orchestrate_step_8.__globals__, "_run_subprocess", reconciliation_succeeds,
+        )
+        state = {"resolved_params": {}, "change_purpose_items": {"verify": [{"id": "V1"}], "context": [], "problems": [], "structured": True}}
+        mod._orchestrate_step(8, "full", {}, state, {}, str(tmp_path))
+        assert [i["id"] for i in state["change_purpose_items"]["verify"]] == ["V1", "V2"]
+        assert any("--change-purpose" in cmd for cmd in commands)
+
     def test_step_8_takes_dispatched_identities_from_the_status_gate(
         self, mod, tmp_path, monkeypatch
     ):

@@ -36,18 +36,32 @@ import unicodedata
 
 try:
     from . import critic_adjustments
-    from .findings_ledger import RECONCILIATION_PIPELINE_FIELDS
+    from .findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
+        RECONCILIATION_PIPELINE_FIELDS,
+        read_reconciliation_context,
+    )
     from .reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
-    from .verdict_rules import REVIEW_VERDICTS
+    from .reconciliation_notes import validate_orchestrator_notes
+    from .review_document import MAX_LEDGER_TEXT_LENGTH
+    from .verdict_rules import REVIEW_VERDICTS, VALID_SEVERITIES
     from .run_paths import artifact_path
 except ImportError:
     _scripts_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
     from review import critic_adjustments
-    from review.findings_ledger import RECONCILIATION_PIPELINE_FIELDS
+    from review.findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
+        RECONCILIATION_PIPELINE_FIELDS,
+        read_reconciliation_context,
+    )
     from review.reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
-    from review.verdict_rules import REVIEW_VERDICTS
+    from review.reconciliation_notes import validate_orchestrator_notes
+    from review.review_document import MAX_LEDGER_TEXT_LENGTH
+    from review.verdict_rules import REVIEW_VERDICTS, VALID_SEVERITIES
     from review.run_paths import artifact_path
 
 
@@ -78,7 +92,7 @@ CRITIC_OWNED_LEDGER_FIELDS = (
 # bound it, and the PIPELINE copies it here — so the pipeline is what has
 # to make it fit. Truncating a reason is a smaller loss than dead-ending
 # a run on a rejection its only fixer cannot fix.
-_MAX_SKIP_REASON = critic_adjustments.MAX_LEDGER_TEXT_LENGTH
+_MAX_SKIP_REASON = MAX_LEDGER_TEXT_LENGTH
 _SKIP_REASON_ELLIPSIS = "…"
 _SKIP_REASON_UNPRINTABLE = "reason unavailable (unprintable)"
 
@@ -127,21 +141,21 @@ def _read_findings_json(path, problems):
 
 def _read_context(output_dir, problems):
     """Read the run's reconciliation context, or record why it could not be."""
-    path = artifact_path(output_dir, "reconciliation_context")
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            context = json.load(handle)
-    except (OSError, json.JSONDecodeError) as err:
-        problems.append(f"{CONTEXT_FILENAME} is unreadable: {err}")
-        return None
-    if not isinstance(context, dict):
-        problems.append(f"{CONTEXT_FILENAME} is not a JSON object")
+        context = read_reconciliation_context(output_dir)
+    except ValueError as err:
+        problems.append(str(err))
         return None
     if context.get("schema") != RECONCILIATION_CONTEXT_SCHEMA:
         problems.append(
             f"{CONTEXT_FILENAME} schema {context.get('schema')!r} is not "
             f"{RECONCILIATION_CONTEXT_SCHEMA}"
         )
+        return None
+    try:
+        validate_orchestrator_notes(context.get("orchestrator_notes"))
+    except ValueError as err:
+        problems.append(f"{CONTEXT_FILENAME} {err}")
         return None
     reviews = context.get("reviews_by_agent")
     if not isinstance(reviews, dict):
@@ -179,6 +193,247 @@ def _is_review_entry(review):
     return "skip_reason" not in review
 
 
+def _source_key(entry):
+    """(reviewer, id) from a sources/dropped entry, or None when malformed."""
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("reviewer"), str)
+        and isinstance(entry.get("id"), str)
+    ):
+        return (entry["reviewer"], entry["id"])
+    return None
+
+
+def _source_population(context):
+    """Every source finding and check the run read, keyed by (stem, id)."""
+    findings, checks = {}, {}
+    for stem, review in context["reviews_by_agent"].items():
+        for finding in review.get("findings") or []:
+            if isinstance(finding, dict) and isinstance(finding.get("id"), str):
+                findings[(stem, finding["id"])] = finding
+        for check in review.get("checks") or []:
+            if isinstance(check, dict) and isinstance(check.get("id"), str):
+                checks[(stem, check["id"])] = check
+    return findings, checks
+
+
+def _fmt(key):
+    return f"{key[0]}:{key[1]}"
+
+
+def _accounting_problems(payload, context):
+    """The evidence-trail invariants only the reconciliator can break.
+
+    Every source finding and check is merged into exactly one ledger entry
+    or dropped with a reason; a merged check carries each source method
+    verbatim; a severity that matches no source carries a note; every
+    orchestrator note has an outcome. Each problem names the source, so
+    the agent can fix it in the same turn.
+    """
+    problems = []
+    source_findings, source_checks = _source_population(context)
+
+    merged_findings = {}
+    findings = payload.get("findings")
+    for idx, finding in enumerate(findings if isinstance(findings, list) else []):
+        if not isinstance(finding, dict):
+            continue
+        sources = finding.get("sources")
+        if not isinstance(sources, list) or not sources:
+            problems.append(f"findings[{idx}] names no sources")
+            continue
+        severities = set()
+        for entry in sources:
+            key = _source_key(entry)
+            if key is None:
+                problems.append(f"findings[{idx}] has a malformed sources entry")
+                continue
+            if key not in source_findings:
+                problems.append(f"findings[{idx}] cites unknown source {_fmt(key)}")
+                continue
+            if key in merged_findings:
+                problems.append(
+                    f"{_fmt(key)} is merged into both {merged_findings[key]} "
+                    f"and findings[{idx}]"
+                )
+                continue
+            merged_findings[key] = f"findings[{idx}]"
+            if "prefiltered" in source_findings[key]:
+                problems.append(
+                    f"{_fmt(key)} was prefiltered by the pipeline and cannot be "
+                    f"merged into findings[{idx}]; it must be dropped as prefiltered"
+                )
+            severities.add(source_findings[key].get("severity"))
+        if (
+            finding.get("severity") in VALID_SEVERITIES
+            and severities
+            and finding.get("severity") not in severities
+            and not str(finding.get("severity_note") or "").strip()
+        ):
+            problems.append(
+                f"findings[{idx}] is {finding.get('severity')} but its sources "
+                f"are {', '.join(sorted(s for s in severities if s))}; "
+                "severity_note is required"
+            )
+
+    dropped_findings = {}
+    drops = payload.get("dropped_findings")
+    for idx, drop in enumerate(drops if isinstance(drops, list) else []):
+        key = _source_key(drop)
+        if key is None or not isinstance(drop, dict):
+            problems.append(f"dropped_findings[{idx}] is malformed")
+            continue
+        if key not in source_findings:
+            problems.append(f"dropped_findings[{idx}] cites unknown source {_fmt(key)}")
+            continue
+        if key in merged_findings:
+            problems.append(
+                f"{_fmt(key)} is both merged into {merged_findings[key]} and dropped"
+            )
+            continue
+        if key in dropped_findings:
+            problems.append(f"{_fmt(key)} is dropped twice")
+            continue
+        prefiltered = "prefiltered" in source_findings[key]
+        reason = drop.get("reason")
+        if reason not in DROP_REASONS_FINDING:
+            problems.append(
+                f"dropped_findings[{idx}] has an unknown reason {reason!r} "
+                f"(allowed: {', '.join(DROP_REASONS_FINDING)})"
+            )
+            continue
+        if prefiltered and reason != "prefiltered":
+            problems.append(
+                f"{_fmt(key)} was prefiltered by the pipeline and must be "
+                "dropped as prefiltered"
+            )
+        elif not prefiltered and reason == "prefiltered":
+            problems.append(f"{_fmt(key)} was not prefiltered by the pipeline")
+        dropped_findings[key] = reason
+    for key in sorted(set(source_findings) - set(merged_findings) - set(dropped_findings)):
+        problems.append(
+            f"source finding {_fmt(key)} is neither merged into a finding nor dropped"
+        )
+
+    merged_checks = {}
+    checks = payload.get("checks")
+    for idx, check in enumerate(checks if isinstance(checks, list) else []):
+        if not isinstance(check, dict):
+            continue
+        sources = check.get("sources")
+        if not isinstance(sources, list) or not sources:
+            problems.append(f"checks[{idx}] names no sources")
+            continue
+        method = check.get("method") if isinstance(check.get("method"), str) else ""
+        for entry in sources:
+            key = _source_key(entry)
+            if key is None:
+                problems.append(f"checks[{idx}] has a malformed sources entry")
+                continue
+            if key not in source_checks:
+                problems.append(f"checks[{idx}] cites unknown source {_fmt(key)}")
+                continue
+            if key in merged_checks:
+                problems.append(
+                    f"{_fmt(key)} is merged into both {merged_checks[key]} "
+                    f"and checks[{idx}]"
+                )
+                continue
+            merged_checks[key] = f"checks[{idx}]"
+            source_method = source_checks[key].get("method")
+            if (
+                isinstance(source_method, str)
+                and source_method.strip()
+                and source_method.strip() not in method
+            ):
+                problems.append(
+                    f"checks[{idx}] merges {_fmt(key)} but does not carry its "
+                    "method verbatim"
+                )
+            source_verifies = source_checks[key].get("verifies")
+            if isinstance(source_verifies, list):
+                kept = check.get("verifies") if isinstance(check.get("verifies"), list) else []
+                lost = [item for item in source_verifies if item not in kept]
+                if lost:
+                    problems.append(
+                        f"checks[{idx}] merges {_fmt(key)} but drops its verifies "
+                        + ", ".join(str(item) for item in lost)
+                    )
+    dropped_checks = set()
+    drops = payload.get("dropped_checks")
+    for idx, drop in enumerate(drops if isinstance(drops, list) else []):
+        key = _source_key(drop)
+        if key is None:
+            problems.append(f"dropped_checks[{idx}] is malformed")
+            continue
+        if key not in source_checks:
+            problems.append(f"dropped_checks[{idx}] cites unknown source {_fmt(key)}")
+        elif key in merged_checks:
+            problems.append(
+                f"{_fmt(key)} is both merged into {merged_checks[key]} and dropped"
+            )
+        elif key in dropped_checks:
+            problems.append(f"{_fmt(key)} is dropped twice")
+        elif drop.get("reason") not in DROP_REASONS_CHECK:
+            problems.append(
+                f"dropped_checks[{idx}] has an unknown reason "
+                f"{drop.get('reason')!r} (allowed: {', '.join(DROP_REASONS_CHECK)})"
+            )
+        else:
+            dropped_checks.add(key)
+    for key in sorted(set(source_checks) - set(merged_checks) - dropped_checks):
+        problems.append(
+            f"source check {_fmt(key)} is neither merged into a check nor dropped"
+        )
+
+    recon = payload["meta"]["reconciliation"]
+    fp_dropped = sum(1 for r in dropped_findings.values() if r == "false_positive")
+    oos_dropped = sum(
+        1 for r in dropped_findings.values() if r in ("out_of_scope", "prefiltered")
+    )
+    for count_field, dropped, noun in (
+        ("false_positive_concern_count", fp_dropped, "false positives"),
+        ("out_of_scope_concern_count", oos_dropped, "out of scope"),
+    ):
+        count = recon.get(count_field)
+        if not isinstance(count, int):
+            continue
+        if count > dropped:
+            problems.append(
+                f"{count_field} {count} exceeds the {dropped} findings dropped as {noun}"
+            )
+        elif dropped and count == 0:
+            problems.append(
+                f"{dropped} findings were dropped as {noun} but {count_field} is 0"
+            )
+
+    notes = {
+        note["id"]: note
+        for note in (context.get("orchestrator_notes") or [])
+        if isinstance(note, dict) and isinstance(note.get("id"), str)
+    }
+    answered = set()
+    payload_notes = payload.get("orchestrator_notes")
+    for idx, entry in enumerate(
+        payload_notes if isinstance(payload_notes, list) else []
+    ):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            problems.append(f"orchestrator_notes[{idx}] is malformed")
+            continue
+        if "note" in entry:
+            problems.append(
+                f"orchestrator_notes[{idx}].note is pipeline-owned — the save "
+                "stamps it from the reconciliation context"
+            )
+        if entry["id"] not in notes:
+            problems.append(f"orchestrator note {entry['id']} is not in the context")
+            continue
+        answered.add(entry["id"])
+    for note_id in sorted(set(notes) - answered):
+        problems.append(f"orchestrator note {note_id} has no outcome")
+    return problems
+
+
 def stamp_pipeline_facts(document, context):
     """Fill the pipeline-owned reconciliation fields from the context."""
     reviews = context["reviews_by_agent"]
@@ -208,6 +463,36 @@ def stamp_pipeline_facts(document, context):
     banner = context.get("host_context_banner")
     if isinstance(banner, dict) and banner.get("degraded"):
         document["host_context_banner"] = banner
+    # Source facts the agent must not retype: each merged source's own
+    # severity beside the reconciled one, the scope status behind every
+    # prefiltered drop, and the text of every orchestrator note.
+    source_findings, _ = _source_population(context)
+    findings = document.get("findings")
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict):
+            continue
+        for entry in finding.get("sources") or []:
+            key = _source_key(entry)
+            severity = source_findings[key].get("severity")
+            if severity is not None:
+                entry["severity"] = severity
+            else:
+                entry.pop("severity", None)
+    drops = document.get("dropped_findings")
+    for drop in drops if isinstance(drops, list) else []:
+        if not isinstance(drop, dict):
+            continue
+        source = source_findings[_source_key(drop)]
+        if drop.get("reason") == "prefiltered" and isinstance(source.get("prefiltered"), str):
+            drop["scope_status"] = source["prefiltered"]
+    notes = {
+        note["id"]: note for note in (context.get("orchestrator_notes") or [])
+    }
+    entries = document.get("orchestrator_notes")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        entry["note"] = notes[entry["id"]]["note"]
 
 
 def _producer_problems(payload, context):
@@ -295,6 +580,9 @@ def validate_findings(payload, context):
     problems = _producer_problems(payload, context)
     if problems:
         return problems
+    problems = _accounting_problems(payload, context)
+    if problems:
+        return problems
     stamp_pipeline_facts(payload, context)
     recon = payload["meta"]["reconciliation"]
     grouped = recon.get("grouped_concern_count")
@@ -307,8 +595,13 @@ def validate_findings(payload, context):
     return problems
 
 
-def _echo(findings):
-    """Print the RECORDED lines the brief specifies for a successful save."""
+def _echo(findings, context):
+    """Print the RECORDED lines the brief specifies for a successful save.
+
+    The ACCOUNTED denominators are the context's own populations, so the
+    line states a fact the gate established rather than restating the
+    ledger's sums to themselves.
+    """
     recorded_findings = findings.get("findings") or []
     counts = {sev: 0 for sev in _ECHO_SEVERITIES}
     for finding in recorded_findings:
@@ -328,6 +621,21 @@ def _echo(findings):
     print(f"RECORDED VERDICT: {findings.get('verdict')}")
     print(f"RECORDED FINDINGS: {len(recorded_findings)} ({breakdown})")
     print(f"CHECKS: {len(checks)} | ASSESSMENT: {assessment_state}")
+    dropped_findings = findings.get("dropped_findings") or []
+    dropped_checks = findings.get("dropped_checks") or []
+    merged_findings = sum(len(f.get("sources") or []) for f in recorded_findings)
+    merged_checks = sum(len(c.get("sources") or []) for c in checks)
+    notes = findings.get("orchestrator_notes") or []
+    source_findings, source_checks = _source_population(context)
+    source_notes = context.get("orchestrator_notes") or []
+    print(
+        f"ACCOUNTED: findings {merged_findings + len(dropped_findings)}/"
+        f"{len(source_findings)} ({merged_findings} merged, "
+        f"{len(dropped_findings)} dropped) | checks "
+        f"{merged_checks + len(dropped_checks)}/{len(source_checks)} "
+        f"({merged_checks} merged, {len(dropped_checks)} dropped) | "
+        f"notes {len(notes)}/{len(source_notes)}"
+    )
 
 
 def run_save(args):
@@ -349,7 +657,7 @@ def run_save(args):
         return 1
 
     critic_adjustments.write_findings(args.output_dir, findings)
-    _echo(findings)
+    _echo(findings, context)
     return 0
 
 

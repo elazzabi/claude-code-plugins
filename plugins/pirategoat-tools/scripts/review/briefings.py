@@ -1506,25 +1506,37 @@ def _step_8_reconcile(mode, state, context, config, output_dir):
             "**2. Call `spawn_agent` with task name `review_reconciliator` "
             "for `review-reconciliator`.**",
             f"- {_codex_agent_instruction('review-reconciliator')}",
-            "- Then provide these concrete inputs:",
+            "- Then provide exactly this prompt:",
         ])
     else:
-        actions.append("**2. Dispatch `review-reconciliator`** with:")
-    actions.extend([
-        f"- **Reconciliation context:** `{_artifact_display(od, 'reconciliation_context')}` (pre-gathered: all agent findings, source snippets, scope annotations)",
-        f"- **Output builder path:** `{SCRIPTS_DIR / 'agent' / 'output.py'}`",
-        f"- Output directory: `{od}`",
-    ])
-
-    if change_purpose:
-        actions.append(
-            f"- **Change purpose (author-stated):** {change_purpose}"
-        )
-        actions.append(
-            "  Treat it as claims to verify against the diff, not context to adopt — "
-            "author-asserted discriminators and likelihood claims are review inputs, not conclusions."
-        )
-
+        actions.append("**2. Dispatch `review-reconciliator`** with exactly this prompt:")
+    actions.append("```")
+    actions.append(
+        f"Reconciliation context: {_artifact_display(od, 'reconciliation_context')}"
+    )
+    # The directory, never a file: a path labelled "builder" gets read,
+    # and the agent only ever needs the directory on sys.path.
+    actions.append(f"Plugin scripts directory: {SCRIPTS_DIR.parent}")
+    actions.append(f"Output directory: {od}")
+    actions.append(
+        "Orchestrator notes: read orchestrator_notes in the context and "
+        "answer each with an outcome and evidence."
+    )
+    actions.append("```")
+    actions.append(
+        "The prompt carries nothing else — the change purpose is already in "
+        "the context. A disagreement you noticed between reviewers, two "
+        "findings you believe describe one concern, or any fact you want "
+        "weighed goes into the context as a note, BEFORE dispatch, stated as "
+        "a claim, so the reconciliator must confirm or refute it with "
+        "evidence rather than adopt it:"
+    )
+    actions.append("```bash")
+    actions.append(
+        f'python3 {SCRIPTS_DIR}/reconciliation_notes.py --output-dir "{od}" '
+        '--note "<one claim, stated as a claim>"'
+    )
+    actions.append("```")
     actions.append("")
     actions.append(
         f"**Expected output:** `{_artifact_display(od, 'review_findings_json')}` — the "

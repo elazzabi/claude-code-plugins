@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A reviewer check may name the Verify items it settles (`record_check(..., verifies=["V2"])`), rendered as `Settles:` and kept as a union when the reconciliator merges checks.
 - The findings ledger carries an evidence trail: every reconciled finding and check names the source findings and checks it merged, and every source the reconciliator read but did not carry forward is recorded with a reason and evidence.
 - The ledger save is rejected when a source is unaccounted for, a merged check drops a source's method text, or a severity matches no source without a note.
+- The orchestrator's hints reach the reconciliator as claims it must answer with an outcome and evidence, and the record renders the answers under `Orchestrator Notes` beside `Dropped by the Reconciliator`.
 - The orchestrator records dispatch adjustments through `dispatch_adjust.py` (`--skip NAME REASON`, `--dispatch NAME REASON`, `--dry-run`) instead of editing `dispatch-plan.json` by hand, and the step-6 briefing repeats them.
 - Each skip names the changed files whose only matching reviewer it removed, and the coverage section lists them as skipped by override rather than as matching no domain.
 - Host Context resolves for monorepos: plugin headers, wp-env and compose files are read at the repository root and every directory one and two levels down, and `.pirategoat/config.json` may name deeper roots under `hosts.roots`.
@@ -30,12 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
 - Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
+- A confirmed orchestrator note may cite the Verify items its evidence settles, counted beside reviewer checks in the record's Verify table and the cohort metric, instead of leaving an item the reconciliator itself reproduced to the decision critic.
 - The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
+- The reconciliator's ledger template states what the builder derives and accepts, and the step-8 dispatch prompt names the plugin scripts directory instead of the reviewer builder file, so the agent no longer reads plugin source to find its own contract.
 - Unresolved host signals merge by name, one banner line per host with every source recorded, and a cache entry whose identity cannot be read says so instead of reporting `version: "latest"`.
 - The ecosystem-integration reviewer carries the mandatory bootstrap section every other reviewer has, and Claude dispatch prompts open with the instruction to run bootstrap first.
 - The reviewer builder snippet shows `add_observation(file, note, category)` with its real signature and no longer invites `claim_files_reviewed()` when the assignment has no claimable files, removing a deterministic first-save failure.
 - A reviewer may pass `claim_files_reviewed` one list of paths instead of separate arguments, a wrong-typed path names its type, and a draft save that recorded nothing prints a stderr NOTE rather than publishing an empty approve.
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
+- The reconciliation context reads the pre-change snippet for every surviving file whose diff removed or replaced lines, not only for the files that shrank.
 - Shared telemetry discloses host names, versions and commits but never paths or branch names, and a wp-env pin's `#ref` is recorded as a version only when it is version-shaped.
 - A host the repository itself provides — WooCommerce, in its own monorepo — is never resolved from the ecosystem cache, and the reviewer protocol says a mounted host proves only that the local site mounts it.
 - Reviewer `review.json` files stamp an aware UTC timestamp, like every other run artifact, instead of the naive local clock.

@@ -2758,6 +2758,75 @@ class TestTypeScriptContractLockstep:
         meta_body = self._interface_body("ReviewMeta")
         assert top_level_fields(meta_body) == review_document._REQUIRED_META_FIELDS
 
+    @classmethod
+    def _field_types(cls, name, *, extends=""):
+        return dict(re.findall(
+            r"^ {4}(\w+\??):\s*([^;]+);",
+            cls._interface_body(name, extends=extends), re.MULTILINE,
+        ))
+
+    @staticmethod
+    def _type_alias(name):
+        schema = (PLUGIN_ROOT / "schemas" / "review-output.ts").read_text()
+        match = re.search(
+            rf"(?:export )?type {name} =\s*(.*?)(?=\n(?:export )?type |\n\n|\Z)",
+            schema, re.DOTALL,
+        )
+        assert match is not None, f"review-output.ts must declare {name}"
+        return " ".join(match.group(1).split())
+
+    @pytest.mark.parametrize("interface, expected", [
+        ("Finding", {"sources?": "FindingSource[]", "severity_note?": "string"}),
+        ("ReviewCheck", {"sources?": "ReviewSource[]"}),
+        ("FindingsLedger", {
+            "dropped_findings?": "DroppedFinding[]",
+            "dropped_checks?": "DroppedCheck[]",
+            "orchestrator_notes?": "OrchestratorNote[]",
+        }),
+    ], ids=["finding-provenance", "check-provenance", "ledger-audit"])
+    def test_reconciliation_extensions_remain_optional(self, interface, expected):
+        fields = self._field_types(
+            interface, extends="ReviewContent" if interface == "FindingsLedger" else "",
+        )
+        assert {key: fields.get(key) for key in expected} == expected
+
+    def test_source_identity_and_optional_stamped_severity(self):
+        assert self._field_types("ReviewSource") == {
+            "reviewer": "string", "id": "FindingId | CheckId",
+        }
+        assert self._field_types("FindingSource", extends="ReviewSource") == {
+            "severity?": "Severity",
+        }
+
+    def test_drop_reason_and_evidence_contract(self):
+        assert self._field_types("DroppedFindingSource", extends="ReviewSource") == {
+            "scope_status?": "string",
+        }
+        assert self._type_alias("DroppedFinding") == (
+            "DroppedFindingSource & ( "
+            "| { reason: 'false_positive' | 'out_of_scope'; evidence: string } "
+            "| { reason: 'prefiltered'; evidence?: string } );"
+        )
+        # A dropped check carries no stamped scope: the reader rejects
+        # scope_status there, so the contract must not offer it.
+        assert self._field_types("DroppedCheck", extends="ReviewSource") == {
+            "reason": "'void'", "evidence": "string",
+        }
+        assert set(re.findall(
+            r"'([^']+)'", self._type_alias("DroppedFinding"),
+        )) == set(critic_adjustments.DROP_REASONS_FINDING)
+        assert critic_adjustments.DROP_REASONS_CHECK == ("void",)
+
+    def test_orchestrator_note_outcomes_and_optional_stamped_note(self):
+        assert self._field_types("OrchestratorNote") == {
+            "id": "`n${number}`",
+            "outcome": "'confirmed' | 'refuted' | 'not_checked'",
+            "evidence": "string", "note?": "string",
+        }
+        assert set(re.findall(
+            r"'([^']+)'", self._field_types("OrchestratorNote")["outcome"],
+        )) == set(critic_adjustments.NOTE_OUTCOMES)
+
     @pytest.mark.parametrize(
         "field", ["observations", "recommendations", "positive_observations"]
     )

@@ -1660,6 +1660,55 @@ class TestStep8Reconcile:
         # Individual review files are no longer listed — they're inside the context file
         assert "code-review.json" not in text
 
+    def test_dispatch_prompt_is_a_fenced_block_of_the_three_inputs(self, mod, tmp_path):
+        """The orchestrator pastes the fence as the prompt; nothing else
+        rides in it. Every hint goes through the notes channel."""
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        block = text.split("**2. Dispatch `review-reconciliator`**", 1)[1].split("```", 2)[1]
+        lines = [l for l in block.strip().splitlines() if l.strip()]
+        assert lines[0].startswith("Reconciliation context: ")
+        assert lines[0].endswith("reconciliation-context.json")
+        # The scripts directory, not a file: a file path labelled "builder"
+        # is read, and the reconciliator only ever needs the directory.
+        assert lines[1].startswith("Plugin scripts directory: ") and lines[1].endswith("/scripts")
+        assert "output.py" not in block
+        assert lines[2] == f"Output directory: {tmp_path}"
+        assert lines[3] == (
+            "Orchestrator notes: read orchestrator_notes in the context and "
+            "answer each with an outcome and evidence."
+        )
+        assert len(lines) == 4
+        assert "retry logic" not in block
+
+    def test_hints_are_routed_through_the_notes_command(self, mod, tmp_path):
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert "reconciliation_notes.py" in text
+        assert f'--output-dir "{tmp_path}" --note' in text
+        assert "stated as a claim" in text
+        assert "BEFORE dispatch" in text
+
+    def test_change_purpose_is_not_repeated_in_the_prompt(self, mod, tmp_path):
+        """It is in the context already (`change_purpose`); the situation
+        line frames it, the prompt does not carry a second copy."""
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        assert "retry logic" in "\n".join(g["situation"])
+        assert "retry logic" not in "\n".join(g["actions"])
+
+    def test_change_purpose_is_rendered_exactly_once_in_step_8(self, mod, tmp_path):
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"] + g["actions"] + (g.get("handoff") or []))
+        assert text.count("Adds retry logic to the payment gateway.") == 1
+
 
 class TestStep8FindingsArtifactOwnership:
     """The reconciliator publishes JSON; the pipeline renders the Markdown.
