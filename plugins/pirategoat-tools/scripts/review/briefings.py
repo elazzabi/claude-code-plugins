@@ -55,6 +55,17 @@ except ImportError:
     from review.telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 
 
+
+# First line of every Claude-host dispatch prompt. The orchestrator pastes
+# the fenced block verbatim as the subagent's prompt (run 6e6a: 400-char
+# prompts that were the bare command), so the imperative has to be inside
+# the block, not in the surrounding briefing prose.
+DISPATCH_PROMPT_LEAD = (
+    "Run this exact command as your FIRST tool call, before reading any file, "
+    "and follow the scope and output contract it prints:"
+)
+
+
 def _artifact_display(output_dir, key):
     """Render one registry-owned artifact path for briefing prose."""
     return str(artifact_path(output_dir or "<OUTPUT_DIR>", key))
@@ -1155,6 +1166,8 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
                         "output contract."
                     )
                 actions.append("```")
+                if not codex_host:
+                    actions.append(DISPATCH_PROMPT_LEAD)
                 actions.append(cmd)
                 actions.append("```")
                 actions.append("")
@@ -1170,6 +1183,8 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
                         "output contract."
                     )
                 actions.append("```")
+                if not codex_host:
+                    actions.append(DISPATCH_PROMPT_LEAD)
                 actions.append(f'python3 {SCRIPTS_DIR}/agent/bootstrap.py --agent {name} --range "{git_range}" --output-dir "{od}"')
                 actions.append("```")
                 actions.append("")

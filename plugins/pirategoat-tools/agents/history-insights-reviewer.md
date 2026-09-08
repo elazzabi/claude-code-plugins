@@ -13,7 +13,7 @@ tools:
   - WebSearch
 ---
 
-## MANDATORY SETUP — Run Bootstrap Before Mining History
+## MANDATORY SETUP — Run Bootstrap Before Reviewing
 
 Complete this setup first — it provides your review rules, scope, diffs, and output instructions:
 

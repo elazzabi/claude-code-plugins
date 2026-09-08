@@ -2622,3 +2622,40 @@ class TestReviewClaimableOrderingEndToEnd:
         assert assignment["review_claimable_files"] == [
             "tests/huge_test.py", "src/small_prod.py",
         ]
+
+
+# Registry agents that are not dispatched through bootstrap.py. The critic
+# receives the record and ledger paths in its dispatch prompt and runs
+# critic.py; its definition only uses bootstrap.py's path to locate the
+# plugin root. The cross-validators and the reconciliator are also not
+# bootstrap-dispatched but are not in AGENT_CONFIG, so they need no entry —
+# and an entry naming an unregistered agent fails the subset test below
+# instead of silently exempting nothing.
+BOOTSTRAP_EXEMPT_AGENTS = {
+    "decision-reviewer",
+}
+
+
+class TestEveryReviewerMandatesBootstrap:
+    """Run 6e6a: ecosystem-integration-reviewer lacked the MANDATORY SETUP
+    section, read the bare bootstrap command as context, explored for 43
+    calls, never saved, and was re-dispatched (8 % of subagent cost)."""
+
+    def test_exempt_set_names_only_registered_agents(self):
+        assert BOOTSTRAP_EXEMPT_AGENTS <= set(ALL_AGENTS), (
+            BOOTSTRAP_EXEMPT_AGENTS - set(ALL_AGENTS)
+        )
+
+    @pytest.mark.parametrize("agent", ALL_AGENTS)
+    def test_definition_contains_mandatory_bootstrap_section(self, agent):
+        if agent in BOOTSTRAP_EXEMPT_AGENTS:
+            pytest.skip("not dispatched through bootstrap")
+        path = PLUGIN_ROOT / "agents" / f"{agent}.md"
+        # Deliberately not a skip: a registry entry whose definition file is
+        # missing is a worse version of the defect this test exists to catch.
+        assert path.is_file(), f"{agent} is in the registry with no definition"
+        text = path.read_text()
+        assert "## MANDATORY SETUP — Run Bootstrap Before Reviewing" in text, agent
+        assert f"bootstrap.py --agent {agent}" in text, agent
+
+

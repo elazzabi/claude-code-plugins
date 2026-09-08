@@ -13,7 +13,7 @@ tools:
   - WebSearch
 ---
 
-## MANDATORY SETUP — Run Bootstrap First
+## MANDATORY SETUP — Run Bootstrap Before Reviewing
 
 Complete this step before any review work:
 

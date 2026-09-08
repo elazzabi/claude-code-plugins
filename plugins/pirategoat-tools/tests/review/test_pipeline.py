@@ -1057,6 +1057,18 @@ class TestStep6DispatchAgents:
         assert "security-reviewer" in text
         assert "abc..HEAD" in text  # concrete range, not template
 
+    def test_claude_dispatch_block_opens_with_an_imperative(self, mod, tmp_path):
+        """The orchestrator copies the fenced block as the subagent prompt, so the
+        instruction to run bootstrap first must live inside the block."""
+        state = self._make_state_with_agents()
+        ctx = {"git": {"git_range": "abc..HEAD"}}
+        g = mod.get_step_guidance(6, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        block = text.split("**code-reviewer:**", 1)[1].split("```", 2)[1]
+        lines = [l for l in block.strip().splitlines() if l.strip()]
+        assert lines[0] == mod.DISPATCH_PROMPT_LEAD
+        assert lines[1].startswith("python3 ") and "bootstrap.py --agent code-reviewer" in lines[1]
+
     def test_codex_dispatch_uses_spawn_agent_and_canonical_reviewer(self, mod, tmp_path):
         """Codex dispatch reads the canonical reviewer instead of copying it."""
         state = self._make_state_with_agents()
@@ -1157,6 +1169,9 @@ class TestStep6DispatchAgents:
             line for line in g["actions"]
             if "bootstrap.py" in line and "--repo-agent-ref" in line
         )
+        # The adapter's fenced block opens with the same imperative as a
+        # native reviewer's; the orchestrator pastes either as the prompt.
+        assert g["actions"][g["actions"].index(cmd_line) - 1] == mod.DISPATCH_PROMPT_LEAD
         tok = shlex.split(cmd_line)
         assert tok[tok.index("--agent") + 1] == "repo-reviewer-adapter"
         assert tok[tok.index("--instance-name") + 1] == "repo-renewals-reviewer"

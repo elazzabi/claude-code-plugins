@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
 - Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
 - The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
+- The ecosystem-integration reviewer carries the mandatory bootstrap section every other reviewer has, and Claude dispatch prompts open with the instruction to run bootstrap first.
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
 
 ## [1.118.0] - 2026-09-04
