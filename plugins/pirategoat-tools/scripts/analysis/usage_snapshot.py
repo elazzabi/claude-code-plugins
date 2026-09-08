@@ -100,6 +100,7 @@ from review_metrics.contracts import (  # noqa: E402
     DEFAULT_REGISTRY,
     DEFAULT_SESSIONS_ROOT,
     _ATOMIC_IO_CONTRACT,
+    _MANIFEST_SECTIONS_CONTRACT,
     _TELEMETRY_CONTRACT,
 )
 from review_metrics.measure import measure_run  # noqa: E402
@@ -363,6 +364,10 @@ def _build_snapshot(
                 "agent": row["agent"],
                 "model": row.get("model"),
                 "usage": row["usage"],
+                "tool_calls": _MANIFEST_SECTIONS_CONTRACT.safe_nonnegative_int(row.get("tool_calls")),
+                "repository_reads": _MANIFEST_SECTIONS_CONTRACT.safe_nonnegative_int(
+                    row.get("repository_reads")
+                ),
             }
             for row in usable
         ],
@@ -451,11 +456,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--sessions-root", default=str(DEFAULT_SESSIONS_ROOT))
     parser.add_argument("--registry", default=str(DEFAULT_REGISTRY))
+    parser.add_argument(
+        "--stdout", action="store_true",
+        help="Print the snapshot as JSON and write nothing (a step-9 measurement).",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Write the snapshot and print one line of JSON describing it."""
+    """Write and summarize the snapshot, or print the candidate with --stdout."""
     args = _parser().parse_args(argv)
     output_dir = Path(args.output_dir).expanduser()
     try:
@@ -470,6 +479,10 @@ def main(argv: list[str] | None = None) -> int:
             f"capture_failed:{type(error).__name__}",
             {"started_at": None, "ended_at": None, "closed": False},
         )
+
+    if args.stdout:
+        print(json.dumps(candidate))
+        return 0
 
     # MONOTONIC: never let a re-run's candidate replace better evidence
     # already on disk. A downgrade is discarded wholesale — the existing

@@ -88,15 +88,32 @@ CONSENT_DISCLOSURE = (
     "Before asking, explain that shared run metadata includes repo names, "
     "the review target (the PR number or branch, which identifies the "
     "exact PR to collaborators), the reviewed commit range and SHAs, "
-    "the run id, the plugin version, pipeline step timings, skips, and "
+    "the run id, the plugin version and the plugin checkout's commit, "
+    "pipeline step timings, skips, and "
     "status flags, per-agent "
     "dispatch and outcome data (which agents ran or were skipped, whether "
     "reviewers, the reconciliator, or the decision critic, and each one's "
     "domain, model tier, registry-configured triage checks, tool budget, "
     "status, verdict, finding-severity counts, and content hashes of its "
     "review document), repo-relative changed-file "
-    "paths and which agents each file was assigned to, worktree-hygiene "
-    "and dependency-refresh status, and token usage by model; never file "
+    "paths and which agents each file was assigned to, the planner's dispatch "
+    "signal category per agent (keyword, check, default, "
+    "override and the like; never its reasoning text), "
+    "the reconciliation lineage of every final finding (its id, severity, "
+    "the reviewer, finding id and severity it came from, the critic's action on it), "
+    "drop reasons, check counts and dropped-check counts, orchestrator-note "
+    "outcome counts, the critic's verdicts and adjustment counts by action "
+    "and outcome, which Verify items were settled and by how many checks "
+    "and how many citations named an undeclared item, and how many upstream "
+    "citations each reviewer made per host, "
+    "worktree-hygiene and dependency-refresh status, whether the base branch "
+    "was fetched, the SHA it resolved to and whether the clone is shallow, "
+    "whether the local range matched GitHub's changed-file "
+    "count, the upstream hosts the run resolved "
+    "(their names, kinds, sources, versions, commits and refresh dates, "
+    "what the repository declares it requires, unresolved host reasons and "
+    "versions, the banner reason, self-provided host names and scan-root count "
+    "— never their local paths), and token usage by model and per agent with each agent's tool-call and repository-read counts, never file "
     "contents, diffs, finding text, local workspace paths or filenames "
     "outside the reviewed change, PR titles or authors, session ids, or "
     "triage reasoning."
@@ -192,8 +209,7 @@ _REDACTED_VALUES = {
 # recorded. Both endpoints are already recorded as full SHAs in ``run.git``;
 # the shared reader only needs those, so every range is rewritten to the
 # SHA form, or nulled when a SHA is missing.
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
-_SHA_RANGE_RE = re.compile(r"[0-9a-f]{40}\.\.\.?[0-9a-f]{40}")
+_SHA_RANGE_RE = re.compile(rf"{FULL_SHA_PATTERN}\.\.\.?{FULL_SHA_PATTERN}")
 _SYMBOLIC_RANGE_KEYS = ("requested_range", "git_range")
 
 
@@ -204,8 +220,8 @@ def _sha_range(git: object) -> str | None:
     base = git.get("base_sha")
     head = git.get("head_sha")
     if (
-        isinstance(base, str) and _FULL_SHA_RE.fullmatch(base)
-        and isinstance(head, str) and _FULL_SHA_RE.fullmatch(head)
+        isinstance(base, str) and FULL_SHA_RE.fullmatch(base)
+        and isinstance(head, str) and FULL_SHA_RE.fullmatch(head)
     ):
         return f"{base}..{head}"
     return None

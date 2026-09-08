@@ -40,6 +40,25 @@ from review.reviewer_lifecycle import (
 )
 
 
+def test_evidence_is_projected_only_when_finalized(mod, tmp_path):
+    out = tmp_path / "output"
+    out.mkdir()
+    telemetry = mod.ReviewTelemetry(str(out), log_dir=str(tmp_path / "logs"))
+    telemetry.start()
+    ledger_path = run_paths.artifact_path(str(out), "review_findings_json")
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(canonical_findings_ledger(["high"])))
+    telemetry.log_step(step=9, phase="SYNTHESIS", title="Reconcile")
+    running = _read_manifest(telemetry)
+    assert running["evidence"] is None
+    assert running["availability"]["evidence"] is False
+    telemetry.finalize(step=12, phase="OUTPUT", title="Complete")
+    settled = _read_manifest(telemetry)
+    assert settled["availability"]["evidence"] is True
+    assert settled["evidence"]["findings"] == [{"id": "f1", "severity": "high", "sources": None, "critic_action": None}]
+    assert '"evidence"' not in Path(telemetry.log_path).read_text()
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("review_telemetry", SCRIPT_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -83,10 +102,7 @@ def _read_manifest(telemetry):
     return json.loads(Path(telemetry.manifest_path).read_text())
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 def _write_dispatch_plan(output_dir, agent_names):
@@ -244,6 +260,7 @@ class TestStart:
         assert start["run_id"] == "run-1"
         assert start["pipeline"]["session_id"] == "session-123"
         assert start["pipeline"]["plugin_version"] == "1.108.0"
+        assert start["pipeline"]["plugin_commit"] == ""
         assert start["pipeline"]["mode"] == "pr"
         assert start["pipeline"]["repo_path"] == "/repo"
         assert start["pipeline"]["repo"] == ""
@@ -729,7 +746,21 @@ class TestRunManifest:
         assert manifest["run"]["id"] == "run-1"
         assert manifest["run"]["session_id"] == "session-1"
         assert manifest["run"]["plugin_version"] == "1.108.0"
+        assert manifest["run"]["plugin_commit"] is None
         assert manifest["run"]["mode"] == "pr"
+
+    def test_manifest_carries_the_build_commit_beside_the_version(self, telemetry):
+        """`plugin_version` only moves at release; run 4 stamped 1.119.0
+        for the A branch tip and the cohort table could not tell that build
+        from the fifty dev-mount runs the next commits would stamp the same."""
+        telemetry.start(
+            run_id="run-1", session_id="session-1", plugin_version="1.119.0",
+            plugin_commit="194489e8", mode="pr", repo_path="/repo",
+        )
+        start = _read_events(telemetry.log_path)[0]
+        assert start["pipeline"]["plugin_commit"] == "194489e8"
+        manifest = _read_manifest(telemetry)
+        assert manifest["run"]["plugin_commit"] == "194489e8"
         assert manifest["run"]["repo_path"] == "/repo"
         assert manifest["run"]["repo"] is None
         assert manifest["run"]["target"] is None
@@ -747,6 +778,7 @@ class TestRunManifest:
             "reviewer_markdown": False,
             "findings_markdown": False,
             "host_context": False,
+            "evidence": False,
         }
         assert manifest["assignment"] is None
 
@@ -940,16 +972,20 @@ class TestRunManifest:
         assert "prompt" not in step["decisions"]
         assert "tool_result" not in step["decisions"]
 
-    def test_finalize_materializes_complete_sanitized_outcome(
+    def test_finalize_materializes_complete_sanitized_outcome_with_reconciliation_verification(
         self, telemetry, output_dir
     ):
-        (output_dir / "pipeline-result.json").write_text(json.dumps({
+        pipeline_result = {
             "status": "degraded",
             "verdict": "COMMENT",
             "critic_verdict": "REVISE",
+            "reconciliation_verification": {
+                "verified_concern_count": 1, "repository_reads": 2, "status": "verified",
+            },
             "review_body": "PIPELINE_RESULT_SECRET",
             "degradation_notes": ["TOOL_RESULT_SECRET"],
-        }))
+        }
+        (output_dir / "pipeline-result.json").write_text(json.dumps(pipeline_result))
         telemetry.start(run_id="run-1")
         telemetry.finalize(step=11, phase="OUTPUT", title="Present Results")
 
@@ -960,6 +996,7 @@ class TestRunManifest:
         assert manifest["outcome"]["pipeline_status"] == "degraded"
         assert manifest["outcome"]["verdict"] == "COMMENT"
         assert manifest["outcome"]["critic_verdict"] == "REVISE"
+        assert manifest["outcome"]["reconciliation_verification"] == pipeline_result["reconciliation_verification"]
         serialized = json.dumps(manifest)
         assert "PIPELINE_RESULT_SECRET" not in serialized
         assert "TOOL_RESULT_SECRET" not in serialized
@@ -4454,10 +4491,40 @@ class TestUsageManifest:
             "output_tokens"] == 5
         assert section["by_agent"] == [
             {"agent": "code-reviewer", "model": "claude-opus-5[1m]",
-             "usage": self._usage(output=5)},
+             "usage": self._usage(output=5), "tool_calls": None,
+             "repository_reads": None},
             {"agent": "security-reviewer", "model": "claude-sonnet-5",
-             "usage": self._usage(output=2)},
+             "usage": self._usage(output=2), "tool_calls": None,
+             "repository_reads": None},
         ]
+
+    def test_agent_tool_and_read_counts_are_projected_without_inventing_them(
+        self, mod, tmp_path
+    ):
+        snapshot = self._snapshot(subagent_usage=[
+            {
+                "agent": "code-reviewer",
+                "model": "claude-opus-5[1m]",
+                "usage": self._usage(output=5),
+                "tool_calls": 42,
+                "repository_reads": 7,
+            },
+            {
+                "agent": "security-reviewer",
+                "model": "claude-sonnet-5",
+                "usage": self._usage(output=2),
+                "tool_calls": None,
+                "repository_reads": 3,
+            },
+        ])
+        self._write(tmp_path, snapshot)
+
+        section = mod.manifest_sections.build_usage_manifest(str(tmp_path))
+
+        assert section["by_agent"][0]["tool_calls"] == 42
+        assert section["by_agent"][0]["repository_reads"] == 7
+        assert section["by_agent"][1]["tool_calls"] is None
+        assert section["by_agent"][1]["repository_reads"] == 3
 
     def test_unknown_schema_yields_none(self, mod, tmp_path):
         """A snapshot announcing a schema this builder does not know was
@@ -4567,7 +4634,8 @@ class TestUsageManifest:
         assert section["orchestrator_usage"] is None
         assert section["usage_by_model"] == {}
         assert section["by_agent"] == [
-            {"agent": "code-reviewer", "model": None, "usage": self._usage()},
+            {"agent": "code-reviewer", "model": None, "usage": self._usage(),
+             "tool_calls": None, "repository_reads": None},
         ]
 
     def test_non_integer_agent_counts_are_dropped(self, mod, tmp_path):

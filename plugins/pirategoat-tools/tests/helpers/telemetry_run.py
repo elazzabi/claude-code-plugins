@@ -22,7 +22,9 @@ from helpers.review_fixtures import (
     canonical_findings_ledger,
     canonical_review_document,
 )
-from review import dependency_refresh, synthesis_lifecycle
+from review import critic_adjustments, dependency_refresh, synthesis_lifecycle
+from review.findings_ledger import DROP_REASONS_FINDING, NOTE_OUTCOMES
+from review.verdict_rules import VALID_SEVERITIES
 from review.reviewer_lifecycle import review_paths, started_marker_path
 from review.run_paths import artifact_path
 from review.telemetry import ReviewTelemetry
@@ -31,8 +33,8 @@ from review.telemetry import ReviewTelemetry
 # link, linked issue, head branch, session id, planner triage reason and
 # signal, the orchestrator's override reason, a not-applicable reviewer's
 # skip reason, the step-10 decision reason, a dependency-precheck dirty
-# file, a dependency-refresh command, a worktree-hygiene new file, and a
-# scratch file in the run root.
+# file, a dependency-refresh command, a worktree-hygiene new file, a scratch
+# file in the run root, and the undisclosed base ref from range truth.
 RECORDED_UNDISCLOSED = (
     "Fix checkout tax rounding",
     "third-party-author",
@@ -49,6 +51,7 @@ RECORDED_UNDISCLOSED = (
     "customer-acme-secret",
     "customer-acme-scratch",
     "customer-acme-notes",
+    "origin/main",
 )
 
 CHANGED_FILES = ["src/checkout.py", "src/tax.py", "docs/pricing.md", "pnpm-lock.yaml"]
@@ -66,11 +69,7 @@ SEVERITIES_BY_AGENT = {
 SKIP_REASON = "No PHP tests changed; customer-acme fixture only"
 
 
-def _write_artifact(output_dir, key, payload):
-    path = artifact_path(str(output_dir), key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
+from helpers.review_fixtures import write_artifact as _write_artifact  # noqa: E402
 
 
 def _usage(output):
@@ -83,10 +82,77 @@ def _usage(output):
     }
 
 
+def write_evidence_artifacts(output_dir, ledger, *, verdict="REVISE", verdict_before="block"):
+    """Exercise the evidence vocabulary through canonical on-disk artifacts."""
+    fields_by_action = {
+        "promote": {"severity": "high"}, "demote": {"severity": "low"},
+        "rescope": {"file": "private.php", "line": 12},
+        "correct": {"title": "private prose"}, "remove": {},
+        "add": {key: ("low" if key == "severity" else "private prose")
+                for key in critic_adjustments.ADD_REQUIRED_FIELDS},
+    }
+    proposal = critic_adjustments.prepare_proposal({
+        "schema": critic_adjustments.ADJUSTMENTS_SCHEMA,
+        "adjustments": [{
+            "action": action, "target": {"kind": "finding", **({} if action == "add" else {"id": f"f{index}"})},
+            "fields": fields_by_action[action],
+            "rationale": "private rationale",
+        } for index, action in enumerate(critic_adjustments.ACTIONS, 1)] if verdict == "REVISE" else [],
+    })
+    ledger["dropped_findings"] = [{
+        "reviewer": "performance-review", "id": f"f{index}", "reason": reason, "evidence": "private evidence",
+    } for index, reason in enumerate(DROP_REASONS_FINDING, 1)]
+    ledger["dropped_checks"] = [{"reviewer": "security-review", "id": "c2", "reason": "void", "evidence": "private evidence"}]
+    ledger["orchestrator_notes"] = [{"id": f"n{index}", "note": "private note", "outcome": outcome, "evidence": "private evidence"}
+                                    for index, outcome in enumerate(NOTE_OUTCOMES, 1)]
+    ledger["checks"] = [{"id": "c1", "question": "private question", "method": "private method", "result": "private result",
+                         "source_reviewers": ["security-review"], "verifies": ["V1"]}]
+    ledger["meta"]["next_check_number"] = 2
+    for index, finding in enumerate(ledger["findings"], 1):
+        finding["sources"] = [{"reviewer": "security-review", "id": f"f{index}", "severity": finding["severity"]}]
+    if proposal["adjustments"]:
+        ledger["findings"][0]["critic_adjustment"] = {"action": "demote", "rationale": "private rationale"}
+        ledger["verdict_before_adjustments"] = verdict_before
+        ledger["applied_critic_adjustments"] = []
+        ledger["rejected_critic_adjustments"] = []
+        for index, entry in enumerate(proposal["adjustments"]):
+            outcome = critic_adjustments.OUTCOMES[index % len(critic_adjustments.OUTCOMES)]
+            record = {"adjustment_id": entry["adjustment_id"], "outcome": outcome}
+            if outcome == "refuted":
+                record.update(action=entry["action"], target=entry["target"], rejection_reason="private reason")
+                ledger["rejected_critic_adjustments"].append(record)
+            else:
+                ledger["applied_critic_adjustments"].append(record)
+    critic_adjustments.validate_findings_document(ledger)
+    _write_artifact(output_dir, "review_findings_json", ledger)
+    critic_adjustments.write_critic_verdict(str(output_dir), verdict, proposal)
+    purpose = artifact_path(str(output_dir), "change_purpose")
+    purpose.parent.mkdir(parents=True, exist_ok=True)
+    purpose.write_text("## Verify\nV1. private purpose — source: PR body\n## Context\nNone.\n")
+
+
 def write_complete_run(repo, output_dir, log_dir, *, run_id):
     """Drive ``ReviewTelemetry`` through a whole PR review; return its paths."""
     output_dir = Path(output_dir)
     _write_artifact(output_dir, "review_context", {
+        "host_context": {
+            "resolved": [{
+                "name": "wordpress", "kind": "runtime-host",
+                "path": str(repo / "wordpress"), "source": "ecosystem-cache",
+                "version": "7.2", "version_freshness": "2026-09-04T00:04:08Z",
+                "notes": {
+                    "commit": "abc123", "branch": "trunk",
+                    "commit_date": "2026-09-04T18:35:44Z",
+                    "declared_minimum": "7.0",
+                },
+            }],
+            "unresolved": [{
+                "name": "jetpack", "reason": "declared_in_plugin_headers",
+                "version": "14.1",
+            }],
+            "banner": {"reason": "partial_unresolved"},
+            "diagnostics": {"self_provided": ["woocommerce"], "scan_roots": 2},
+        },
         "pr": {
             "number": 42,
             "title": "Fix checkout tax rounding for enterprise-customer",
@@ -100,6 +166,16 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
             "head_ref": "fix/ACME-9-enterprise-customer-rounding",
             "changed_files": CHANGED_FILES,
             "commit_count": 2,
+            "base_fetch": {
+                "ref": "origin/main", "status": "fetched",
+                "sha": "a" * 40, "shallow": False,
+            },
+            "scope_check": {
+                "status": "match", "github_changed_files": 4,
+                "local_changed_files": 4, "head_matches": True,
+                "base_matches": True, "extra_local_files": [],
+                "missing_local_files": [],
+            },
         },
         "pr_size": {"category": "small"},
         "linked_issues": ["ACME-9"],
@@ -153,6 +229,7 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
         run_id=run_id,
         session_id="local-session-1234",
         plugin_version="1.116.0",
+        plugin_commit="0123abcd",
         git_range="main..fix/ACME-9-enterprise-customer-rounding",
         base_sha="a" * 40,
         head_sha="b" * 40,
@@ -198,6 +275,8 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
             reviewed_file_claims=scope,
             review_claimable_files=scope,
         )
+        for finding in document["findings"]:
+            finding["source_cited"] = "wordpress@private-identity:private/source.php:12"
         serialized = json.dumps(document)
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         telemetry.log_agent_review_draft_saved(name, digest)
@@ -217,8 +296,8 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
         synthesis_lifecycle.RECONCILIATOR,
         now=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
-    _write_artifact(output_dir, "review_findings_json", canonical_findings_ledger(
-        ["high"],
+    ledger = canonical_findings_ledger(
+        VALID_SEVERITIES,
         reconciliation={
             "contributing_agent_count": 1,
             "reviewing_agents": ["security-review", "performance-review"],
@@ -227,20 +306,21 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
                 {"name": "php-tests-reviewer", "skip_reason": SKIP_REASON},
             ],
         },
-    ))
+    )
+    write_evidence_artifacts(output_dir, ledger)
     assert synthesis_lifecycle.observe(str(output_dir), finalize=True) is not None
     telemetry.log_step(
         step=10, phase="SYNTHESIS", title="Decision Critic",
         decisions={
-            "critic_skipped": True,
-            "reason": "quick mode + reconciliation verdict (customer-acme quick)",
+            "critic_skipped": False,
+            "reason": "reconciliation requires critique (customer-acme quick)",
         },
     )
 
     _write_artifact(output_dir, "pipeline_result", {
         "status": "success",
         "verdict": "REQUEST_CHANGES",
-        "critic_verdict": "SKIPPED",
+        "critic_verdict": "REVISE",
         "verdict_source": "findings ledger",
     })
     _write_artifact(output_dir, "pipeline_state", {
@@ -278,8 +358,17 @@ def write_complete_run(repo, output_dir, log_dir, *, run_id):
         "reason": None,
         "agents_measured": {"measured": 2, "expected": 2},
         "subagent_usage": [
-            {"agent": name, "model": "claude-sonnet-5", "usage": _usage(output)}
-            for name, output in (("security-reviewer", 5), ("performance-reviewer", 2))
+            {
+                "agent": name,
+                "model": "claude-sonnet-5",
+                "usage": _usage(output),
+                "tool_calls": tool_calls,
+                "repository_reads": repository_reads,
+            }
+            for name, output, tool_calls, repository_reads in (
+                ("security-reviewer", 5, 12, 4),
+                ("performance-reviewer", 2, 8, 3),
+            )
         ],
         "subagent_totals": _usage(7),
         "usage_by_model": {"claude-sonnet-5": _usage(7)},

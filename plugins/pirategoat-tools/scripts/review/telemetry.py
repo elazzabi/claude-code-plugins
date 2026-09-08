@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from . import manifest_sections
+    from .evidence_manifest import build_evidence_manifest
     from .dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
@@ -46,6 +47,7 @@ except ImportError:
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
     from review import manifest_sections
+    from review.evidence_manifest import build_evidence_manifest
     from review.dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
@@ -92,6 +94,7 @@ EVENT_SCHEMA = 3
 # `agents`, and `transcript`'s comes from a measurement source outside
 # the manifest entirely.
 OPTIONAL_SECTION_AVAILABILITY_KEYS = (
+    "evidence",
     "assignment",
     "worktree_hygiene",
     "synthesis_agents",
@@ -300,6 +303,7 @@ class ReviewTelemetry:
               mode: str = "", repo_path: str = "",
               identifier: str = "", run_id: str = "",
               session_id: str = "", plugin_version: str = "",
+              plugin_commit: str = "",
               git_range: str = "", base_sha: str = "",
               head_sha: str = "") -> str:
         """Create log file + marker. Write pipeline_start. Return log path.
@@ -350,6 +354,11 @@ class ReviewTelemetry:
                 "quick_mode": quick_mode,
                 "session_id": session_id,
                 "plugin_version": plugin_version,
+                # The build identity: the plugin checkout's short HEAD.
+                # `plugin_version` only moves at release, so every
+                # dev-mount run between two releases stamps the same
+                # number; this is the only field that tells them apart.
+                "plugin_commit": plugin_commit,
                 "mode": mode,
                 "repo_path": repo_path,
                 "repo": repo,
@@ -834,6 +843,7 @@ class ReviewTelemetry:
                 "id": start.get("run_id", ""),
                 "session_id": pipeline.get("session_id") or None,
                 "plugin_version": pipeline.get("plugin_version") or None,
+                "plugin_commit": pipeline.get("plugin_commit") or None,
                 "mode": pipeline.get("mode") or None,
                 "repo_path": pipeline.get("repo_path") or None,
                 "repo": pipeline.get("repo") or None,
@@ -893,6 +903,8 @@ class ReviewTelemetry:
             manifest_sections.build_host_context_manifest(self.output_dir)
         )
         manifest["availability"]["host_context"] = manifest["host_context"] is not None
+        manifest["evidence"] = build_evidence_manifest(self.output_dir) if settled else None
+        manifest["availability"]["evidence"] = manifest["evidence"] is not None
         manifest["reviewer_markdown"] = (
             manifest_sections.build_reviewer_markdown_manifest(self.output_dir)
         )

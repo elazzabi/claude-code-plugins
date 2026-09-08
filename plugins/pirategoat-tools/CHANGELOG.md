@@ -22,7 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every resolved host carries the identity its checkout declares — version plus the containing repository's commit, never a branch name — and reviewer briefings, the step-3 briefing, the record's Run notes and the telemetry manifest all state that same identity.
 - Reviewers cite upstream reads as `<host>@<version, commit, or unknown>:<path>:<line>`, and the evidence manifest counts those citations per reviewer by host.
 - wp.org zip URLs in wp-env files (`wordpress-latest.zip`, `downloads.wordpress.org/plugin/<slug>.zip`) count as host signals, so the ecosystem cache fulfils them.
+- Telemetry carries an `evidence` section — each finding's sources with the severity every reviewer gave, drop reasons, Verify settlement counts, the critic's verdict and adjustments, and upstream citations per host — and never finding text.
+- Telemetry records whether step 3 fetched the base and the SHA it resolved to, and whether the local range matched GitHub's PR scope.
 - The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
+- Shared usage rows carry each agent's tool-call and repository-read counts, and the metrics report measures the synthesis agents' share and every agent's share of subagent spend per run and across runs; the report schema is 5.
+- The telemetry manifest and the metrics table carry the plugin checkout's commit beside the plugin version, so a dev-mount run is distinguishable from the release and from every other dev-mount run stamping the same version.
 - Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
 ### Changed
 

@@ -9,10 +9,15 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from .contracts import (
+    FULL_SHA_RE,
+    _CRITIC_CONTRACT,
+    _FINDINGS_LEDGER_CONTRACT,
+    _REVIEW_DOCUMENT_CONTRACT,
     _ASSIGNED_FILES_BY_AGENT_FIELD,
     _ASSIGNED_FILES_FIELD,
     _ASSIGNMENT_FIELDS,
     _ASSIGNMENT_PATH_LIST_FIELDS,
+    _BASE_FETCH_STATUSES,
     _CHANGED_FILES_FIELD,
     _DEPENDENCY_REFRESH_EXIT_STATUSES,
     _DEPENDENCY_REFRESH_STATUSES,
@@ -35,6 +40,7 @@ from .contracts import (
     _REVIEWABLE_FILES_FIELD,
     _SAFE_RUN_ID_RE,
     _SEVERITIES,
+    _SCOPE_CHECK_STATUSES,
     _SUMMARY_FIELDS,
     _SUPPORTED_DISPATCH_STATUSES,
     _SUPPORTED_MANIFEST_SCHEMA,
@@ -227,6 +233,39 @@ def _sanitize_warnings(value: object) -> list[str]:
     return result
 
 
+def _sanitize_base_fetch(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    sha = _safe_string(value.get("sha"))
+    shallow = value.get("shallow")
+    return {
+        "status": _enum(status, _BASE_FETCH_STATUSES),
+        "sha": sha if sha is not None and FULL_SHA_RE.fullmatch(sha) else None,
+        "shallow": shallow if isinstance(shallow, bool) else None,
+    }
+
+
+def _sanitize_scope_check(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    result: dict[str, Any] = {
+        "status": _enum(status, _SCOPE_CHECK_STATUSES),
+    }
+    for name in (
+        "github_changed_files",
+        "local_changed_files",
+        "extra_local_file_count",
+        "missing_local_file_count",
+    ):
+        result[name] = _nonnegative_int(value.get(name))
+    for name in ("head_matches", "base_matches"):
+        flag = value.get(name)
+        result[name] = flag if isinstance(flag, bool) else None
+    return result
+
+
 def _sanitize_run(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -236,6 +275,7 @@ def _sanitize_run(value: object) -> dict[str, Any]:
             "id",
             "session_id",
             "plugin_version",
+            "plugin_commit",
             "mode",
             "repo_path",
             "output_dir",
@@ -243,9 +283,10 @@ def _sanitize_run(value: object) -> dict[str, Any]:
             "ended_at",
         ),
     )
-    git = _safe_scalar_map(
-        value.get("git"), ("requested_range", "base_sha", "head_sha")
-    )
+    git_raw = value.get("git") if isinstance(value.get("git"), dict) else {}
+    git = _safe_scalar_map(git_raw, ("requested_range", "base_sha", "head_sha"))
+    git["base_fetch"] = _sanitize_base_fetch(git_raw.get("base_fetch"))
+    git["scope_check"] = _sanitize_scope_check(git_raw.get("scope_check"))
     result["git"] = git
     return result
 
@@ -1191,9 +1232,7 @@ def _sanitize_worktree_hygiene(value: object) -> dict[str, Any] | None:
     captured_at = value.get("baseline_captured_at")
     return {
         "status": (
-            status
-            if isinstance(status, str) and status in _WORKTREE_HYGIENE_STATUSES
-            else "unknown"
+            _enum(status, _WORKTREE_HYGIENE_STATUSES) or "unknown"
         ),
         "new_files": entries("new_files"),
         "changed_files": entries("changed_files"),
@@ -1234,8 +1273,8 @@ def _sanitize_usage_snapshot(value: object) -> dict[str, Any] | None:
     non-negative integers (token counts); `usage_by_model` keys are
     dispatched model identifiers (a fixed, non-personal vocabulary); and
     `by_agent` rows carry only a reviewer-agent name, a model identifier,
-    and a usage map. None of this is user-authored or personally
-    identifying text.
+    a usage map, and non-negative tool-call and repository-read counts.
+    None of this is user-authored or personally identifying text.
     """
     if not isinstance(value, dict):
         return None
@@ -1282,6 +1321,10 @@ def _sanitize_usage_snapshot(value: object) -> dict[str, Any] | None:
                 "agent": agent,
                 "model": _safe_string(row.get("model")),
                 "usage": _safe_usage_snapshot_map(row.get("usage")),
+                "tool_calls": _nonnegative_int(row.get("tool_calls")),
+                "repository_reads": _nonnegative_int(
+                    row.get("repository_reads")
+                ),
             })
 
     captured_at = value.get("captured_at")
@@ -1430,9 +1473,7 @@ def _sanitize_dependency_refresh(value: object) -> dict[str, Any] | None:
     ):
         status = value.get("status")
         result["status"] = (
-            status
-            if isinstance(status, str) and status in _DEPENDENCY_REFRESH_STATUSES
-            else "invalid"
+            _enum(status, _DEPENDENCY_REFRESH_STATUSES) or "invalid"
         )
         tracked_files_dirty = value.get("tracked_files_dirty")
         result["tracked_files_dirty"] = (
@@ -1679,6 +1720,146 @@ def _sanitize_host_context(value: object) -> dict[str, Any] | None:
     }
 
 
+def _sanitize_evidence(value: object) -> dict[str, Any] | None:
+    """Retain only bounded identities, enumerated evidence facts and counts."""
+    if not isinstance(value, dict):
+        return None
+    if not all(
+        isinstance(value.get(key), kind)
+        for key, kind in (
+            ("findings", list),
+            ("checks", dict),
+            ("verify_items", (list, type(None))),
+            ("host_citations", (dict, type(None))),
+        )
+    ):
+        return None
+    optional_collections = (
+        ("dropped_findings", list),
+        ("findings_removed_by_critic", list),
+        ("orchestrator_notes", dict),
+    )
+    if any(
+        value.get(key) is not None and not isinstance(value.get(key), kind)
+        for key, kind in optional_collections
+    ):
+        return None
+
+    def identity(raw, pattern):
+        return raw if isinstance(raw, str) and pattern.fullmatch(raw) else None
+
+    def counts(raw, vocabulary):
+        raw = raw if isinstance(raw, dict) else {}
+        return {key: _nonnegative_int(raw.get(key)) for key in vocabulary}
+
+    def sources(raw, reasons=None):
+        if not isinstance(raw, list):
+            return None
+        result = []
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            agent = identity(row.get("agent"), _PRODUCER_AGENT_NAME_RE)
+            source_id = identity(row.get("id"), _FINDINGS_LEDGER_CONTRACT.SOURCE_ID_RE)
+            if agent is None or source_id is None:
+                continue
+            entry = {"agent": agent, "id": source_id}
+            if reasons is None:
+                # The severity the source reviewer gave, so a reconciliator
+                # re-grade (no critic action) is countable; None when the
+                # ledger predates the field.
+                severity = row.get("severity")
+                entry["severity"] = _enum(severity, _SEVERITIES)
+            if reasons is not None:
+                if row.get("reason") not in reasons:
+                    continue
+                entry["reason"] = row["reason"]
+            result.append(entry)
+        return result
+
+    def finding_rows(raw):
+        if not isinstance(raw, list):
+            return None
+        rows = []
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            finding_id = identity(row.get("id"), _FINDINGS_LEDGER_CONTRACT.SOURCE_ID_RE)
+            if finding_id is None:
+                continue
+            rows.append({
+                "id": finding_id,
+                "severity": _enum(row.get("severity"), _SEVERITIES),
+                "sources": sources(row.get("sources")),
+                "critic_action": row.get("critic_action") if row.get("critic_action") in _CRITIC_CONTRACT.ACTIONS else None,
+            })
+        return rows
+
+    findings = finding_rows(value["findings"])
+    verify_items = None if value["verify_items"] is None else []
+    for row in value["verify_items"] or []:
+        if not isinstance(row, dict):
+            continue
+        item_id = identity(row.get("id"), _REVIEW_DOCUMENT_CONTRACT.VERIFY_ITEM_ID_RE)
+        if item_id is not None:
+            verify_items.append({
+                "id": item_id,
+                "carried_over": row.get("carried_over") if isinstance(row.get("carried_over"), bool) else None,
+                "settled_by": _nonnegative_int(row.get("settled_by")),
+            })
+    critic = value.get("critic")
+    if isinstance(critic, dict):
+        adjustments = critic.get("adjustments")
+        critic = {
+            "verdict": critic.get("verdict") if critic.get("verdict") in _CRITIC_CONTRACT.VALID_CRITIC_VERDICTS else None,
+            "verdict_before_adjustments": critic.get("verdict_before_adjustments") if critic.get("verdict_before_adjustments") in _CRITIC_CONTRACT.LEDGER_VERDICTS else None,
+            "adjustments": {action: counts(row, ("proposed", *_CRITIC_CONTRACT.OUTCOMES))
+                            for action, row in adjustments.items()
+                            if action in _CRITIC_CONTRACT.ACTIONS} if isinstance(adjustments, dict) else None,
+        }
+    else:
+        critic = None
+    hosts = None if value["host_citations"] is None else {}
+    for agent, by_host in (value["host_citations"] or {}).items():
+        if identity(agent, _PRODUCER_AGENT_NAME_RE) is None or not isinstance(by_host, dict):
+            continue
+        hosts[agent] = {host: _nonnegative_int(count) for host, count in by_host.items()
+                        if identity(host, _PRODUCER_AGENT_NAME_RE)}
+    return {
+        "findings": findings,
+        "dropped_findings": sources(
+            value.get("dropped_findings"),
+            _FINDINGS_LEDGER_CONTRACT.DROP_REASONS_FINDING,
+        ),
+        # A manifest projected before critic removals were carried cannot
+        # say what became of their sources: None, never an empty list.
+        "findings_removed_by_critic": finding_rows(value.get("findings_removed_by_critic")),
+        "checks": {
+            "count": _nonnegative_int(value["checks"].get("count")),
+            "dropped": (
+                counts(
+                    value["checks"].get("dropped"),
+                    _FINDINGS_LEDGER_CONTRACT.DROP_REASONS_CHECK,
+                )
+                if isinstance(value["checks"].get("dropped"), dict)
+                else None
+            ),
+        },
+        "verify_items": verify_items,
+        "undeclared_citations": _nonnegative_int(value.get("undeclared_citations")),
+        "critic": critic,
+        "orchestrator_notes": (
+            counts(
+                value.get("orchestrator_notes"),
+                _FINDINGS_LEDGER_CONTRACT.NOTE_OUTCOMES,
+            )
+            if isinstance(value.get("orchestrator_notes"), dict)
+            else None
+        ),
+        "host_citations": hosts,
+    }
+
+
 # One table-driven map from each producer-declared optional section
 # (`contracts._OPTIONAL_SECTION_AVAILABILITY_KEYS`, telemetry.py's own
 # `OPTIONAL_SECTION_AVAILABILITY_KEYS`) to the sanitizer that projects its
@@ -1687,6 +1868,7 @@ def _sanitize_host_context(value: object) -> dict[str, Any] | None:
 # gate lives inside `_sanitize_synthesis_agents` itself and needs no
 # special-casing here.
 _OPTIONAL_SECTION_SANITIZERS: dict[str, Any] = {
+    "evidence": _sanitize_evidence,
     "assignment": _sanitize_assignment,
     "worktree_hygiene": _sanitize_worktree_hygiene,
     "synthesis_agents": _sanitize_synthesis_agents,
@@ -1757,15 +1939,19 @@ def _sanitize_optional_sections(
     this consolidation: a producer that measured the section absent is
     not overruled by a stray leftover payload.
 
-    A section this manifest never declared at all — neither an
-    availability key nor a payload key present — is never added to the
-    output. Pre-feature manifests stay exactly as unmeasured as they
-    always were; they are never promoted to a fabricated `false`.
+    A section this manifest never declared at all — no availability key
+    and no payload — is never added to the output. Pre-feature manifests
+    stay exactly as unmeasured as they always were; they are never
+    promoted to a fabricated `false`. A null payload with no flag is that
+    same absence: `_sanitize_manifest` writes every section key, so a
+    sanitized manifest re-ingested on the next pass carries `null` for
+    what it never measured, and reading that as "measured, nothing
+    parsed" would invent a `false` on the second pass.
     """
     sections: dict[str, Any] = {}
     flags: dict[str, bool] = {}
     for name in _OPTIONAL_SECTION_AVAILABILITY_KEYS:
-        if name not in raw_availability and name not in value:
+        if name not in raw_availability and value.get(name) is None:
             continue
         if raw_availability.get(name) is False:
             sections[name] = None
@@ -1826,6 +2012,7 @@ def _sanitize_manifest(value: object) -> dict[str, Any]:
         "dispatch": dispatch,
         "assignment": optional_sections.get("assignment"),
         "synthesis_agents": optional_sections.get("synthesis_agents"),
+        "evidence": optional_sections.get("evidence"),
         "worktree_hygiene": optional_sections.get("worktree_hygiene"),
         "usage": optional_sections.get("usage"),
         "skipped_steps": optional_sections.get("skipped_steps"),

@@ -2044,6 +2044,12 @@ def _orchestrate_step_11(mode, config, state, context, output_dir):
 
     critic_verdict = state["critic_verdict"]
 
+    changed_csv = context.get("git", {}).get("changed_files_csv", "")
+    state["critic_prose_paths_outside_diff"] = _critic_prose_paths_outside_diff(
+        output_dir,
+        [f.strip() for f in changed_csv.split(",") if f.strip()],
+    )
+
     findings_path = artifact_path(output_dir, "review_findings_json")
     # The step's one read of the ledger, and therefore its one authority on
     # whether a ledger exists. Everything below asks this result, never the
@@ -2314,6 +2320,8 @@ def _orchestrate_step_11(mode, config, state, context, output_dir):
         # the critic's override, or from the fallback the degradation note
         # beside it already explains.
         "verdict_source": verdict_source,
+        # Step 9 owns this measurement; None when that step never ran.
+        "reconciliation_verification": state.get("reconciliation_verification"),
     }
     result_path = artifact_path(output_dir, "pipeline_result")
 

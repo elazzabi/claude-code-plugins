@@ -1383,6 +1383,10 @@ def build_usage_manifest(output_dir: str) -> Optional[dict]:
                 "agent": row["agent"],
                 "model": model if isinstance(model, str) else None,
                 "usage": _safe_usage_map(row.get("usage")),
+                "tool_calls": safe_nonnegative_int(row.get("tool_calls")),
+                "repository_reads": safe_nonnegative_int(
+                    row.get("repository_reads")
+                ),
             })
 
     counts = data.get("agents_measured")

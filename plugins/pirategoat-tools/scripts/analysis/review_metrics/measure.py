@@ -13,6 +13,8 @@ from .contracts import (
     DEFAULT_REGISTRY,
     _AVAILABILITY_FAMILIES,
     _CRITIC_VERDICTS,
+    _SYNTHESIS_DECISION_CRITIC,
+    _SYNTHESIS_RECONCILIATOR,
     _TRANSCRIPT_FAMILIES,
     _OBSERVED_READS_SCHEMA,
     _load_exact_path_module,
@@ -32,6 +34,12 @@ from .sanitize import (
 )
 from .usage import _dispatched_model, _safe_usage
 from .load import _is_duplicate_conflict, _read_json
+
+
+_SYNTHESIS_AGENT_NAMES = frozenset({
+    _SYNTHESIS_RECONCILIATOR,
+    _SYNTHESIS_DECISION_CRITIC,
+})
 
 
 @lru_cache(maxsize=None)
@@ -152,9 +160,11 @@ def _sanitize_agent_usage(value: object) -> list[dict[str, Any]] | None:
                 return None
             safe["usage"] = usage
             safe["tool_calls"] = tool_calls
+            safe["repository_reads"] = _nonnegative_exact_int(item.get("repository_reads"))
         else:
             safe["usage"] = None
             safe["tool_calls"] = None
+            safe["repository_reads"] = None
         result.append(safe)
     return result
 
@@ -719,11 +729,46 @@ def _pipeline_metric_availability(
             )
             else "partial"
         )
+    usage = manifest.get("usage")
+    usage_availability = usage.get("availability") if isinstance(usage, dict) else None
+    usage_shares_state = (
+        usage_availability.get("subagents")
+        if isinstance(manifest.get("usage_shares"), dict)
+        and isinstance(usage_availability, dict)
+        else "missing"
+    )
+    if usage_shares_state not in {"complete", "partial"}:
+        usage_shares_state = "missing"
+    evidence = manifest.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence_state = "missing"
+    else:
+        findings = evidence.get("findings")
+        lineage_available = (
+            isinstance(findings, list)
+            and all(
+                isinstance(finding, dict)
+                and isinstance(finding.get("sources"), list)
+                for finding in findings
+            )
+            and isinstance(evidence.get("dropped_findings"), list)
+        )
+        checks = evidence.get("checks")
+        evidence_state = (
+            "complete"
+            if lineage_available
+            and isinstance(checks, dict)
+            and isinstance(checks.get("dropped"), dict)
+            and isinstance(evidence.get("orchestrator_notes"), dict)
+            else "partial"
+        )
     return {
         "dispatch": dispatch_state,
         "assignment": assignment_state,
         "lifecycle": lifecycle_state,
         "synthesis_agents": synthesis_state,
+        "usage_shares": usage_shares_state,
+        "evidence": evidence_state,
         "outcomes": outcomes_state,
         "raw_findings": raw_state,
         "final_findings": final_state,
@@ -973,6 +1018,63 @@ def _budget_utilization(measured: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _usage_shares(measured: dict[str, Any]) -> dict[str, Any] | None:
+    """Measure each subagent's effective-input share and synthesis total.
+
+    The reconciliator and decision critic together are the synthesis share.
+    Snapshot rows represent dispatches, so retries remain separate rows and
+    contribute separately to the snapshot's denominator. Sum them by agent
+    before dividing so the numerator and denominator describe the same work.
+    """
+    usage = measured.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    totals = usage.get("subagent_totals")
+    denominator = (
+        totals.get("effective_input_tokens") if isinstance(totals, dict) else None
+    )
+    rows = usage.get("by_agent")
+    if (
+        not isinstance(rows, list)
+        or not isinstance(denominator, int)
+        or isinstance(denominator, bool)
+        or denominator <= 0
+    ):
+        return None
+    tokens_by_agent: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        agent = row.get("agent")
+        agent_usage = row.get("usage")
+        tokens = (
+            agent_usage.get("effective_input_tokens")
+            if isinstance(agent_usage, dict)
+            else None
+        )
+        if (
+            not isinstance(agent, str)
+            or not isinstance(tokens, int)
+            or isinstance(tokens, bool)
+        ):
+            continue
+        tokens_by_agent[agent] = tokens_by_agent.get(agent, 0) + tokens
+    if not tokens_by_agent:
+        return None
+    by_agent = {
+        agent: round(100 * tokens / denominator, 1)
+        for agent, tokens in tokens_by_agent.items()
+    }
+    # One division over the summed tokens: summing two rounded shares can
+    # differ from the rounded share of the sum by 0.1 (e582: 47.7, not 47.6).
+    synthesis_tokens = sum(tokens_by_agent.get(name, 0) for name in _SYNTHESIS_AGENT_NAMES)
+    return {
+        "denominator_effective_input_tokens": denominator,
+        "synthesis_pct": round(100 * synthesis_tokens / denominator, 1),
+        "by_agent_pct": dict(sorted(by_agent.items())),
+    }
+
+
 def measure_run(
     manifest: dict[str, Any],
     sessions_root: str | Path,
@@ -994,10 +1096,12 @@ def measure_run(
         # cannot vouch for which run these durations belong to, so they
         # are withdrawn rather than attributed to the wrong one.
         measured["synthesis_agents"] = None
+        measured["evidence"] = None
         measured["transcript"] = _sanitize_transcript(
             _unavailable_transcript("duplicate_run_id_conflict")
         )
         measured["budget_utilization"] = None
+        measured["usage_shares"] = None
         measured["metric_availability"] = {
             family: "missing" for family in _AVAILABILITY_FAMILIES
         }
@@ -1025,6 +1129,7 @@ def measure_run(
     measured["warnings"] = _sanitize_warnings(warnings)
     measured["transcript"] = transcript
     measured["budget_utilization"] = _budget_utilization(measured)
+    measured["usage_shares"] = _usage_shares(measured)
     measured["metric_availability"] = {
         **_pipeline_metric_availability(measured, lifecycle),
         **_transcript_metric_availability(

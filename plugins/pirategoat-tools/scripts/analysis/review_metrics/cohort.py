@@ -11,13 +11,24 @@ from .contracts import (
     _ASSIGNMENT_COUNTABLE_LIST_FIELDS,
     _AVAILABILITY_FAMILIES,
     _AVAILABILITY_STATES,
+    _BASE_FETCH_STATUSES,
     _CRITIC_VERDICT_SKIPPED,
     _CRITIC_VERDICTS,
     _REVIEWABLE_FILES_FIELD,
+    _SCOPE_CHECK_STATUSES,
 )
 from .sanitize import _exact_statistic, _nonnegative_int, _safe_wall_time_ms
 from .usage import _add_usage, _dispatched_model, _empty_usage
 from .load import _is_duplicate_conflict
+
+
+def _add_preserving_unknown(totals: dict, key, count) -> None:
+    """Sum one run's count into ``totals[key]``; a None on either side
+    (unmeasured) makes the total None, never a smaller number."""
+    if count is None or totals.get(key, 0) is None:
+        totals[key] = None
+    else:
+        totals[key] = totals.get(key, 0) + count
 
 
 def _availability_counts(runs: list[dict[str, Any]], family: str) -> dict[str, int]:
@@ -766,6 +777,159 @@ def _aggregate_observed_reads(
     }
 
 
+def _survival_row(survival, agent):
+    return survival.setdefault(
+        agent, {"kept": 0, "dropped": {}, "critic_removed": 0}
+    )
+
+
+def _aggregate_evidence(runs):
+    """Count source finding survival and critic outcomes over measured runs."""
+    measured = [
+        run["evidence"]
+        for run in runs
+        if run.get("metric_availability", {}).get("evidence")
+        in {"complete", "partial"}
+        and isinstance(run.get("evidence"), dict)
+    ]
+    if not measured:
+        return None
+    survival = {}
+    adjustments = {}
+    critic_details_available = True
+    declared = settled = 0
+    lineage_runs = 0
+    dropped_check_runs = 0
+    note_runs = 0
+    dropped_checks = {}
+    notes = {}
+    for section in measured:
+        findings = section["findings"]
+        dropped_findings = section["dropped_findings"]
+        removed_findings = section.get("findings_removed_by_critic")
+        # A source finding ends one of three ways: kept in a final finding,
+        # dropped by the reconciliator with a reason, or carried into a
+        # finding the critic then removed. The run's lineage is measured
+        # only when all three are known.
+        if (
+            dropped_findings is not None
+            and removed_findings is not None
+            and all(
+                finding["sources"] is not None
+                for finding in (*findings, *removed_findings)
+            )
+        ):
+            lineage_runs += 1
+            for collection, outcome in ((findings, "kept"), (removed_findings, "critic_removed")):
+                # A source finding counts once per run, even if a damaged
+                # projection repeats its lineage on more than one finding.
+                identities = {
+                    (source["agent"], source["id"])
+                    for finding in collection
+                    for source in finding["sources"]
+                }
+                for agent, _source_id in sorted(identities):
+                    _survival_row(survival, agent)[outcome] += 1
+            for row in dropped_findings:
+                dropped = _survival_row(survival, row["agent"])["dropped"]
+                dropped[row["reason"]] = dropped.get(row["reason"], 0) + 1
+        check_drops = section["checks"].get("dropped")
+        if check_drops is not None:
+            dropped_check_runs += 1
+            for reason, count in check_drops.items():
+                _add_preserving_unknown(dropped_checks, reason, count)
+        run_notes = section["orchestrator_notes"]
+        if run_notes is not None:
+            note_runs += 1
+            for outcome, count in run_notes.items():
+                _add_preserving_unknown(notes, outcome, count)
+        proposal = (section.get("critic") or {}).get("adjustments")
+        if proposal is None:
+            critic_details_available = False
+        for action, counts in (proposal or {}).items():
+            totals = adjustments.setdefault(action, {})
+            for outcome, count in counts.items():
+                _add_preserving_unknown(totals, outcome, count)
+        verify_items = section["verify_items"]
+        if verify_items is None or section["undeclared_citations"] is None:
+            declared = settled = None
+        elif declared is not None:
+            declared += len(verify_items)
+        if verify_items is None or any(item["settled_by"] is None for item in verify_items):
+            settled = None
+        elif settled is not None:
+            settled += sum(item["settled_by"] > 0 for item in verify_items)
+    run_count = len(measured)
+    return {
+        "survival_by_agent": (
+            dict(sorted(survival.items())) if lineage_runs else None
+        ),
+        "critic_adjustments": (
+            dict(sorted(adjustments.items()))
+            if critic_details_available
+            else None
+        ),
+        "verify_items": {"declared": declared, "settled": settled},
+        "dropped_checks": (
+            dict(sorted(dropped_checks.items())) if dropped_check_runs else None
+        ),
+        "orchestrator_notes": dict(sorted(notes.items())) if note_runs else None,
+        "availability": {
+            "lineage": {
+                "measured_runs": lineage_runs,
+                "unavailable_runs": run_count - lineage_runs,
+            },
+            "dropped_checks": {
+                "measured_runs": dropped_check_runs,
+                "unavailable_runs": run_count - dropped_check_runs,
+            },
+            "orchestrator_notes": {
+                "measured_runs": note_runs,
+                "unavailable_runs": run_count - note_runs,
+            },
+        },
+        "measured_runs": run_count,
+    }
+
+
+def _aggregate_usage_shares(
+    runs: list[dict[str, Any]], availability: dict[str, dict[str, int]]
+) -> dict[str, Any] | None:
+    """Summarize durable subagent-spend shares over measured snapshots."""
+    if availability["usage_shares"]["available"] == 0:
+        return None
+    measured = [
+        run["usage_shares"]
+        for run in runs
+        if run.get("metric_availability", {}).get("usage_shares")
+        in {"complete", "partial"}
+        and isinstance(run.get("usage_shares"), dict)
+    ]
+    if not measured:
+        return None
+    synthesis = [share["synthesis_pct"] for share in measured]
+    by_agent: dict[str, list[float]] = {}
+    for share in measured:
+        for agent, pct in share["by_agent_pct"].items():
+            by_agent.setdefault(agent, []).append(pct)
+    return {
+        "synthesis_pct": {
+            "median": statistics.median(synthesis),
+            "min": min(synthesis),
+            "max": max(synthesis),
+            "sample_count": len(synthesis),
+        },
+        "by_agent_pct": {
+            agent: {
+                "median": statistics.median(percentages),
+                "max": max(percentages),
+                "runs": len(percentages),
+            }
+            for agent, percentages in sorted(by_agent.items())
+        },
+    }
+
+
 def aggregate_cohort(runs: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate a measured cohort without treating unavailable data as zero."""
     run_list = [run for run in runs if not _is_duplicate_conflict(run)]
@@ -789,12 +953,15 @@ def aggregate_cohort(runs: Iterable[dict[str, Any]]) -> dict[str, Any]:
     tool_failures = _aggregate_tool_failures(run_list, availability)
     artifact_writes = _aggregate_artifact_writes(run_list, availability)
     observed_reads = _aggregate_observed_reads(run_list, availability)
+    usage_shares = _aggregate_usage_shares(run_list, availability)
 
     aggregate = {
         "runs": len(run_list),
         "transcript_runs": availability["transcript"]["available"],
         "availability": availability,
         "dispatch": dispatch,
+        "range_truth": _aggregate_range_truth(run_list),
+        "evidence": _aggregate_evidence(run_list),
         "assignment": assignment,
         "reviewed_files": reviewed_files,
         "lifecycle": {
@@ -809,6 +976,7 @@ def aggregate_cohort(runs: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "critic": critic,
         "wall_time": wall_time,
         "synthesis_agents": synthesis_agents,
+        "usage_shares": usage_shares,
         "usage": {
             "complete_totals": complete_usage,
             "partial_observed_totals": partial_usage,

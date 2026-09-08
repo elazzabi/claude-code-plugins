@@ -18,7 +18,10 @@ SCRIPT = SCRIPTS_DIR / "review" / "telemetry_share.py"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from review import telemetry_share
+from review import critic_adjustments, telemetry_share
+from review.evidence_manifest import build_evidence_manifest
+from review.findings_ledger import DROP_REASONS_FINDING, NOTE_OUTCOMES
+from review.verdict_rules import LEDGER_VERDICTS, VALID_SEVERITIES
 
 sys.path.insert(0, str(TESTS_DIR))
 from helpers.gh_shim import (
@@ -29,7 +32,28 @@ from helpers.gh_shim import (
     write_user_config,
 )
 from helpers.pipeline_process import hermetic_env, init_bare_repo
-from helpers.telemetry_run import RECORDED_UNDISCLOSED, write_complete_run
+from helpers.review_fixtures import canonical_findings_ledger
+from helpers.telemetry_run import RECORDED_UNDISCLOSED, write_complete_run, write_evidence_artifacts
+
+
+@pytest.mark.parametrize("verdict", critic_adjustments.VALID_CRITIC_VERDICTS)
+def test_evidence_fixture_exercises_every_critic_verdict(tmp_path, verdict):
+    write_evidence_artifacts(tmp_path, canonical_findings_ledger(VALID_SEVERITIES), verdict=verdict)
+    evidence = build_evidence_manifest(str(tmp_path))
+    assert evidence["critic"]["verdict"] == verdict
+    assert {row["severity"] for row in evidence["findings"]} == set(VALID_SEVERITIES)
+    assert {row["reason"] for row in evidence["dropped_findings"]} == set(DROP_REASONS_FINDING)
+    assert evidence["orchestrator_notes"] == {outcome: 1 for outcome in NOTE_OUTCOMES}
+    if verdict == "REVISE":
+        assert set(evidence["critic"]["adjustments"]) == set(critic_adjustments.ACTIONS)
+        assert {outcome for counts in evidence["critic"]["adjustments"].values()
+                for outcome in critic_adjustments.OUTCOMES if counts[outcome]} == set(critic_adjustments.OUTCOMES)
+
+
+@pytest.mark.parametrize("verdict", LEDGER_VERDICTS)
+def test_evidence_fixture_exercises_every_prior_ledger_verdict(tmp_path, verdict):
+    write_evidence_artifacts(tmp_path, canonical_findings_ledger(VALID_SEVERITIES), verdict_before=verdict)
+    assert build_evidence_manifest(str(tmp_path))["critic"]["verdict_before_adjustments"] == verdict
 
 
 @pytest.fixture(autouse=True)
@@ -278,6 +302,34 @@ FIXTURE_REPO = "github.com/acme/widget"
 # equality, not a superset, so a stale entry fails as loudly as a new one.
 # See TestRedaction.test_every_string_bearing_key_path_is_declared.
 DECLARED_STRING_PATHS = frozenset({
+    "manifest.evidence.findings[].id",
+    "manifest.evidence.findings[].severity",
+    "manifest.evidence.findings[].sources[].agent",
+    "manifest.evidence.findings[].sources[].id",
+    "manifest.evidence.findings[].sources[].severity",
+    "manifest.evidence.findings[].critic_action",
+    "manifest.evidence.dropped_findings[].agent",
+    "manifest.evidence.dropped_findings[].id",
+    "manifest.evidence.dropped_findings[].reason",
+    "manifest.evidence.verify_items[].id",
+    "manifest.evidence.critic.verdict",
+    "manifest.evidence.critic.verdict_before_adjustments",
+    # Upstream host context: names, kinds, sources, versions, commits and
+    # dates of the hosts the run resolved, what the repository declares it
+    # requires, unresolved reasons and the banner reason — never a path
+    # (summarize_host_context drops it before it reaches the manifest).
+    "manifest.host_context.resolved[].name",
+    "manifest.host_context.resolved[].kind",
+    "manifest.host_context.resolved[].source",
+    "manifest.host_context.resolved[].version",
+    "manifest.host_context.resolved[].commit",
+    "manifest.host_context.resolved[].refreshed",
+    "manifest.host_context.resolved[].declared_minimum",
+    "manifest.host_context.unresolved[].name",
+    "manifest.host_context.unresolved[].reason",
+    "manifest.host_context.unresolved[].version",
+    "manifest.host_context.banner_reason",
+    "manifest.host_context.self_provided[]",
     # Disclosed identifiers: repository, target, commit range and SHAs,
     # run id, plugin version (output_dir and session_id are nulled, so
     # absent here).
@@ -289,6 +341,7 @@ DECLARED_STRING_PATHS = frozenset({
     "jsonl.pipeline_start.pipeline.git.base_sha",
     "jsonl.pipeline_start.pipeline.git.head_sha",
     "jsonl.pipeline_start.pipeline.git.requested_range",
+    "jsonl.pipeline_start.pipeline.plugin_commit",
     "jsonl.pipeline_start.pipeline.plugin_version",
     "jsonl.pipeline_start.pipeline.repo",
     "jsonl.pipeline_start.pipeline.repo_path",
@@ -300,7 +353,14 @@ DECLARED_STRING_PATHS = frozenset({
     "manifest.run.git.base_sha",
     "manifest.run.git.head_sha",
     "manifest.run.git.requested_range",
+    # Range truth: whether step 3 fetched the base (status and the SHA it
+    # resolved to) and whether the local range matched GitHub's changed-file
+    # count. The base ref name is undisclosed and is not projected.
+    "manifest.run.git.base_fetch.status",
+    "manifest.run.git.base_fetch.sha",
+    "manifest.run.git.scope_check.status",
     "manifest.run.id",
+    "manifest.run.plugin_commit",
     "manifest.run.plugin_version",
     "manifest.run.repo",
     "manifest.run.repo_path",
@@ -624,7 +684,16 @@ class TestRedaction:
         self, telemetry_run
     ):
         manifest, jsonl_lines = _payloads(telemetry_run)
-        serialized_inputs = json.dumps({"manifest": manifest, "lines": jsonl_lines})
+        raw_context = json.loads(
+            (telemetry_run["output_dir"] / "review-context.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        serialized_inputs = json.dumps({
+            "manifest": manifest,
+            "lines": jsonl_lines,
+            "raw_context": raw_context,
+        })
         # The producers really recorded each undisclosed value, so an
         # absence below is the redaction's doing, not a hollow fixture's.
         for recorded in RECORDED_UNDISCLOSED:
@@ -640,7 +709,7 @@ class TestRedaction:
             assert recorded not in serialized
         # Slots the shared reader requires survive without their text.
         critic_step = next(e for e in events if e.get("step") == 10)
-        assert critic_step["decisions"] == {"critic_skipped": True}
+        assert critic_step["decisions"] == {"critic_skipped": False}
         expected_roster = [{"name": "php-tests-reviewer", "skip_reason": "redacted"}]
         assert redacted_manifest["outcome"]["reconciliation"]["not_applicable_agents"] == expected_roster
         assert events[-1]["snapshot"]["findings"]["reconciliation"]["not_applicable_agents"] == expected_roster
@@ -753,6 +822,14 @@ class TestRedaction:
             "copy \\\\server\\share\\file",
             pytest.param("file:///Users/alice/private", id="file-url-posix"),
             pytest.param("see FILE:///home/alice/private", id="embedded-file-url"),
+            pytest.param("`/Users/private/host`", id="backtick"),
+            pytest.param("~/private/host", id="home"),
+            pytest.param("~alice/private/host", id="named-home"),
+            pytest.param("path=//server/share/host", id="embedded-unc"),
+            pytest.param("\\private\\host", id="windows-rooted"),
+            pytest.param("path=\\private\\host", id="embedded-windows-rooted"),
+            pytest.param("~\\private\\host", id="windows-home"),
+            pytest.param("cwd:~/private/host", id="colon-home"),
         ),
     )
     def test_a_surviving_local_path_anywhere_fails_the_redaction_closed(

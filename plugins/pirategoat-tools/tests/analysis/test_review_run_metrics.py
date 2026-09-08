@@ -50,6 +50,35 @@ format_json = _mod.format_json
 main = _mod.main
 
 
+class TestRepositoryReadEvidence:
+    @pytest.mark.parametrize("value, expected", [
+        (0, 0), (4, 4), (None, None), (True, None), (-1, None), ("2", None),
+    ])
+    def test_sanitized_usage_preserves_only_nonnegative_exact_read_counts(self, value, expected):
+        [row] = measure._sanitize_agent_usage([{
+            "agent": "review-reconciliator", "available": True,
+            "usage": _usage(2),
+            "tool_calls": 3, "repository_reads": value,
+        }])
+        assert row["repository_reads"] == expected
+        assert row["tool_calls"] == 3
+
+    def test_historical_row_without_reads_stays_usable(self):
+        [row] = measure._sanitize_agent_usage([{
+            "agent": "review-reconciliator", "available": True,
+            "usage": _usage(2),
+            "tool_calls": 3,
+        }])
+        assert row["repository_reads"] is None
+
+    def test_unavailable_row_cannot_claim_measured_reads(self):
+        [row] = measure._sanitize_agent_usage([{
+            "agent": "review-reconciliator", "available": False,
+            "repository_reads": 4,
+        }])
+        assert row["repository_reads"] is None
+
+
 def _load_telemetry_module():
     spec = importlib.util.spec_from_file_location(
         "review_telemetry_for_metrics", TELEMETRY_SCRIPT_PATH
@@ -634,7 +663,7 @@ class TestReviewVocabularyLifecycleMigration:
         rendered = json.loads(
             format_json([measured], aggregate_cohort([measured]))
         )
-        assert rendered["schema"] == 4
+        assert rendered["schema"] == 5
         assert rendered["runs"][0]["outcome"]["reconciliation"] == (
             _task_5_manifest()["outcome"]["reconciliation"]
         )
@@ -957,6 +986,7 @@ def _legacy_events(run_id: str | None = "legacy-1") -> list[dict]:
         "pipeline": {
             "session_id": "session-1",
             "plugin_version": "1.107.0",
+        "plugin_commit": "0123abcd",
             "mode": "full",
             "repo_path": "/private/repo",
             "output_dir": "/private/output",
@@ -1107,6 +1137,59 @@ def _measure_fake_transcript(monkeypatch, tmp_path: Path, transcript: dict) -> d
         tmp_path,
         registry_path=registry,
     )
+
+
+class TestRangeTruthSanitization:
+    def test_run_git_carries_the_range_truth_blocks(self):
+        """Dropping the new blocks would erase a measured range mismatch."""
+        manifest = _manifest()
+        manifest["run"]["git"].update({
+            "base_fetch": {"status": "fetched", "sha": "a" * 40, "shallow": False},
+            "scope_check": {
+                "status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+                "head_matches": True, "base_matches": False,
+                "extra_local_file_count": 83, "missing_local_file_count": 0,
+            },
+        })
+
+        sanitized = sanitize._sanitize_manifest(manifest)
+
+        assert sanitized["run"]["git"]["base_fetch"] == {
+            "status": "fetched", "sha": "a" * 40, "shallow": False,
+        }
+        assert sanitized["run"]["git"]["scope_check"]["extra_local_file_count"] == 83
+
+    def test_range_truth_absent_or_malformed_reads_as_unmeasured(self):
+        """Historical and malformed manifests must not inflate fetch failures."""
+        manifest = _manifest()
+        manifest["run"]["git"]["base_fetch"] = {"status": "sideways", "sha": "short"}
+
+        sanitized = sanitize._sanitize_manifest(manifest)
+
+        assert sanitized["run"]["git"]["base_fetch"] == {
+            "status": None, "sha": None, "shallow": None,
+        }
+        assert sanitized["run"]["git"]["scope_check"] is None
+        cohort_view = aggregate_cohort([
+            measure_run(sanitized, sessions_root="/nonexistent", include_transcripts=False),
+        ])
+        assert cohort_view["range_truth"] == {
+            "base_fetch": {"unmeasured": 1}, "scope_check": {"unmeasured": 1},
+        }
+
+    @pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+    def test_range_truth_sanitizer_rejects_non_string_status_without_aborting(self, status):
+        """Unhashable nested status values must degrade to unmeasured facts."""
+        manifest = _manifest()
+        manifest["run"]["git"].update({
+            "base_fetch": {"status": status, "sha": "a" * 40, "shallow": False},
+            "scope_check": {"status": status, "github_changed_files": 1},
+        })
+
+        sanitized = sanitize._sanitize_manifest(manifest)
+
+        assert sanitized["run"]["git"]["base_fetch"]["status"] is None
+        assert sanitized["run"]["git"]["scope_check"]["status"] is None
 
 
 class TestLoadRuns:
@@ -2015,6 +2098,7 @@ class TestLoadRuns:
         [run] = load_runs(tmp_path)
 
         assert run["run"]["id"] == "legacy-1"
+        assert run["run"]["plugin_commit"] == "0123abcd"
         assert run["dispatch"] is None
         assert run["assignment"] is None
         assert run["warnings"] == ["legacy_log_no_manifest"]
@@ -8018,7 +8102,10 @@ class TestFormattingAndCli:
         )
 
         assert measured["metric_availability"]["usage"] == "missing"
-        assert render._table_row(measured)[8] == "—"
+        lines = format_table([measured], aggregate_cohort([measured])).splitlines()
+        headers = [cell.strip() for cell in lines[0].strip("|").split("|")]
+        cells = [cell.strip() for cell in lines[2].strip("|").split("|")]
+        assert dict(zip(headers, cells))["Eff In/Out"] == "—"
         assert payload["runs"][0]["metric_availability"]["usage"] == "missing"
         assert payload["runs"][0]["transcript"]["usage"] == _usage(0)
 
@@ -8028,7 +8115,7 @@ class TestFormattingAndCli:
         )
 
         assert measured["metric_availability"]["usage"] == "disabled"
-        assert render._table_row(measured)[8] == "n/a"
+        assert render._table_row(measured)[9] == "n/a"
 
     def test_table_usage_complete_zero_is_observed_zero(
         self, monkeypatch, tmp_path
@@ -8038,7 +8125,7 @@ class TestFormattingAndCli:
         )
 
         assert measured["metric_availability"]["usage"] == "complete"
-        assert render._table_row(measured)[8] == "0/0"
+        assert render._table_row(measured)[9] == "0/0"
 
     def test_table_usage_partial_observation_is_explicit(
         self, monkeypatch, tmp_path
@@ -8050,7 +8137,25 @@ class TestFormattingAndCli:
         measured = _measure_fake_transcript(monkeypatch, tmp_path, transcript)
 
         assert measured["metric_availability"]["usage"] == "partial"
-        assert render._table_row(measured)[8] == "partial 6/4"
+        assert render._table_row(measured)[9] == "partial 6/4"
+
+    def test_the_build_commit_survives_the_sanitizer(self):
+        manifest = _manifest("build-identity")
+        manifest["run"]["plugin_commit"] = "194489e8"
+        run = measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+        assert run["run"]["plugin_commit"] == "194489e8"
+        manifest["run"]["plugin_commit"] = "194489e8\x1b[31m"
+        run = measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+        assert "plugin_commit" not in run["run"]
+
+    def test_version_column_names_the_build_commit_when_stamped(self):
+        run = _measured_run("build-identity")
+        run["run"]["plugin_version"] = "1.119.0"
+        run["run"]["plugin_commit"] = "194489e8"
+        table = format_table([run], aggregate_cohort([run]))
+        assert "1.119.0@194489e8/pr" in table
+        run["run"]["plugin_commit"] = None
+        assert "1.119.0/pr" in format_table([run], aggregate_cohort([run]))
 
     def test_table_cells_normalize_controls_escape_pipes_and_bound_output(self):
         run = _measured_run("unsafe-table")
@@ -8126,7 +8231,7 @@ class TestFormattingAndCli:
         payload = json.loads(format_json(runs, aggregate_cohort(runs)))
 
         assert set(payload) == {"schema", "runs", "aggregate"}
-        assert payload["schema"] == 4
+        assert payload["schema"] == 5
         assert payload["runs"][0]["uploaded_by"] is None
 
     def test_json_exposes_lifecycle_and_partial_unknown_builder_evidence(
@@ -8191,7 +8296,7 @@ class TestFormattingAndCli:
 
         assert result == 0
         assert json.loads(output.read_text()) == {
-            "schema": 4,
+            "schema": 5,
             "runs": [],
             "aggregate": aggregate_cohort([]),
         }
@@ -8219,7 +8324,7 @@ class TestFormattingAndCli:
             "run_id": None,
         }
         assert json.loads(capsys.readouterr().out) == {
-            "schema": 4,
+            "schema": 5,
             "runs": [],
             "aggregate": aggregate_cohort([]),
         }
@@ -8243,7 +8348,7 @@ class TestFormattingAndCli:
 
         assert result == 0
         payload = json.loads(output.read_text(encoding="utf-8"))
-        assert payload["schema"] == 4
+        assert payload["schema"] == 5
         assert {
             run["run"]["id"]: run["uploaded_by"]
             for run in payload["runs"]
@@ -9018,8 +9123,8 @@ _USAGE_SNAPSHOT_FIELD_MAP = {
     "input_tokens": 10,
     "cache_creation_input_tokens": 20,
     "cache_read_input_tokens": 30,
-    "effective_input_tokens": 40,
-    "output_tokens": 50,
+    "effective_input_tokens": 60,
+    "output_tokens": 40,
 }
 
 
@@ -9044,7 +9149,7 @@ def _usage_snapshot_payload(**overrides) -> dict:
             "closed": True,
         },
         "availability": {"subagents": "complete", "orchestrator": "complete"},
-        "agents_measured": {"measured": 1, "expected": 1},
+        "agents_measured": {"measured": 3, "expected": 3},
         "subagent_totals": dict(_USAGE_SNAPSHOT_FIELD_MAP),
         "orchestrator_usage": dict(_USAGE_SNAPSHOT_FIELD_MAP),
         "usage_by_model": {"claude-opus-5[1m]": dict(_USAGE_SNAPSHOT_FIELD_MAP)},
@@ -9052,8 +9157,24 @@ def _usage_snapshot_payload(**overrides) -> dict:
             {
                 "agent": "security-reviewer",
                 "model": "claude-opus-5[1m]",
-                "usage": dict(_USAGE_SNAPSHOT_FIELD_MAP),
-            }
+                "usage": _usage(2),
+                "tool_calls": 12,
+                "repository_reads": 4,
+            },
+            {
+                "agent": contracts._SYNTHESIS_RECONCILIATOR,
+                "model": "claude-opus-5[1m]",
+                "usage": _usage(5),
+                "tool_calls": 8,
+                "repository_reads": 3,
+            },
+            {
+                "agent": contracts._SYNTHESIS_DECISION_CRITIC,
+                "model": "claude-opus-5[1m]",
+                "usage": _usage(3),
+                "tool_calls": 6,
+                "repository_reads": 2,
+            },
         ],
     }
     payload.update(overrides)
@@ -9119,7 +9240,355 @@ def _optional_section_payload(name: str):
         "reviewer_markdown": _derived_markdown_payload(),
         "findings_markdown": _derived_markdown_payload(),
         "host_context": _host_context_payload(),
+        "evidence": _evidence_payload(),
     }[name]
+
+
+def _evidence_payload():
+    return {
+        "findings": [{"id": "f1", "severity": "high", "sources": [{"agent": "security-reviewer", "id": "f2", "severity": "medium"}], "critic_action": "demote"}],
+        "dropped_findings": [{"agent": "security-reviewer", "id": "f3", "reason": "false_positive"}],
+        "findings_removed_by_critic": [{"id": "f2", "severity": "low", "sources": [{"agent": "security-reviewer", "id": "f5", "severity": "low"}], "critic_action": "remove"}],
+        "checks": {"count": 4, "dropped": {"void": 1}},
+        "verify_items": [{"id": "V1", "carried_over": False, "settled_by": 2}],
+        "undeclared_citations": 0,
+        "critic": {"verdict": "REVISE", "verdict_before_adjustments": "block", "adjustments": {
+            "demote": {"proposed": 1, "verified": 1, "not_checked": 0, "refuted": 0},
+        }},
+        "orchestrator_notes": {"confirmed": 1, "refuted": 0, "not_checked": 0},
+        "host_citations": {"ecosystem-integration-reviewer": {"wordpress": 3, "unknown": 1}},
+    }
+
+
+class TestEvidenceMetrics:
+    @staticmethod
+    def _historical_evidence_manifest(run_id="historical"):
+        manifest = _manifest(run_id)
+        manifest["evidence"] = _evidence_payload()
+        manifest["availability"]["evidence"] = True
+        manifest["evidence"]["findings"][0]["sources"] = None
+        manifest["evidence"]["dropped_findings"] = None
+        manifest["evidence"]["findings_removed_by_critic"] = None
+        manifest["evidence"]["checks"]["dropped"] = None
+        manifest["evidence"]["orchestrator_notes"] = None
+        return manifest
+
+    def test_a_critic_added_finding_keeps_the_run_lineage_measured(self):
+        """A critic-originated finding has a known empty lineage; it must
+        not read as unknown provenance and void the run's survival counts."""
+        manifest = _manifest("added")
+        manifest["evidence"] = _evidence_payload()
+        manifest["availability"]["evidence"] = True
+        manifest["evidence"]["findings"].append(
+            {"id": "f9", "severity": "medium", "sources": [], "critic_action": "add"}
+        )
+        measured = measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+        assert measured["evidence"]["findings"][1]["sources"] == []
+        result = aggregate_cohort([measured])["evidence"]
+        assert result["availability"]["lineage"] == {"measured_runs": 1, "unavailable_runs": 0}
+        assert result["survival_by_agent"] == {
+            "security-reviewer": {"kept": 1, "dropped": {"false_positive": 1}, "critic_removed": 1},
+        }
+
+    def test_a_manifest_without_critic_removals_has_unknown_lineage(self):
+        """A manifest projected before critic removals were carried cannot
+        say what happened to their sources; the run's lineage is
+        unavailable, never a measured zero removals."""
+        manifest = _manifest("older")
+        manifest["evidence"] = _evidence_payload()
+        manifest["availability"]["evidence"] = True
+        del manifest["evidence"]["findings_removed_by_critic"]
+        measured = measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+        assert measured["evidence"]["findings_removed_by_critic"] is None
+        result = aggregate_cohort([measured])["evidence"]
+        assert result["survival_by_agent"] is None
+        assert result["availability"]["lineage"] == {"measured_runs": 0, "unavailable_runs": 1}
+
+    def test_historical_evidence_preserves_unknown_subfamilies(self):
+        measured = measure_run(
+            self._historical_evidence_manifest(),
+            Path("/nonexistent"),
+            include_transcripts=False,
+        )
+
+        assert measured["metric_availability"]["evidence"] == "partial"
+        assert measured["evidence"]["findings"][0]["sources"] is None
+        assert measured["evidence"]["dropped_findings"] is None
+        assert measured["evidence"]["checks"]["dropped"] is None
+        assert measured["evidence"]["orchestrator_notes"] is None
+
+        result = aggregate_cohort([measured])["evidence"]
+        assert result["survival_by_agent"] is None
+        assert result["dropped_checks"] is None
+        assert result["orchestrator_notes"] is None
+        assert result["availability"] == {
+            "lineage": {"measured_runs": 0, "unavailable_runs": 1},
+            "dropped_checks": {"measured_runs": 0, "unavailable_runs": 1},
+            "orchestrator_notes": {"measured_runs": 0, "unavailable_runs": 1},
+        }
+        assert result["critic_adjustments"] == {
+            "demote": {"proposed": 1, "verified": 1, "not_checked": 0, "refuted": 0},
+        }
+        assert result["verify_items"] == {"declared": 1, "settled": 1}
+
+    def test_mixed_evidence_cohort_names_each_partial_denominator(self):
+        known = _manifest("known")
+        known["evidence"] = _evidence_payload()
+        known["availability"]["evidence"] = True
+        manifests = [known, self._historical_evidence_manifest()]
+        measured = [
+            measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+            for manifest in manifests
+        ]
+
+        result = aggregate_cohort(measured)["evidence"]
+
+        assert result["survival_by_agent"] == {
+            "security-reviewer": {"kept": 1, "dropped": {"false_positive": 1}, "critic_removed": 1},
+        }
+        assert result["dropped_checks"] == {"void": 1}
+        assert result["orchestrator_notes"] == {
+            "confirmed": 1,
+            "refuted": 0,
+            "not_checked": 0,
+        }
+        assert result["availability"] == {
+            "lineage": {"measured_runs": 1, "unavailable_runs": 1},
+            "dropped_checks": {"measured_runs": 1, "unavailable_runs": 1},
+            "orchestrator_notes": {"measured_runs": 1, "unavailable_runs": 1},
+        }
+        assert result["critic_adjustments"]["demote"]["proposed"] == 2
+        assert result["verify_items"] == {"declared": 2, "settled": 2}
+
+    @pytest.mark.parametrize("population", ["unknown-only", "known-first", "unknown-first"])
+    def test_unavailable_purpose_keeps_both_verify_totals_unknown(self, population):
+        known = _manifest("known")
+        known["evidence"] = _evidence_payload()
+        known["availability"]["evidence"] = True
+        unknown = copy.deepcopy(known)
+        unknown["run"]["id"] = "unknown"
+        unknown["evidence"]["verify_items"] = []
+        unknown["evidence"]["undeclared_citations"] = None
+        manifests = {"unknown-only": [unknown], "known-first": [known, unknown], "unknown-first": [unknown, known]}[population]
+        measured = [measure_run(manifest, Path("/nonexistent"), include_transcripts=False) for manifest in manifests]
+        result = aggregate_cohort(measured)["evidence"]
+        assert result["verify_items"] == {"declared": None, "settled": None}
+        assert result["measured_runs"] == len(manifests)
+
+    @pytest.mark.parametrize("counter", ["proposed", "verified", "not_checked", "refuted"])
+    def test_absent_adjustment_counter_is_materialized_as_unknown(self, counter):
+        known = _manifest("known")
+        known["evidence"] = _evidence_payload()
+        known["availability"]["evidence"] = True
+        unknown = copy.deepcopy(known)
+        unknown["run"]["id"] = "unknown"
+        del unknown["evidence"]["critic"]["adjustments"]["demote"][counter]
+        measured = [measure_run(manifest, Path("/nonexistent"), include_transcripts=False) for manifest in (known, unknown)]
+        assert measured[1]["evidence"]["critic"]["adjustments"]["demote"][counter] is None
+        expected = {"proposed": 2, "verified": 2, "not_checked": 0, "refuted": 0}
+        expected[counter] = None
+        assert aggregate_cohort(measured)["evidence"]["critic_adjustments"] == {"demote": expected}
+
+    @pytest.mark.parametrize("details", [None, {}], ids=["unreadable-proposal", "validated-empty-proposal"])
+    def test_unreadable_proposal_is_distinct_from_a_validated_empty_proposal(self, details):
+        known = _manifest("known")
+        known["evidence"] = _evidence_payload()
+        known["availability"]["evidence"] = True
+        other = copy.deepcopy(known)
+        other["run"]["id"] = "other"
+        other["evidence"]["critic"]["adjustments"] = details
+        measured = [measure_run(manifest, Path("/nonexistent"), include_transcripts=False) for manifest in (known, other)]
+        assert measured[1]["evidence"]["critic"]["adjustments"] == details
+        assert aggregate_cohort([measured[1]])["evidence"]["critic_adjustments"] == details
+        expected = None if details is None else {"demote": {"proposed": 1, "verified": 1, "not_checked": 0, "refuted": 0}}
+        assert aggregate_cohort(measured)["evidence"]["critic_adjustments"] == expected
+        assert aggregate_cohort(list(reversed(measured)))["evidence"]["critic_adjustments"] == expected
+
+    def test_unknown_counts_do_not_become_measured_zero_or_partial_totals(self):
+        known = _manifest("known")
+        known["evidence"] = _evidence_payload()
+        known["availability"]["evidence"] = True
+        unknown = copy.deepcopy(known)
+        unknown["run"]["id"] = "unknown"
+        unknown["evidence"]["verify_items"][0]["settled_by"] = None
+        unknown["evidence"]["critic"]["adjustments"]["demote"]["proposed"] = None
+        measured = [measure_run(manifest, Path("/nonexistent"), include_transcripts=False) for manifest in (known, unknown)]
+        result = aggregate_cohort(measured)["evidence"]
+        assert result["verify_items"] == {"declared": 2, "settled": None}
+        assert result["critic_adjustments"]["demote"] == {"proposed": None, "verified": 2, "refuted": 0, "not_checked": 0}
+
+    def test_projection_survives_measurement_and_aggregation(self):
+        manifest = _manifest()
+        manifest["evidence"] = _evidence_payload()
+        manifest["availability"]["evidence"] = True
+        measured = measure_run(manifest, Path("/nonexistent"), include_transcripts=False)
+        assert measured["evidence"] == _evidence_payload()
+        assert measured["metric_availability"]["evidence"] == "complete"
+        historic = measure_run(_manifest("old"), Path("/nonexistent"), include_transcripts=False)
+        assert historic["evidence"] is None
+        assert historic["metric_availability"]["evidence"] == "missing"
+        assert aggregate_cohort([historic])["evidence"] is None
+        assert aggregate_cohort([measured, measured, historic])["evidence"] == {
+            "survival_by_agent": {"security-reviewer": {"kept": 2, "dropped": {"false_positive": 2}, "critic_removed": 2}},
+            "critic_adjustments": {"demote": {"proposed": 2, "verified": 2, "not_checked": 0, "refuted": 0}},
+            "verify_items": {"declared": 2, "settled": 2},
+            "dropped_checks": {"void": 2},
+            "orchestrator_notes": {"confirmed": 2, "refuted": 0, "not_checked": 0},
+            "availability": {
+                "lineage": {"measured_runs": 2, "unavailable_runs": 0},
+                "dropped_checks": {"measured_runs": 2, "unavailable_runs": 0},
+                "orchestrator_notes": {"measured_runs": 2, "unavailable_runs": 0},
+            },
+            "measured_runs": 2,
+        }
+
+    def test_evidence_allowlist_discards_prose_and_invalid_facts(self):
+        payload = _evidence_payload()
+        payload["secret"] = "private prose"
+        payload["findings"][0]["title"] = "private prose"
+        payload["findings"][0]["sources"].append({"agent": "private/path", "id": "f9"})
+        payload["findings"].append({"id": "private/path", "severity": "high"})
+        payload["critic"]["adjustments"]["private prose"] = {"proposed": 99}
+        payload["host_citations"]["private/path"] = {"wordpress": 2}
+        payload["host_citations"]["ecosystem-integration-reviewer"]["private/path"] = 2
+        payload["checks"]["count"] = True
+        payload["verify_items"].append({"id": "private prose", "settled_by": 8})
+        safe = sanitize._sanitize_evidence(payload)
+        assert "private" not in json.dumps(safe)
+        assert safe["checks"]["count"] is None
+        assert len(safe["findings"]) == 1
+        assert safe["findings"][0]["sources"] == [{"agent": "security-reviewer", "id": "f2", "severity": "medium"}]
+
+    def test_a_source_severity_outside_the_vocabulary_is_unmeasured(self):
+        payload = _evidence_payload()
+        payload["findings"][0]["sources"][0]["severity"] = "private prose"
+        safe = sanitize._sanitize_evidence(payload)
+        assert safe["findings"][0]["sources"] == [{"agent": "security-reviewer", "id": "f2", "severity": None}]
+
+    @pytest.mark.parametrize("value", [None, [], "private prose", {}], ids=["absent", "array", "prose", "empty-object"])
+    def test_absent_or_malformed_family_is_unmeasured(self, value):
+        assert sanitize._sanitize_evidence(value) is None
+
+
+class TestHostContextSanitization:
+    @pytest.mark.parametrize("leaked", [
+        pytest.param("`/Users/private/host`", id="backtick"),
+        pytest.param("~/private/host", id="home"),
+        pytest.param("~alice/private/host", id="named-home"),
+        pytest.param("path=//server/share/host", id="embedded-unc"),
+        pytest.param("\\private\\host", id="windows-rooted"),
+        pytest.param("path=\\private\\host", id="embedded-windows-rooted"),
+        pytest.param("~\\private\\host", id="windows-home"),
+        pytest.param("cwd:~/private/host", id="colon-home"),
+    ])
+    def test_a_path_shaped_host_field_is_kept_locally_and_refused_at_the_share_boundary(self, leaked):
+        """The projection and the sanitizer carry the resolver's facts as
+        recorded; the one guard against a path leaving the machine is the
+        sharing boundary, which refuses the upload rather than silently
+        nulling a field that bootstrap still prints."""
+        projected = contracts._MANIFEST_SECTIONS_CONTRACT.summarize_host_context({
+            "resolved": [{
+                "name": "wordpress", "kind": "runtime-host",
+                "source": "ecosystem-cache", "version": "7.2-alpha-63166-src",
+                "notes": {"commit": "abc123", "declared_minimum": leaked},
+            }],
+            "unresolved": [], "diagnostics": {},
+        })
+        manifest = _manifest()
+        manifest["run"]["repo"] = "github.com/acme/widget"
+        sanitized = sanitize._sanitize_host_context(projected)
+        manifest["host_context"] = sanitized
+        manifest["availability"]["host_context"] = True
+
+        for section in (projected, sanitized):
+            assert section["resolved"][0]["declared_minimum"] == leaked
+            assert section["resolved"][0]["version"] == "7.2-alpha-63166-src"
+            assert section["resolved"][0]["commit"] == "abc123"
+        with pytest.raises(ValueError, match="share-unsafe path survived redaction"):
+            telemetry_share.redact_payloads(manifest, [])
+
+    def test_upstream_identity_survives_projection_and_sharing(self):
+        raw = {
+            "resolved": [{
+                "name": "wordpress", "kind": "runtime-host",
+                "source": "ecosystem-cache", "version": "feature/Users/import-7.2",
+                "version_freshness": "2026-09-04T00:04:08Z",
+                "notes": {
+                    "commit": "474555a85c052de90ddd22d4abdf163e678b88ac",
+                    "branch": "fix/TICKET-123-private",
+                    "declared_minimum": "7.0",
+                },
+            }],
+        }
+        projected = contracts._MANIFEST_SECTIONS_CONTRACT.summarize_host_context(raw)
+        sanitized = sanitize._sanitize_host_context(projected)
+        manifest = _manifest()
+        manifest["run"]["repo"] = "github.com/acme/widget"
+        manifest["host_context"] = sanitized
+        redacted, _ = telemetry_share.redact_payloads(manifest, [])
+        assert redacted["host_context"] == projected
+        # A disclosed value may contain a path-like substring; a branch
+        # name is never projected, so a personal one cannot be shared.
+        assert projected["resolved"][0]["version"] == "feature/Users/import-7.2"
+        assert "branch" not in projected["resolved"][0]
+        assert "TICKET-123" not in json.dumps(redacted)
+        assert projected["resolved"][0]["refreshed"] == "2026-09-04T00:04:08Z"
+
+    def test_historical_host_absence_survives_repeated_sanitization(self):
+        manifest = _manifest()
+        for _ in range(3):
+            manifest = sanitize._sanitize_manifest(manifest)
+            assert manifest.get("host_context") is None
+            assert "host_context" not in manifest["availability"]
+
+    def test_historical_host_absence_survives_public_measurement(self, tmp_path):
+        manifest = _manifest()
+        for _ in range(3):
+            manifest = measure_run(
+                manifest, sessions_root=tmp_path, include_transcripts=False,
+            )
+            assert manifest.get("host_context") is None
+            assert "host_context" not in manifest["availability"]
+
+    def test_explicit_unavailable_host_stays_measured_after_repeated_passes(self, tmp_path):
+        manifest = _manifest()
+        manifest["host_context"] = None
+        manifest["availability"]["host_context"] = False
+        for _ in range(3):
+            manifest = sanitize._sanitize_manifest(manifest)
+            manifest = measure_run(
+                manifest, sessions_root=tmp_path, include_transcripts=False,
+            )
+            assert manifest["host_context"] is None
+            assert manifest["availability"]["host_context"] is False
+
+    def test_round_trip_retains_only_declared_fields(self):
+        payload = _host_context_payload()
+        raw = copy.deepcopy(payload)
+        raw["resolved"][0]["path"] = "/Users/private/cache"
+        raw["unresolved"][0]["notes"] = {"path": "/Users/private"}
+        assert sanitize._sanitize_host_context(raw) == payload
+
+    @pytest.mark.parametrize("value", [None, "bad", 42, {"resolved": 42, "unresolved": []}])
+    def test_bad_containers_are_unavailable(self, value):
+        assert sanitize._sanitize_host_context(value) is None
+
+    @pytest.mark.parametrize("value", [
+        {"path": "/Users/private"}, ["/Users/private"], 42,
+    ], ids=["object", "list", "number"])
+    def test_non_string_scalars_are_unknown(self, value):
+        payload = _host_context_payload()
+        payload["resolved"][0] = {key: value for key in payload["resolved"][0]}
+        payload["unresolved"][0] = {key: value for key in payload["unresolved"][0]}
+        payload["banner_reason"] = value
+        payload["self_provided"] = [value]
+        payload["scan_roots"] = True
+        result = sanitize._sanitize_host_context(payload)
+        assert all(v is None for v in result["resolved"][0].values())
+        assert all(v is None for v in result["unresolved"][0].values())
+        assert result["banner_reason"] is None
+        assert result["self_provided"] == []
+        assert result["scan_roots"] is None
 
 
 # `_sanitize_optional_sections` is ONE table-driven loop, so its own
@@ -9439,6 +9908,8 @@ class TestUsageSnapshotDivergenceFromProducer:
                 "agent": "security-reviewer",
                 "model": "claude-opus-5[1m]",
                 "usage": dict(_USAGE_SNAPSHOT_FIELD_MAP),
+                "tool_calls": None,
+                "repository_reads": None,
             }
         ]
 
@@ -9611,6 +10082,116 @@ class TestUsageSnapshotSanitize:
 
         assert sanitized["usage"] is not None
         assert sanitized["usage"]["by_agent"] == []
+
+
+class TestUsageShares:
+    def _measure(self, manifest: dict) -> dict:
+        return measure_run(
+            manifest, Path("/nonexistent"), include_transcripts=False
+        )
+
+    def _manifest_with_usage(self, **usage_overrides) -> dict:
+        manifest = _manifest("usage-shares")
+        manifest["availability"]["usage"] = True
+        manifest["usage"] = _usage_snapshot_payload(**usage_overrides)
+        return manifest
+
+    def test_measures_synthesis_and_sorted_agent_shares_from_durable_usage(self):
+        measured = self._measure(self._manifest_with_usage())
+
+        assert measured["usage_shares"] == {
+            "denominator_effective_input_tokens": 60,
+            "synthesis_pct": 80.0,
+            "by_agent_pct": {
+                "decision-reviewer": 30.0,
+                "review-reconciliator": 50.0,
+                "security-reviewer": 20.0,
+            },
+        }
+        assert measured["metric_availability"]["usage_shares"] == "complete"
+
+    def test_zero_usage_denominator_is_missing_not_a_zero_share(self):
+        zero_totals = {name: 0 for name in _USAGE_SNAPSHOT_FIELD_MAP}
+        measured = self._measure(self._manifest_with_usage(
+            subagent_totals=zero_totals,
+        ))
+
+        assert measured["usage_shares"] is None
+        assert measured["metric_availability"]["usage_shares"] == "missing"
+
+    def test_retry_dispatch_usage_is_summed_before_each_agent_share(self):
+        payload = _usage_snapshot_payload()
+        payload["by_agent"].extend([
+            {
+                "agent": "security-reviewer",
+                "model": "claude-opus-5[1m]",
+                "usage": _usage(3),
+                "tool_calls": 9,
+                "repository_reads": 3,
+            },
+            {
+                "agent": contracts._SYNTHESIS_RECONCILIATOR,
+                "model": "claude-opus-5[1m]",
+                "usage": _usage(2),
+                "tool_calls": 7,
+                "repository_reads": 2,
+            },
+        ])
+        payload["agents_measured"] = {"measured": 5, "expected": 5}
+        payload["subagent_totals"] = _usage(15)
+        payload["usage_by_model"] = {"claude-opus-5[1m]": _usage(15)}
+        measured = self._measure(self._manifest_with_usage(**payload))
+
+        assert measured["usage_shares"] == {
+            "denominator_effective_input_tokens": 90,
+            "synthesis_pct": 66.7,
+            "by_agent_pct": {
+                "decision-reviewer": 20.0,
+                "review-reconciliator": 46.7,
+                "security-reviewer": 33.3,
+            },
+        }
+
+    def test_cohort_keeps_complete_and_partial_measured_share_samples(self):
+        complete = self._measure(self._manifest_with_usage())
+        partial = self._measure(self._manifest_with_usage(
+            availability={"subagents": "partial", "orchestrator": "complete"},
+        ))
+        missing = self._measure(self._manifest_with_usage(
+            subagent_totals={name: 0 for name in _USAGE_SNAPSHOT_FIELD_MAP},
+        ))
+
+        shares = aggregate_cohort([complete, partial, missing])["usage_shares"]
+
+        assert shares["synthesis_pct"] == {
+            "median": 80.0,
+            "min": 80.0,
+            "max": 80.0,
+            "sample_count": 2,
+        }
+        assert shares["by_agent_pct"]["security-reviewer"] == {
+            "median": 20.0,
+            "max": 20.0,
+            "runs": 2,
+        }
+
+    def test_table_renders_the_synthesis_share_or_a_missing_glyph(self):
+        measured = self._measure(self._manifest_with_usage())
+        missing = self._measure(_manifest("without-usage"))
+
+        table = format_table([measured, missing], aggregate_cohort([measured, missing]))
+
+        assert "Synth %" in table
+        assert "80.0" in table
+        assert "without-usage" in table
+        assert render._table_row(missing)[8] == "—"
+
+    def test_table_marks_a_partial_snapshot_share_as_partial(self):
+        measured = self._measure(self._manifest_with_usage(
+            availability={"subagents": "partial", "orchestrator": "complete"},
+        ))
+
+        assert render._table_row(measured)[8] == "partial 80.0"
 
 
 class TestSkippedStepsSanitize:
@@ -10072,16 +10653,18 @@ class TestPreRetrofitManifestsProjectHonestly:
         """The majority pre-retrofit shape: `dependency_refresh` was
         never requested, so the producer wrote the top-level key as JSON
         `null`. No flag, and a `None` payload — the sanitizer must NOT
-        fabricate a measured zero; it reads exactly as `missing`, the
-        same as a section that is absent altogether."""
+        fabricate a measured zero, nor a measured `false`; it reads
+        exactly as undeclared, the same as a section that is absent
+        altogether, and stays that way when the sanitized manifest (which
+        writes every section key) is ingested again."""
         manifest = _manifest("run-1")
         assert "dependency_refresh" not in manifest["availability"]
         manifest["dependency_refresh"] = None
 
-        sanitized = sanitize._sanitize_manifest(manifest)
-
-        assert sanitized["availability"]["dependency_refresh"] is False
-        assert sanitized["dependency_refresh"] is None
+        for _ in range(2):
+            manifest = sanitize._sanitize_manifest(manifest)
+            assert "dependency_refresh" not in manifest["availability"]
+            assert manifest["dependency_refresh"] is None
 
     def test_findings_markdown_never_existed_before_this_retrofit_and_stays_absent(
         self,

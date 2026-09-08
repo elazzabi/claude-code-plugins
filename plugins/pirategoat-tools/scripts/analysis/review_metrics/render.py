@@ -17,6 +17,17 @@ from .contracts import (
 )
 
 
+def _build_identity(identity: dict) -> str:
+    """`<version>@<commit>` when the run stamped its build commit, else the
+    version alone; a release and a dev mount of the same version differ
+    only by the commit."""
+    version = identity.get("plugin_version") or "—"
+    commit = identity.get("plugin_commit")
+    if isinstance(commit, str) and commit:
+        return f"{version}@{commit[:12]}"
+    return version
+
+
 def _format_count(value: object) -> str:
     return str(value) if isinstance(value, int) and not isinstance(value, bool) else "—"
 
@@ -109,6 +120,16 @@ def _budget_utilization_cell(value: object) -> str:
     return f"median {median}% ({low}–{high}%)"
 
 
+def _usage_shares_cell(value: object, state: object) -> str:
+    if state not in {"complete", "partial"} or not isinstance(value, dict):
+        return "—"
+    synthesis_pct = value.get("synthesis_pct")
+    if not isinstance(synthesis_pct, (int, float)) or isinstance(synthesis_pct, bool):
+        return "—"
+    prefix = "partial " if state == "partial" else ""
+    return f"{prefix}{synthesis_pct:.1f}"
+
+
 def _table_row(run: dict[str, Any]) -> list[str]:
     identity = run.get("run") if isinstance(run.get("run"), dict) else {}
     dispatch = run.get("dispatch") if isinstance(run.get("dispatch"), dict) else None
@@ -118,6 +139,7 @@ def _table_row(run: dict[str, Any]) -> list[str]:
     outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
     summary = outcome.get("summary") if isinstance(outcome.get("summary"), dict) else {}
     transcript = run.get("transcript") if isinstance(run.get("transcript"), dict) else {}
+    usage_shares = run.get("usage_shares")
     metrics = (
         run.get("metric_availability")
         if isinstance(run.get("metric_availability"), dict)
@@ -190,13 +212,14 @@ def _table_row(run: dict[str, Any]) -> list[str]:
         )
     return [
         str(identity.get("id") or "—"),
-        f"{identity.get('plugin_version') or '—'}/{identity.get('mode') or '—'}",
+        _build_identity(identity) + f"/{identity.get('mode') or '—'}",
         planner_actual,
         adjustments,
         assignment_text,
         outcome_text,
         wall_text,
         synthesis_text,
+        _usage_shares_cell(usage_shares, metrics.get("usage_shares")),
         tokens,
         transcript_state,
         budget_text,
@@ -218,6 +241,7 @@ def format_table(runs: list[dict[str, Any]], aggregate: dict[str, Any]) -> str:
         "Outcome/Critic",
         "Wall",
         "Recon/Critic",
+        "Synth %",
         "Eff In/Out",
         "Transcript",
         "Budget util",

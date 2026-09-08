@@ -867,6 +867,7 @@ def main():
                                 run_id=state["run_id"],
                                 session_id=config.get("session_id", ""),
                                 plugin_version=plugin_version or "",
+                                plugin_commit=config.get("plugin_commit") or "",
                                 git_range=git_range, base_sha=base_sha,
                                 head_sha=head_sha)
             except Exception:
