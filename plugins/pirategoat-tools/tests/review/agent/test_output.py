@@ -2945,3 +2945,12 @@ def test_missing_reviewed_file_field_names_the_envelope_gate():
     del doc["review_claimable_files"]
     with pytest.raises(ValueError, match="missing reviewed-file fields"):
         validate_review_document(doc, "security")
+
+
+def test_builder_timestamp_is_aware_utc():
+    """Every other run artifact, marker and telemetry event is aware UTC; the
+    review's own timestamp was the one naive local clock an auditor had to
+    shift by hand (run e08e: `2026-09-08T14:52:52.137095` for a 11:52Z finish)."""
+    stamp = datetime.fromisoformat(ReviewOutputBuilder("42", "security").timestamp)
+    assert stamp.tzinfo is not None and stamp.utcoffset() == timedelta(0)
+

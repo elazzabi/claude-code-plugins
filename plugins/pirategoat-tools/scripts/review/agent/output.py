@@ -374,7 +374,7 @@ class ReviewOutputBuilder:
         # being uniform across reviewers. Coerce once, at construction.
         self.pr_id = pr_id if isinstance(pr_id, str) else str(pr_id)
         self.reviewer = reviewer
-        self.timestamp = datetime.now().isoformat()
+        self.timestamp = datetime.now(timezone.utc).isoformat()
         self.findings = []
         self.observations = []
         self.recommendations = {'immediate': [], 'important': [], 'suggestions': []}

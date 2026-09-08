@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The reviewer builder snippet shows `add_observation(file, note, category)` with its real signature and no longer invites `claim_files_reviewed()` when the assignment has no claimable files, removing a deterministic first-save failure.
 - A reviewer may pass `claim_files_reviewed` one list of paths instead of separate arguments, a wrong-typed path names its type, and a draft save that recorded nothing prints a stderr NOTE rather than publishing an empty approve.
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
+- Reviewer `review.json` files stamp an aware UTC timestamp, like every other run artifact, instead of the naive local clock.
 
 ## [1.118.0] - 2026-09-04
 
