@@ -10,6 +10,7 @@ import argparse
 import base64
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,6 +49,11 @@ except ImportError:  # Direct ``python telemetry_share.py`` invocation.
         telemetry_settings,
         user_config_path,
     )
+
+_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from git_paths import FULL_SHA_PATTERN, FULL_SHA_RE  # noqa: E402
 
 
 REMOTE_REPO = "vladolaru/pirategoat-tools-review-telemetry"
@@ -419,9 +425,16 @@ _DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _EMBEDDED_DRIVE_PATH = re.compile(r"(?:^|[^0-9A-Za-z])[A-Za-z]:[\\/]")
 _UNC_PATH = re.compile(r"\\\\[0-9A-Za-z]")
 # An absolute POSIX path embedded mid-string after a delimiter (cwd=/tmp/run,
-# "at /opt/tool"). The delimiter class excludes ":" — colon-delimited paths
+# "at /opt/tool"). Include Markdown quotes and forward-slash UNC roots.
+# The delimiter class excludes ":" — colon-delimited paths
 # are _COLON_POSIX_PATH's job, with its URL-scheme exemption.
-_EMBEDDED_POSIX_PATH = re.compile(r"""[\s"'=(\[,]/[^\s/]""")
+_PATH_DELIMITER = r"""[\s`"'=(\[,]"""
+_EMBEDDED_POSIX_PATH = re.compile(_PATH_DELIMITER + r"/+[^\s/]")
+# A home-relative path resolves to a local absolute path on the machine;
+# a single backslash is a Windows drive-rooted path without a drive name.
+# Neither can be an upstream version or a repository-relative Git path.
+_HOME_PATH = re.compile(r"(?:^|" + _PATH_DELIMITER + r"|:)~[^/\\\s]*[/\\]")
+_ROOTED_WINDOWS_PATH = re.compile(r"(?:^|" + _PATH_DELIMITER + r"|:)\\[^\s\\]")
 # An absolute POSIX path formatted right after a colon (cwd:/tmp/run,
 # path:/opt/tool). The "//" lookahead exempts URL schemes ("https://...").
 _COLON_POSIX_PATH = re.compile(r":/(?!/)[^\s/]")
@@ -438,6 +451,8 @@ def _looks_like_local_path(value: str) -> bool:
         or _UNC_PATH.search(value) is not None
         or _EMBEDDED_POSIX_PATH.search(value) is not None
         or _COLON_POSIX_PATH.search(value) is not None
+        or _HOME_PATH.search(value) is not None
+        or _ROOTED_WINDOWS_PATH.search(value) is not None
     )
 
 

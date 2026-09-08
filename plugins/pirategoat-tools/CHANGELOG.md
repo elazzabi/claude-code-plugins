@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The ledger save is rejected when a source is unaccounted for, a merged check drops a source's method text, or a severity matches no source without a note.
 - The orchestrator records dispatch adjustments through `dispatch_adjust.py` (`--skip NAME REASON`, `--dispatch NAME REASON`, `--dry-run`) instead of editing `dispatch-plan.json` by hand, and the step-6 briefing repeats them.
 - Each skip names the changed files whose only matching reviewer it removed, and the coverage section lists them as skipped by override rather than as matching no domain.
+- Host Context resolves for monorepos: plugin headers, wp-env and compose files are read at the repository root and every directory one and two levels down, and `.pirategoat/config.json` may name deeper roots under `hosts.roots`.
+- Every resolved host carries the identity its checkout declares — version plus the containing repository's commit, never a branch name — and reviewer briefings, the step-3 briefing, the record's Run notes and the telemetry manifest all state that same identity.
+- Reviewers cite upstream reads as `<host>@<version, commit, or unknown>:<path>:<line>`, and the evidence manifest counts those citations per reviewer by host.
+- wp.org zip URLs in wp-env files (`wordpress-latest.zip`, `downloads.wordpress.org/plugin/<slug>.zip`) count as host signals, so the ecosystem cache fulfils them.
 - The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
 - Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
 ### Changed
@@ -27,10 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
 - Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
 - The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
+- Unresolved host signals merge by name, one banner line per host with every source recorded, and a cache entry whose identity cannot be read says so instead of reporting `version: "latest"`.
 - The ecosystem-integration reviewer carries the mandatory bootstrap section every other reviewer has, and Claude dispatch prompts open with the instruction to run bootstrap first.
 - The reviewer builder snippet shows `add_observation(file, note, category)` with its real signature and no longer invites `claim_files_reviewed()` when the assignment has no claimable files, removing a deterministic first-save failure.
 - A reviewer may pass `claim_files_reviewed` one list of paths instead of separate arguments, a wrong-typed path names its type, and a draft save that recorded nothing prints a stderr NOTE rather than publishing an empty approve.
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
+- Shared telemetry discloses host names, versions and commits but never paths or branch names, and a wp-env pin's `#ref` is recorded as a version only when it is version-shaped.
+- A host the repository itself provides — WooCommerce, in its own monorepo — is never resolved from the ecosystem cache, and the reviewer protocol says a mounted host proves only that the local site mounts it.
 - Reviewer `review.json` files stamp an aware UTC timestamp, like every other run artifact, instead of the naive local clock.
 
 ## [1.118.0] - 2026-09-04

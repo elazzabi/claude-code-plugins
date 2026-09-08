@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from hosts.chain import ResolverChain
 from hosts.resolvers.wp_env import WpEnvResolver
 
 
@@ -78,6 +79,29 @@ def test_core_remote_ref_produces_unresolved(make_repo):
     assert u["name"] == "wordpress"
     assert u["version"] == "6.9"
     assert u["reason"] == "remote_ref_not_local"
+    assert u["root"] == ""
+
+
+@pytest.mark.parametrize("ref", ["client-staging-rollout", "trunk", "feature/x", "v"])
+def test_core_remote_branch_ref_is_not_a_version(make_repo, ref):
+    """A `#ref` names a branch as readily as a version, and a branch name
+    can be private. Only a version-shaped ref is recorded; the raw pin
+    stays in `raw`, which no projection carries."""
+    repo = make_repo({".wp-env.override.json": json.dumps({
+        "core": f"WordPress/WordPress#{ref}"
+    })})
+    result = WpEnvResolver().resolve(str(repo))
+    u = result.unresolved[0]
+    assert u["version"] is None
+    assert u["raw"] == f"WordPress/WordPress#{ref}"
+
+
+def test_plugin_remote_branch_ref_is_not_a_version(make_repo):
+    repo = make_repo({".wp-env.override.json": json.dumps({
+        "plugins": ["Automattic/jetpack-debug-helper#add/private-thing"]
+    })})
+    result = WpEnvResolver().resolve(str(repo))
+    assert [u["version"] for u in result.unresolved] == [None]
 
 
 def test_plugins_array_mix_of_local_and_remote(tmp_path):
@@ -97,6 +121,7 @@ def test_plugins_array_mix_of_local_and_remote(tmp_path):
     assert result.entries[0].name == "jetpack-dev-tools"
     assert len(result.unresolved) == 1
     assert result.unresolved[0]["name"] == "jetpack-debug-helper"
+    assert result.unresolved[0]["root"] == ""
 
 
 def test_override_merges_with_base(tmp_path):
@@ -248,3 +273,128 @@ def test_wp_env_tolerates_non_string_source_values(tmp_path):
 
 def test_wp_env_resolver_source_label():
     assert WpEnvResolver.source == "wp-env"
+
+
+def test_a_wp_env_file_two_levels_down_is_read_relative_to_its_own_directory(tmp_path):
+    """`plugins/woocommerce/.wp-env.json` in the WooCommerce monorepo:
+    `plugins: ["."]` is the plugin itself, `core` is a wp.org zip."""
+    repo = tmp_path / "woocommerce-develop"
+    plugin = repo / "plugins" / "woocommerce"
+    plugin.mkdir(parents=True)
+    (plugin / ".wp-env.json").write_text(json.dumps({
+        "core": "https://wordpress.org/wordpress-latest.zip",
+        "plugins": ["."],
+    }))
+    result = WpEnvResolver().resolve(str(repo))
+    assert result.entries == []
+    assert result.unresolved == [{
+        "name": "wordpress", "version": None, "reason": "remote_url_not_local",
+        "source": "wp-env", "raw": "https://wordpress.org/wordpress-latest.zip",
+        "root": "plugins/woocommerce",
+    }]
+
+
+def test_a_non_object_wp_env_document_does_not_abort_other_scan_roots(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "packages" / "wordpress"
+    nested.mkdir(parents=True)
+    (repo / ".wp-env.json").write_text(json.dumps(["unexpected"]))
+    (nested / ".wp-env.json").write_text(json.dumps({
+        "core": "https://wordpress.org/wordpress-latest.zip",
+    }))
+
+    result = WpEnvResolver().resolve(str(repo))
+
+    assert result.unresolved == [{
+        "name": "wordpress", "version": None, "reason": "remote_url_not_local",
+        "source": "wp-env", "raw": "https://wordpress.org/wordpress-latest.zip",
+        "root": "packages/wordpress",
+    }]
+
+
+def test_a_versioned_core_zip_carries_its_version(make_repo):
+    repo = make_repo({".wp-env.json": json.dumps({"core": "https://wordpress.org/wordpress-6.7.1.zip"})})
+    result = WpEnvResolver().resolve(str(repo))
+    assert result.unresolved[0]["name"] == "wordpress"
+    assert result.unresolved[0]["version"] == "6.7.1"
+    assert result.unresolved[0]["root"] == ""
+
+
+def test_a_plugin_zip_from_wordpress_org_names_its_slug(make_repo):
+    repo = make_repo({".wp-env.json": json.dumps({"plugins": [
+        ".", "https://downloads.wordpress.org/plugin/woocommerce.zip",
+        "https://downloads.wordpress.org/plugin/jetpack.14.1.zip",
+        "https://example.com/private-plugin.zip",
+    ]})})
+    result = WpEnvResolver().resolve(str(repo))
+    assert [(u["name"], u["version"], u["reason"]) for u in result.unresolved] == [
+        ("woocommerce", None, "remote_url_not_local"),
+        ("jetpack", "14.1", "remote_url_not_local"),
+    ]
+
+
+def test_a_local_mapping_two_levels_down_resolves_against_that_directory(tmp_path):
+    repo = tmp_path / "repo"
+    wc = tmp_path / "wc-develop" / "plugins" / "woocommerce"
+    wc.mkdir(parents=True)
+    nested = repo / "tools" / "env"
+    nested.mkdir(parents=True)
+    (nested / ".wp-env.json").write_text(json.dumps({
+        "mappings": {"wp-content/plugins/woocommerce": "../../../wc-develop/plugins/woocommerce"},
+    }))
+    result = WpEnvResolver().resolve(str(repo))
+    assert [(e.name, e.path) for e in result.entries] == [("woocommerce", str(wc.resolve()))]
+
+
+@pytest.mark.parametrize("bad_document, field", [
+    pytest.param({"plugins": 7}, "plugins", id="plugins-number"),
+    pytest.param({"themes": "invalid"}, "themes", id="themes-string"),
+    pytest.param({"mappings": []}, "mappings", id="mappings-list"),
+])
+def test_malformed_nested_fields_preserve_other_roots(tmp_path, bad_document, field):
+    repo = tmp_path / "repo"
+    wc = tmp_path / "woocommerce"
+    wc.mkdir()
+    bad = repo / "tools" / "bad"
+    good = repo / "tools" / "later"
+    bad.mkdir(parents=True)
+    good.mkdir()
+    (repo / ".wp-env.json").write_text(json.dumps({
+        "mappings": {"wp-content/plugins/woocommerce": "../woocommerce"},
+    }))
+    bad_file = bad / ".wp-env.json"
+    bad_file.write_text(json.dumps(bad_document))
+    (good / ".wp-env.json").write_text(json.dumps({
+        "plugins": ["https://downloads.wordpress.org/plugin/optional-plugin.zip"],
+    }))
+
+    manifest = ResolverChain([WpEnvResolver()]).run(str(repo))
+
+    assert [(entry.name, entry.path) for entry in manifest.resolved] == [("woocommerce", str(wc))]
+    assert [item["name"] for item in manifest.unresolved] == ["optional-plugin"]
+    assert manifest.unresolved[0]["declared_by"] == [{
+        "source": "wp-env", "reason": "remote_url_not_local", "root": "tools/later",
+    }]
+    diagnostic = manifest.diagnostics["resolver_detail"]["wp-env"]["notes"]["parse_error"]
+    assert str(bad_file) in diagnostic
+    assert field in diagnostic
+    assert "expected" in diagnostic
+    assert manifest.banner.degraded is True
+    assert manifest.banner.reason == "partial_unresolved"
+    assert manifest.banner.unresolved == manifest.unresolved
+
+
+def test_malformed_override_field_preserves_valid_base_signals(make_repo):
+    repo = make_repo({
+        ".wp-env.json": json.dumps({"plugins": ["vendor/optional-plugin#2.0"]}),
+        ".wp-env.override.json": json.dumps({"plugins": 7}),
+    })
+
+    manifest = ResolverChain([WpEnvResolver()]).run(str(repo))
+
+    assert [item["name"] for item in manifest.unresolved] == ["optional-plugin"]
+    assert manifest.unresolved[0]["version"] == "2.0"
+    diagnostic = manifest.diagnostics["resolver_detail"]["wp-env"]["notes"]["parse_error"]
+    assert ".wp-env.override.json" in diagnostic
+    assert "plugins" in diagnostic
+    assert manifest.banner.reason == "fully_unavailable"

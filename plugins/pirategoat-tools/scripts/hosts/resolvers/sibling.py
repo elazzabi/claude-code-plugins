@@ -25,7 +25,7 @@ _TARGETS: List[_SiblingTarget] = [
 class SiblingResolver(HostResolver):
     source = "sibling"
 
-    def resolve(self, repo_path: str) -> ResolverResult:
+    def resolve(self, repo_path: str, scan=None) -> ResolverResult:
         parent = os.path.dirname(os.path.abspath(repo_path))
         entries: List[HostEntry] = []
         for target in _TARGETS:

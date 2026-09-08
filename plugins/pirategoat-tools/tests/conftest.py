@@ -20,6 +20,13 @@ SCRIPTS_DIR = TESTS_DIR.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Add tests/ so `from helpers... import ...` resolves for a module collected
+# on its own. Pytest loads this conftest before any module under it, so no
+# test file needs its own insert; a file that carries one is only masking
+# the absence of this line for whichever file is collected first without it.
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 PIPELINE_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "review" / "pipeline.py"
 PIPELINE_TOTAL_STEPS = 12
 

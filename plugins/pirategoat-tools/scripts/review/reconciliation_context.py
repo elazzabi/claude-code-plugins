@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
+    from .change_purpose import checks_settling, parse_change_purpose
+    from .manifest_sections import read_artifact_file
     from .run_paths import REVIEWERS_SUBDIR, artifact_path
     from .reviewer_names import derive_reviewer_name
     from .verdict_rules import VALID_SEVERITIES
@@ -36,6 +38,8 @@ except ImportError:
     _scripts_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
+    from review.change_purpose import checks_settling, parse_change_purpose
+    from review.manifest_sections import read_artifact_file
     from review.run_paths import REVIEWERS_SUBDIR, artifact_path
     from review.reviewer_names import derive_reviewer_name
     from review.verdict_rules import VALID_SEVERITIES
@@ -742,6 +746,18 @@ def filter_in_scope_references(
     return filtered
 
 
+def load_host_context(output_dir: str) -> Optional[Dict[str, Any]]:
+    """Read the local-only host manifest from the run's review context.
+
+    The manifest can be large, so it stays on disk rather than crossing the
+    reconciliation subprocess argv. Its banner comes from this same snapshot.
+    Malformed, absent, or non-object values are treated as unavailable.
+    """
+    context = read_artifact_file(output_dir, "review_context") or {}
+    host_context = context.get("host_context")
+    return host_context if isinstance(host_context, dict) else None
+
+
 def main() -> int:
     """CLI entry point. Gathers all reconciliation context and writes JSON."""
     parser = argparse.ArgumentParser(
@@ -768,13 +784,6 @@ def main() -> int:
         help="Pull request ID.",
     )
     parser.add_argument(
-        "--host-banner-json", default="",
-        help=(
-            "The degraded-host banner as JSON, from the caller's own "
-            "review context. Empty means no banner applies."
-        ),
-    )
-    parser.add_argument(
         "--dispatched-agents", default=None,
         help="Comma-separated agent names from the dispatch plan. "
              "When provided, only review files for these agents are loaded. "
@@ -788,14 +797,10 @@ def main() -> int:
     changed_files = [f.strip() for f in args.changed_files.split(",") if f.strip()]
     change_purpose = args.change_purpose
     pr_id = args.pr_id
-    # The orchestrator holds review context in memory when it calls
-    # this script, so it passes the banner rather than making this script
-    # a second reader of a file it does not own. A malformed value is the
-    # caller's bug, and the traceback names it.
-    host_banner = (
-        json.loads(args.host_banner_json)
-        if args.host_banner_json.strip() else None
-    )
+    host_context = load_host_context(output_dir)
+    host_banner = (host_context or {}).get("banner")
+    if not isinstance(host_banner, dict):
+        host_banner = None
     dispatched_agents: Optional[List[str]] = None
     if args.dispatched_agents is not None:
         stripped = args.dispatched_agents.strip()
@@ -858,7 +863,7 @@ def main() -> int:
             "changed_files": changed_files,
             "change_purpose": change_purpose,
             "pr_id": pr_id,
-            # The degraded-host banner the caller resolved. Reviewers'
+            # The degraded-host banner from the local snapshot. Reviewers'
             # claims were scoped by its presence, and findings_save.py
             # stamps it onto the ledger.
             "host_context_banner": host_banner,
@@ -872,6 +877,8 @@ def main() -> int:
             # obedience checkable.
             "prefiltered_out_of_scope": prefiltered,
         }
+        if host_context is not None:
+            context["host_context"] = host_context
         # Dispatched agents, normalized to match reviews_by_agent keys
         # (e.g., "security-reviewer" → "security-review"). Present only
         # when dispatch was actually known — its absence and

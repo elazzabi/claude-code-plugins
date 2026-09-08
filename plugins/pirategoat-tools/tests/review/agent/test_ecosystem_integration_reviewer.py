@@ -47,11 +47,23 @@ def test_agent_declares_host_context_dependency():
     assert "runtime-host" in content.lower()
 
 
-def test_agent_treats_host_context_as_non_exhaustive():
+def test_agent_treats_resolved_host_context_as_authoritative():
+    """A covered Host Context entry must win over lower discovery sources."""
     content = AGENT_PATH.read_text().lower()
-    assert "starting point" in content
-    assert "not an exhaustive" in content
-    assert "explore" in content
+    start = content.find("## operating procedure: host context as the authoritative source when resolved")
+    assert start != -1, "agent must define the resolved-host authority contract"
+    end = content.find("\n## ", start + 1)
+    section = content[start:end] if end != -1 else content[start:]
+
+    assert "authoritative for the upstream surface it covers" in section
+    assert "without searching for another copy" in section
+    assert "starting point" not in section
+
+    discovery_start = content.find("## bounded upstream discovery")
+    assert discovery_start != -1, "agent must define its fallback discovery order"
+    discovery_end = content.find("\n## ", discovery_start + 1)
+    discovery = content[discovery_start:discovery_end] if discovery_end != -1 else content[discovery_start:]
+    assert discovery.count("when no resolved host covers") == 3
 
 
 def test_agent_uses_bounded_upstream_discovery_then_rule_zero_exit():

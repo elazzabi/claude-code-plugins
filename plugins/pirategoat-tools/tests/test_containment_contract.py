@@ -21,6 +21,11 @@ class TestContains:
         repo.mkdir()
         assert contains(str(repo), str(repo))
 
+    def test_a_spelling_the_filesystem_cannot_resolve_is_not_contained(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        assert not contains(str(repo), str(repo / "src\x00x"))
+
     def test_sibling_directory_is_not_contained(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()

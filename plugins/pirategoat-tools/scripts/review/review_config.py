@@ -38,8 +38,7 @@ except ImportError:
 
 from containment import contains
 from git_paths import decode_git_c_quoted_path
-
-CONFIG_RELPATH = os.path.join(".pirategoat", "config.json")
+from hosts.repo_config import CONFIG_RELATIVE_PATH as CONFIG_RELPATH
 
 DEFAULT_EXECUTION = "inline"
 DEFAULT_CHANNEL = "blocking"

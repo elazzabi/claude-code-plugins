@@ -3,18 +3,40 @@
 import os
 from typing import Any, Dict, Iterable, List
 
-from hosts.cache.manager import cache_root, ensure_fresh
+from hosts.cache.manager import KNOWN_ECOSYSTEM_NAMES, cache_dir_for, cache_root, ensure_fresh, slot_identity
 from hosts.resolvers.base import HostResolver, ResolverResult
 from hosts.types import HostEntry
 
 
-_KNOWN_HOSTS = ["wordpress", "woocommerce"]
+def _slot_entry(name: str, path: str, confidence: str, notes: Dict[str, Any]) -> HostEntry:
+    """One cache entry, carrying the slot identity every consumer reports.
+
+    The slot's branch stays out of the notes: no host projection carries a
+    branch name, since the shared telemetry manifest is built from that
+    projection and a slot someone checked out to a personal branch would
+    upload its name. The commit identifies the slot on its own.
+    """
+    identity = slot_identity(name)
+    return HostEntry(
+        name=name,
+        kind="runtime-host",
+        path=path,
+        source=EcosystemCacheResolver.source,
+        version=identity["version"],
+        version_freshness=identity["refreshed"],
+        confidence=confidence,
+        notes={
+            **notes,
+            "commit": identity["commit"],
+            "commit_date": identity["commit_date"],
+        },
+    )
 
 
 class EcosystemCacheResolver(HostResolver):
     source = "ecosystem-cache"
 
-    def resolve(self, repo_path: str) -> ResolverResult:
+    def resolve(self, repo_path: str, scan=None) -> ResolverResult:
         cache_root_path = str(cache_root())
         if not os.path.isdir(cache_root_path):
             return ResolverResult(
@@ -23,17 +45,10 @@ class EcosystemCacheResolver(HostResolver):
             )
 
         entries: List[HostEntry] = []
-        for host in _KNOWN_HOSTS:
-            path = os.path.join(cache_root_path, host, "latest")
+        for host in sorted(KNOWN_ECOSYSTEM_NAMES):
+            path = str(cache_dir_for(host))
             if os.path.isdir(path):
-                entries.append(HostEntry(
-                    name=host,
-                    kind="runtime-host",
-                    path=path,
-                    source=self.source,
-                    version="latest",
-                    confidence="medium",
-                ))
+                entries.append(_slot_entry(host, path, "medium", {}))
         return ResolverResult(entries=entries, unresolved=[], notes={})
 
     def resolve_for_names(self, names: Iterable[str]) -> ResolverResult:
@@ -43,46 +58,36 @@ class EcosystemCacheResolver(HostResolver):
         Used by the chain's post-loop fulfillment pass to satisfy unresolved
         host signals from earlier resolvers. Confidence is `high` because the
         slot is guaranteed within the freshness window after `ensure_fresh`.
-        Names outside `_KNOWN_HOSTS` are ignored.
+        Names outside the known ecosystem hosts are ignored.
         """
-        requested = {n for n in names if n in _KNOWN_HOSTS}
+        requested = {n for n in names if n in KNOWN_ECOSYSTEM_NAMES}
         if not requested:
             return ResolverResult(entries=[], unresolved=[], notes={})
 
+        # `ensure_fresh` creates the cache root before it clones or pulls,
+        # so a missing root after it is an OSError it already raised.
         refresh_results: Dict[str, Any] = {
             name: ensure_fresh(name) for name in sorted(requested)
         }
 
-        cache_root_path = str(cache_root())
-        if not os.path.isdir(cache_root_path):
-            return ResolverResult(
-                entries=[], unresolved=[],
-                notes={
-                    "state": "cache_missing",
-                    "path": cache_root_path,
-                    "refresh": refresh_results,
-                },
-            )
-
         entries: List[HostEntry] = []
         unresolved: List[Dict[str, Any]] = []
         for name in sorted(requested):
-            path = os.path.join(cache_root_path, name, "latest")
+            path = str(cache_dir_for(name))
             refresh = refresh_results.get(name, {})
             if os.path.isdir(path):
-                entries.append(HostEntry(
-                    name=name,
-                    kind="runtime-host",
-                    path=path,
-                    source=self.source,
-                    version="latest",
-                    confidence="high",
-                    notes={
+                entries.append(
+                    _slot_entry(
+                        name,
+                        path,
+                        "high",
+                        {
                         "fulfillment": True,
                         "refresh_action": refresh.get("action"),
                         "refresh_ok": refresh.get("ok"),
-                    },
-                ))
+                        },
+                    )
+                )
             else:
                 unresolved.append({
                     "name": name,

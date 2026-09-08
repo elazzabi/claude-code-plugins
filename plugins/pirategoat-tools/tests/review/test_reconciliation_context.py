@@ -1280,9 +1280,6 @@ class TestFullScript:
             "--changed-files", "src/auth.py,src/db.py",
             "--change-purpose", "Fix auth bug",
             "--pr-id", "42",
-            "--host-banner-json", json.dumps(
-                {"degraded": True, "message": "no upstream source"}
-            ),
             cwd=tmp_path,
         )
 
@@ -1307,9 +1304,7 @@ class TestFullScript:
         assert ctx["changed_files"] == ["src/auth.py", "src/db.py"]
         assert ctx["change_purpose"] == "Fix auth bug"
         assert ctx["pr_id"] == "42"
-        assert ctx["host_context_banner"] == {
-            "degraded": True, "message": "no upstream source",
-        }
+        assert ctx["host_context_banner"] is None
 
     def test_the_banner_comes_from_the_caller_not_a_second_file_read(
         self, tmp_path
@@ -1333,7 +1328,105 @@ class TestFullScript:
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
         ctx = _read_reconciliation_context(tmp_path)
-        assert ctx["host_context_banner"] is None
+        assert ctx["host_context_banner"] == {"degraded": True, "message": "x"}
+        assert ctx["host_context_banner"] == ctx["host_context"]["banner"]
+
+    def test_full_host_context_is_carried_for_local_citation_reconciliation(
+        self, tmp_path
+    ):
+        host_context = {
+            "version": 1,
+            "resolved": [{
+                "name": "wordpress",
+                "kind": "runtime-host",
+                "path": "/repo/wordpress",
+                "source": "ecosystem-cache",
+                "version": None,
+                "notes": {"commit": None},
+            }],
+            "unresolved": [],
+            "banner": None,
+        }
+
+        (tmp_path / "review-context.json").write_text(
+            json.dumps({"host_context": host_context})
+        )
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert _read_reconciliation_context(tmp_path)["host_context"] == host_context
+
+    def test_absent_host_context_is_omitted_defensively(self, tmp_path):
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "host_context" not in _read_reconciliation_context(tmp_path)
+
+    @pytest.mark.parametrize("contents", [
+        pytest.param(b"{", id="malformed-json"),
+        pytest.param(b'{"host_context": "nope"}', id="non-object-host"),
+        pytest.param(b"[]", id="non-object-context"),
+        pytest.param(b"\x80", id="undecodable-utf8"),
+        pytest.param(b'{"unrelated": ' + b"1" * 4301 + b'}', id="oversized-integer"),
+    ])
+    def test_malformed_or_non_object_host_context_is_omitted_defensively(
+        self, tmp_path, contents
+    ):
+        (tmp_path / "review-context.json").write_bytes(contents)
+        _write_review_json(tmp_path, "security", _make_review_json(reviewer="security", findings=[]))
+
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", "Fix auth bug", "--pr-id", "42",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        context = _read_reconciliation_context(tmp_path)
+        assert "host_context" not in context
+        assert context["host_context_banner"] is None
+        assert context["changed_files"] == ["src/auth.py"]
+        assert context["change_purpose"] == "Fix auth bug"
+        assert context["pr_id"] == "42"
+        assert list(context["reviews_by_agent"]) == ["security-review"]
+
+    def test_oversized_host_context_is_read_from_disk_without_argv_transport(
+        self, tmp_path
+    ):
+        host_context = {
+            "version": 1,
+            "resolved": [
+                {
+                    "name": f"wordpress-{index}",
+                    "kind": "runtime-host",
+                    "path": f"/repo/wordpress-{index}",
+                    "source": "ecosystem-cache",
+                    "version": None,
+                    "notes": {},
+                }
+                for index in range(9000)
+            ],
+            "unresolved": [],
+            "banner": None,
+        }
+        review_context = tmp_path / "review-context.json"
+        review_context.write_text(json.dumps({"host_context": host_context}))
+        assert review_context.stat().st_size > 1_000_000
+
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        context = _read_reconciliation_context(tmp_path)
+        assert len(context["host_context"]["resolved"]) == 9000
 
     def test_empty_output_dir(self, tmp_path):
         """Runs successfully with no review files."""

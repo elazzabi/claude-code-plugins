@@ -576,3 +576,73 @@ class TestAgentsReportingCountsAgents:
         broken.parent.mkdir(parents=True, exist_ok=True)
         broken.write_text("{not json")
         assert aggregate_file_review(str(tmp_path)) is None
+
+
+class TestHostContextSummary:
+    @pytest.mark.parametrize("value", [42, "bad", {"unexpected": "container"}], ids=["number", "string", "object"])
+    def test_malformed_lists_are_ignored(self, value):
+        summary = manifest_sections.summarize_host_context({
+            "resolved": value, "unresolved": value,
+            "diagnostics": {"self_provided": value, "scan_roots": True},
+        })
+        assert summary == {
+            "resolved": [], "unresolved": [], "banner_reason": None,
+            "self_provided": [], "scan_roots": None,
+        }
+
+    @pytest.mark.parametrize("value", [
+        {"path": "/Users/private"}, ["/Users/private"], 42,
+    ], ids=["object", "list", "number"])
+    def test_non_string_identity_fields_are_unknown(self, value):
+        summary = manifest_sections.summarize_host_context({
+            "resolved": [{
+                "name": value, "kind": value, "source": value, "version": value,
+                "version_freshness": value,
+                "notes": {"commit": value, "branch": value, "declared_minimum": value},
+            }],
+            "unresolved": [{"name": value, "reason": value, "version": value}],
+            "banner": {"reason": value},
+            "diagnostics": {"self_provided": [value]},
+        })
+        assert all(v is None for v in summary["resolved"][0].values())
+        assert all(v is None for v in summary["unresolved"][0].values())
+        assert summary["banner_reason"] is None
+        assert summary["self_provided"] == []
+
+    MANIFEST = {
+        "version": 1,
+        "resolved": [
+            {"name": "wordpress", "kind": "runtime-host", "path": "/Users/x/.cache/pirategoat/ecosystem/wordpress/latest",
+             "source": "ecosystem-cache", "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+             "confidence": "high", "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk",
+                                             "commit_date": "2026-09-04T18:35:44Z", "declared_minimum": "7.0",
+                                             "declared_by": [{"source": "plugin-headers", "root": "plugins/woocommerce"}]}},
+            {"name": "node_modules", "kind": "library-dep", "path": "/Users/x/repo/node_modules",
+             "source": "vendor-inspection", "version": None, "version_freshness": None, "confidence": "high", "notes": {}},
+        ],
+        "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "source": "plugin-headers", "version": None}],
+        "banner": {"degraded": True, "reason": "partial_unresolved", "message": "…", "unresolved": []},
+        "diagnostics": {"self_provided": ["woocommerce"], "scan_roots": 4, "resolvers_consulted": []},
+    }
+
+    def test_projects_identity_and_never_a_path(self):
+        summary = manifest_sections.summarize_host_context(self.MANIFEST)
+        assert summary == {
+            "resolved": [
+                {"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache", "version": "7.2-alpha-63166-src",
+                 "commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "refreshed": "2026-09-04T00:04:08Z",
+                 "declared_minimum": "7.0"},
+                {"name": "node_modules", "kind": "library-dep", "source": "vendor-inspection", "version": None,
+                 "commit": None, "refreshed": None, "declared_minimum": None},
+            ],
+            "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": None}],
+            "banner_reason": "partial_unresolved",
+            "self_provided": ["woocommerce"],
+            "scan_roots": 4,
+        }
+        assert "/Users/" not in json.dumps(summary)
+
+    def test_absent_or_malformed_manifests_are_unmeasured(self):
+        assert manifest_sections.summarize_host_context(None) is None
+        assert manifest_sections.summarize_host_context("nope") is None
+        assert manifest_sections.summarize_host_context({}) == {"resolved": [], "unresolved": [], "banner_reason": None, "self_provided": [], "scan_roots": None}

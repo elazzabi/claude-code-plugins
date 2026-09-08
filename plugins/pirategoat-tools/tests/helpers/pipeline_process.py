@@ -36,12 +36,17 @@ def run_pipeline(*args, cwd, env=None):
     )
 
 
-def init_repo(path):
+def init_repo(path, branch=None):
     """Initialize a minimal git repo for isolated pipeline CLI subprocess tests.
 
-    One commit on the initial branch. Returns `path`.
+    One commit on the initial branch (`branch` names it). Returns `path`.
     """
-    subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", *(["-b", branch] if branch else [])],
+        cwd=path, capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=path, capture_output=True, check=True,

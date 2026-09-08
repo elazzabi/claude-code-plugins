@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from hosts.chain import ResolverChain
+from hosts.resolvers.base import ResolverResult
 from hosts.types import HostContextManifest
 
 
@@ -489,6 +490,78 @@ services:
         assert manifest.banner is not None
         assert "jetpack" in manifest.banner.message
 
+    def test_the_woocommerce_monorepo_resolves_wordpress_and_never_itself(self, tmp_path, monkeypatch):
+        """Measured layout: two plugin roots two levels down, one of which
+        declares WooCommerce — the repository under review — as a
+        dependency. WordPress is fulfilled from the cache with the strictest
+        declared minimum; WooCommerce is dropped as self-provided and the
+        cache is never asked for it."""
+        cache_root_dir = tmp_path / "xdg-cache"
+        monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root_dir))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        self._stub_update_to_populate(monkeypatch, cache_root_dir)
+        requested = []
+        import hosts.chain as chain_mod
+        real = chain_mod.EcosystemCacheResolver.resolve_for_names
+
+        def spy(self_, names):
+            requested.append(sorted(names))
+            return real(self_, names)
+
+        monkeypatch.setattr(chain_mod.EcosystemCacheResolver, "resolve_for_names", spy)
+
+        repo = tmp_path / "woocommerce-develop"
+        wc = repo / "plugins" / "woocommerce"
+        beta = repo / "plugins" / "woocommerce-beta-tester"
+        wc.mkdir(parents=True)
+        beta.mkdir(parents=True)
+        (wc / "woocommerce.php").write_text("<?php\n/**\n * Plugin Name: WooCommerce\n * Text Domain: woocommerce\n * Requires at least: 7.0\n */\n")
+        (wc / ".wp-env.json").write_text(json.dumps({"core": "https://wordpress.org/wordpress-latest.zip", "plugins": ["."]}))
+        (beta / "woocommerce-beta-tester.php").write_text("<?php\n/**\n * Plugin Name: WooCommerce Beta Tester\n * Text Domain: woocommerce-beta-tester\n * Requires at least: 5.8\n * WC requires at least: 9.4\n */\n")
+        (beta / ".wp-env.json").write_text(json.dumps({"plugins": [".", "https://downloads.wordpress.org/plugin/woocommerce.zip"]}))
+
+        manifest = ResolverChain().run(str(repo))
+
+        assert requested == [["wordpress"]]
+        runtime = [e for e in manifest.resolved if e.kind == "runtime-host"]
+        assert [e.name for e in runtime] == ["wordpress"]
+        wordpress = runtime[0]
+        assert wordpress.source == "ecosystem-cache"
+        assert wordpress.notes["declared_minimum"] == "7.0"
+        assert [d["root"] for d in wordpress.notes["declared_by"]] == [
+            "plugins/woocommerce", "plugins/woocommerce", "plugins/woocommerce-beta-tester",
+        ]
+        assert manifest.unresolved == []
+        assert manifest.banner is None
+        assert manifest.diagnostics["self_provided"] == ["woocommerce"]
+        assert manifest.diagnostics["scan_roots"] == 4
+        assert manifest.diagnostics["config_errors"] == []
+        assert json.dumps(manifest.to_dict())
+
+    def test_unresolved_signals_merge_by_name_with_the_strictest_version(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        monkeypatch.setattr("hosts.cache.manager.update_host",
+                            lambda name: {"name": name, "action": "cloned", "ok": False, "stderr": "offline"})
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "plugin.php").write_text("<?php\n/**\n * Plugin Name: P\n * Requires at least: 6.2\n */\n")
+        (repo / ".wp-env.json").write_text(json.dumps({"core": "https://wordpress.org/wordpress-6.7.1.zip"}))
+
+        manifest = ResolverChain().run(str(repo))
+
+        assert len(manifest.unresolved) == 1
+        item = manifest.unresolved[0]
+        assert item["name"] == "wordpress"
+        assert item["version"] == "6.7.1"
+        assert item["reason"] == "remote_url_not_local"   # wp-env ran before plugin-headers
+        assert item["declared_by"] == [
+            {"source": "wp-env", "reason": "remote_url_not_local", "version": "6.7.1", "root": ""},
+            {"source": "plugin-headers", "reason": "declared_in_plugin_headers", "version": "6.2", "root": ""},
+        ]
+        assert manifest.banner is not None
+        assert manifest.banner.message.count('"wordpress"') == 1
+
 
 def test_resolver_chain_tolerates_resolver_exception(tmp_path):
     """A resolver that raises must not abort the chain."""
@@ -498,13 +571,13 @@ def test_resolver_chain_tolerates_resolver_exception(tmp_path):
     class ExplodingResolver(HostResolver):
         source = "exploding"
 
-        def resolve(self, repo_path):
+        def resolve(self, repo_path, scan=None):
             raise RuntimeError("kaboom")
 
     class WorkingResolver(HostResolver):
         source = "working"
 
-        def resolve(self, repo_path):
+        def resolve(self, repo_path, scan=None):
             return ResolverResult(entries=[], unresolved=[], notes={"ok": True})
 
     chain = ResolverChain(resolvers=[ExplodingResolver(), WorkingResolver()])
@@ -517,3 +590,205 @@ def test_resolver_chain_tolerates_resolver_exception(tmp_path):
     detail = manifest.diagnostics["resolver_detail"]["exploding"]
     assert "error" in detail.get("notes", {})
     assert "kaboom" in detail["notes"]["error"]
+
+
+def test_resolver_chain_preserves_numeric_string_unresolved_version(tmp_path):
+    """Numeric version strings remain declarations, not malformed payloads."""
+    from hosts.resolvers.base import HostResolver, ResolverResult
+
+    class VersionResolver(HostResolver):
+        source = "version"
+
+        def resolve(self, repo_path, scan=None):
+            return ResolverResult(
+                entries=[],
+                unresolved=[{"name": "jetpack", "version": "9.4"}],
+                notes={},
+            )
+
+    manifest = ResolverChain(resolvers=[VersionResolver()]).run(str(tmp_path))
+
+    assert manifest.unresolved[0]["version"] == "9.4"
+    assert json.dumps(manifest.to_dict())
+
+
+def test_resolver_chain_merges_numeric_and_large_unresolved_versions(tmp_path):
+    """A component past int()'s digit limit is no version: the chain keeps the
+    first declaration and stays JSON-safe instead of raising."""
+    from hosts.resolvers.base import HostResolver, ResolverResult
+
+    huge_component = "9" * 4301
+
+    class VersionResolver(HostResolver):
+        source = "version"
+
+        def resolve(self, repo_path, scan=None):
+            return ResolverResult(
+                entries=[],
+                unresolved=[
+                    {"name": "jetpack", "version": "6.9"},
+                    {"name": "jetpack", "version": "6.10"},
+                    {"name": "akismet", "version": "1.9"},
+                    {"name": "akismet", "version": f"1.{huge_component}"},
+                ],
+                notes={},
+            )
+
+    manifest = ResolverChain(resolvers=[VersionResolver()]).run(str(tmp_path))
+
+    versions = {item["name"]: item["version"] for item in manifest.unresolved}
+    assert versions == {"jetpack": "6.10", "akismet": "1.9"}
+    assert json.dumps(manifest.to_dict())
+
+
+def test_resolver_chain_merges_unicode_decimal_versions_numerically(tmp_path):
+    """Decimal digits from every script compare by their numeric values."""
+    from hosts.resolvers.base import HostResolver, ResolverResult
+
+    class VersionResolver(HostResolver):
+        source = "version"
+
+        def resolve(self, repo_path, scan=None):
+            return ResolverResult(
+                entries=[],
+                unresolved=[
+                    {"name": "jetpack", "version": "6.٠٠٩"},
+                    {"name": "jetpack", "version": "6.10"},
+                    {"name": "akismet", "version": "6.１２"},
+                    {"name": "akismet", "version": "6.99"},
+                ],
+                notes={},
+            )
+
+    manifest = ResolverChain(resolvers=[VersionResolver()]).run(str(tmp_path))
+
+    versions = {item["name"]: item["version"] for item in manifest.unresolved}
+    assert versions == {"jetpack": "6.10", "akismet": "6.99"}
+    assert json.dumps(manifest.to_dict())
+
+
+def test_a_failing_fulfilment_pass_leaves_the_names_unresolved_with_the_banner(tmp_path, monkeypatch):
+    """The cache pass refreshes a slot and reads its git identity, so it can
+    fail in ways no resolver can; the review still gets a manifest."""
+    import hosts.chain as chain_mod
+
+    def explode(self_, names):
+        raise PermissionError("[Errno 13] Permission denied: '.last_updated'")
+
+    monkeypatch.setattr(chain_mod.EcosystemCacheResolver, "resolve_for_names", explode)
+    repo = tmp_path / "plugin"
+    repo.mkdir()
+    (repo / "plugin.php").write_text("<?php\n/**\n * Plugin Name: P\n * Requires at least: 6.0\n */\n")
+
+    manifest = ResolverChain().run(str(repo))
+
+    assert [u["name"] for u in manifest.unresolved] == ["wordpress"]
+    assert manifest.banner is not None
+    detail = manifest.diagnostics["resolver_detail"]["ecosystem-cache-fulfillment"]
+    assert detail["notes"]["errors"] == [
+        "PermissionError: [Errno 13] Permission denied: '.last_updated'"
+    ]
+    assert json.dumps(manifest.to_dict())
+
+
+def test_an_explicitly_configured_host_the_repo_also_provides_stays_resolved(tmp_path, monkeypatch):
+    """`hosts.runtime` names a WooCommerce checkout while the repository's own
+    plugin header both provides WooCommerce and (as an extension bundled in
+    the same tree would) declares it: the explicit entry wins, the declared
+    signal is dropped as self-provided, and the cache is never asked."""
+    import hosts.chain as chain_mod
+    requested = []
+    monkeypatch.setattr(
+        chain_mod.EcosystemCacheResolver, "resolve_for_names",
+        lambda self_, names: requested.append(sorted(names)) or ResolverResult(entries=[], unresolved=[], notes={}),
+    )
+    external = tmp_path / "woocommerce-checkout"
+    external.mkdir()
+    repo = tmp_path / "woocommerce"
+    (repo / ".pirategoat").mkdir(parents=True)
+    (repo / ".pirategoat" / "config.json").write_text(json.dumps({
+        "hosts": {"runtime": [{"name": "woocommerce", "path": "../woocommerce-checkout"}]},
+    }))
+    (repo / "woocommerce.php").write_text(
+        "<?php\n/**\n * Plugin Name: WooCommerce\n * Text Domain: woocommerce\n * Requires at least: 6.7\n */\n"
+    )
+    (repo / "packages").mkdir()
+    (repo / "packages" / "blocks").mkdir()
+    (repo / "packages" / "blocks" / "blocks.php").write_text(
+        "<?php\n/**\n * Plugin Name: Blocks\n * WC requires at least: 9.0\n */\n"
+    )
+
+    manifest = ResolverChain().run(str(repo))
+
+    assert [(e.name, e.source) for e in manifest.resolved if e.kind == "runtime-host"] == [
+        ("woocommerce", "explicit"),
+    ]
+    assert [u["name"] for u in manifest.unresolved] == ["wordpress"]
+    assert manifest.diagnostics["self_provided"] == ["woocommerce"]
+    assert requested == [["wordpress"]]
+
+
+def test_resolved_local_runtime_hosts_carry_their_declared_version_and_commit(tmp_path):
+    """Run 4 briefed every reviewer "woocommerce (docker-compose): version
+    unknown, commit unknown" for a checkout with `Version: 11.2.0-dev` in its
+    header and a git HEAD; only cache slots had an identity reader."""
+    import subprocess
+    from hosts.resolvers.base import HostResolver, ResolverResult
+    from hosts.types import HostEntry
+
+    checkout = tmp_path / "woocommerce"
+    checkout.mkdir()
+    (checkout / "woocommerce.php").write_text("<?php\n/**\n * Plugin Name: WooCommerce\n * Version: 11.2.0-dev\n */\n")
+    subprocess.run(["git", "-C", str(checkout), "init", "-q", "-b", "trunk"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.email=t@example.com", "-c", "user.name=t", "add", "."], check=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "init"], check=True)
+    head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    class MountResolver(HostResolver):
+        source = "docker-compose"
+
+        def resolve(self, repo_path, scan=None):
+            return ResolverResult(entries=[
+                HostEntry(name="woocommerce", kind="runtime-host", path=str(checkout), source=self.source, confidence="high"),
+                # A resolver's own reading wins over the identity pass.
+                HostEntry(name="jetpack", kind="runtime-host", path=str(checkout), source=self.source, version="15.0", notes={"commit": "abc"}),
+                # Not a local checkout: everything stays unknown.
+                HostEntry(name="ghost", kind="runtime-host", path=str(tmp_path / "absent"), source=self.source),
+            ], unresolved=[], notes={})
+
+    manifest = ResolverChain(resolvers=[MountResolver()]).run(str(tmp_path))
+    by_name = {entry.name: entry for entry in manifest.resolved}
+
+    assert by_name["woocommerce"].version == "11.2.0-dev"
+    assert by_name["woocommerce"].notes["commit"] == head
+    assert by_name["woocommerce"].notes["identity_scope"] == "checkout"
+    assert "branch" not in by_name["woocommerce"].notes  # never read, never projected
+    assert by_name["jetpack"].version == "15.0"
+    assert by_name["jetpack"].notes["commit"] == "abc"
+    assert by_name["ghost"].version is None and "commit" not in by_name["ghost"].notes
+    assert "identity_errors" not in manifest.diagnostics
+
+
+def test_an_identity_read_failure_is_a_diagnostic_never_an_aborted_review(tmp_path, monkeypatch):
+    from hosts import chain as chain_module
+    from hosts.resolvers.base import HostResolver, ResolverResult
+    from hosts.types import HostEntry
+
+    def explode(_path):
+        raise RuntimeError("git hung")
+
+    monkeypatch.setattr(chain_module, "path_identity", explode)
+
+    class MountResolver(HostResolver):
+        source = "docker-compose"
+
+        def resolve(self, repo_path, scan=None):
+            return ResolverResult(entries=[
+                HostEntry(name="woocommerce", kind="runtime-host", path=str(tmp_path), source=self.source),
+            ], unresolved=[], notes={})
+
+    manifest = ResolverChain(resolvers=[MountResolver()]).run(str(tmp_path))
+
+    assert [entry.name for entry in manifest.resolved] == ["woocommerce"]
+    assert manifest.resolved[0].version is None
+    assert manifest.diagnostics["identity_errors"] == ["woocommerce: RuntimeError: git hung"]

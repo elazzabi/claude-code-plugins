@@ -12,6 +12,7 @@ except ImportError:
 
 from containment import contains
 from hosts.resolvers.base import HostResolver, ResolverResult
+from hosts.scan_roots import scan_roots
 from hosts.types import HostEntry
 
 
@@ -39,11 +40,12 @@ _LONG_FORM_VOLUME_KEYS = frozenset({"type", "source", "src", "target", "dst", "d
 class DockerComposeResolver(HostResolver):
     source = "docker-compose"
 
-    def resolve(self, repo_path: str) -> ResolverResult:
+    def resolve(self, repo_path: str, scan=None) -> ResolverResult:
         compose_files = sorted({
             path
+            for root in (scan or scan_roots(repo_path)).roots
             for pattern in _COMPOSE_FILE_PATTERNS
-            for path in glob.glob(os.path.join(repo_path, pattern))
+            for path in glob.glob(os.path.join(root.path, pattern))
         })
         if not compose_files:
             return ResolverResult(entries=[], unresolved=[], notes={})
@@ -53,38 +55,60 @@ class DockerComposeResolver(HostResolver):
         parse_errors: List[str] = []
 
         for cf in compose_files:
-            compose_env = self._load_env_file(os.path.dirname(cf))
-            compose_env.update(os.environ)
-
-            if yaml is None:
-                self._handle_compose_file_without_pyyaml(
-                    repo_path, cf, compose_env, entries, unresolved, parse_errors
-                )
-                continue
-
             try:
-                with open(cf) as f:
-                    data = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError) as err:
+                self._resolve_file(repo_path, cf, entries, unresolved, parse_errors)
+            except (OSError, ValueError) as err:
+                # Decoding and local source paths can fail for just this file.
                 parse_errors.append(f"{cf}: {err}")
-                continue
-
-            if not isinstance(data, dict):
-                parse_errors.append(f"{cf}: expected object at root, got {type(data).__name__}")
-                continue
-
-            services = (data.get("services") or {})
-            for svc_name, svc in services.items():
-                for vol in (svc.get("volumes") or []):
-                    if isinstance(vol, str):
-                        self._handle_volume(repo_path, cf, vol, compose_env, entries, unresolved)
-                    elif isinstance(vol, dict):
-                        self._handle_long_form_volume(repo_path, cf, vol, compose_env, entries, unresolved)
 
         notes: Dict[str, Any] = {}
         if parse_errors:
             notes["parse_error"] = "; ".join(parse_errors)
         return ResolverResult(entries=entries, unresolved=unresolved, notes=notes)
+
+    def _resolve_file(self, repo_path, cf, entries, unresolved, parse_errors):
+        compose_env = self._load_env_file(os.path.dirname(cf))
+        compose_env.update(os.environ)
+
+        if yaml is None:
+            self._handle_compose_file_without_pyyaml(
+                repo_path, cf, compose_env, entries, unresolved, parse_errors
+            )
+            return
+
+        try:
+            with open(cf) as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as err:
+            parse_errors.append(f"{cf}: {err}")
+            return
+
+        if data is None:  # Empty YAML document.
+            return
+        if not isinstance(data, dict):
+            parse_errors.append(f"{cf}: expected object at root, got {type(data).__name__}")
+            return
+        services = data.get("services")
+        if services is None:
+            return
+        if not isinstance(services, dict):
+            parse_errors.append(f"{cf}: services: expected object, got {type(services).__name__}")
+            return
+        for svc_name, svc in services.items():
+            if not isinstance(svc, dict):
+                parse_errors.append(f"{cf}: services.{svc_name}: expected object, got {type(svc).__name__}")
+                continue
+            volumes = svc.get("volumes")
+            if volumes is None:
+                continue
+            if not isinstance(volumes, list):
+                parse_errors.append(f"{cf}: services.{svc_name}.volumes: expected list, got {type(volumes).__name__}")
+                continue
+            for vol in volumes:
+                if isinstance(vol, str):
+                    self._handle_volume(repo_path, cf, vol, compose_env, entries, unresolved)
+                elif isinstance(vol, dict):
+                    self._handle_long_form_volume(repo_path, cf, vol, compose_env, entries, unresolved)
 
     def _handle_compose_file_without_pyyaml(
         self,

@@ -26,6 +26,7 @@ try:
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
+    from .manifest_sections import host_identity_phrase, project_host_entry
     from .run_paths import artifact_path
     from .telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 except ImportError:
@@ -51,6 +52,7 @@ except ImportError:
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
+    from review.manifest_sections import host_identity_phrase, project_host_entry
     from review.run_paths import artifact_path
     from review.telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 
@@ -725,6 +727,12 @@ def _dependency_refresh_briefing(state, config, output_dir):
     return situation, actions, handoff
 
 
+def _host_entry_line(entry):
+    """One resolved runtime host with the identity the run verified against."""
+    phrase = host_identity_phrase(project_host_entry(entry))
+    return f"- `{entry.get('name')}` via {entry.get('source')}: `{entry.get('path')}` — {phrase}"
+
+
 def _step_3_gather_context(mode, state, context, config, output_dir):
     """Step 3: Gather Context — present curated briefing."""
     git = context.get("git", {})
@@ -777,7 +785,6 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
         situation.append(f"**Diff stats:**\n```\n{diff_stats}\n```")
         situation.append("")
 
-    # Host context status — if present, show a one-line summary.
     previous = state.get("previous_change_purpose")
     if previous:
         situation.append(
@@ -790,19 +797,29 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
     host_context = context.get("host_context")
     if host_context:
         banner = host_context.get("banner") or {}
-        resolved = host_context.get("resolved", [])
-        runtime_count = sum(1 for e in resolved if e.get("kind") == "runtime-host")
-        library_root_count = sum(1 for e in resolved if e.get("kind") == "library-dep")
-        if banner.get("degraded"):
-            situation.append(
-                f"**Host context:** ⚠ degraded ({banner.get('reason')}) — "
-                f"{runtime_count} runtime-hosts, {library_root_count} dependency roots resolved."
-            )
-        else:
-            situation.append(
-                f"**Host context:** {runtime_count} runtime-hosts, "
-                f"{library_root_count} dependency roots resolved."
-            )
+        resolved = host_context.get("resolved") or []
+        runtime = sorted(
+            [e for e in resolved if isinstance(e, dict) and e.get("kind") == "runtime-host"],
+            key=lambda e: e.get("name", ""),
+        )
+        library_root_count = sum(1 for e in resolved if isinstance(e, dict) and e.get("kind") == "library-dep")
+        degraded = f"⚠ degraded ({banner.get('reason')}) — " if banner.get("degraded") else ""
+        situation.append(
+            f"**Host context:** {degraded}{len(runtime)} runtime-host(s), "
+            f"{library_root_count} dependency root(s) resolved."
+        )
+        for entry in runtime:
+            situation.append(_host_entry_line(entry))
+        for item in host_context.get("unresolved") or []:
+            if not isinstance(item, dict):
+                continue
+            declared = f" (declared {item['version']})" if item.get("version") else ""
+            situation.append(f"- `{item.get('name')}` unresolved: {item.get('reason', 'unknown')}{declared}")
+        diagnostics = host_context.get("diagnostics") or {}
+        for name in diagnostics.get("self_provided") or []:
+            situation.append(f"- `{name}` is provided by this repository and was not resolved as an upstream host.")
+        for error in diagnostics.get("config_errors") or []:
+            situation.append(f"⚠️  Host config: {error}")
 
     # Trusted-branch dependency refresh — renders only when the requester
     # opted in (run-config refresh_dependencies).

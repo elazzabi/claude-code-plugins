@@ -71,6 +71,20 @@ def test_reviewer_protocol_has_no_tmp_pr_review_fallback():
     assert "/tmp/pr-review" not in protocol
 
 
+def test_reviewer_protocol_says_a_mounted_host_is_not_always_upstream():
+    """Run e08e: a WooCommerce core review listed WooPayments as a runtime
+    host because the clone's local wp-env override mounts it. A mapping
+    proves co-installation, not direction; the reviewer decides that from
+    the diff, so the protocol has to say so instead of calling every host
+    upstream."""
+    protocol = (
+        PLUGIN_ROOT / "agents" / "shared" / "reviewer-protocol.md"
+    ).read_text(encoding="utf-8")
+    section = protocol.split("## Host Context Usage", 1)[1].split("\n## ", 1)[0]
+
+    assert "downstream" in section
+
+
 # ---------------------------------------------------------------------------
 # Independent oracles for the rendered briefing
 # ---------------------------------------------------------------------------

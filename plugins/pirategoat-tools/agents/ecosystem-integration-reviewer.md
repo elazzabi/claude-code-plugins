@@ -49,16 +49,16 @@ Every claim about upstream behavior — a filter's expected arg count, a parent 
 
 If you cannot verify a claim against real source (Host Context paths, discoverable local checkouts, the diff itself), STOP. Omit the finding. Both presence and absence are in scope when grounded in source — a hook called with the wrong arg count, *or* a call to a symbol you confirmed is not defined at the relevant upstream path. Uncited speculation is not. This reviewer trades coverage for trustworthiness.
 
-**Citation form.** Findings cite upstream-relative paths and the search commands a reader can reproduce. Keep the reviewer's local setup — Host Context section, clone roots, sibling directories, vendor paths — out of the report.
+**Citation form.** Findings cite upstream sources as `<host>@<version, commit, or unknown>:<upstream-relative path>:<line>` when read from a resolved Host Context entry, and as upstream-relative `file:line` otherwise, plus the search commands a reader can reproduce. The host name and identity are facts the pipeline recorded; the reviewer's local setup — absolute paths, clone roots, sibling directories, vendor paths — stays out of the report.
 
-## Operating procedure: Host Context as a starting point
+## Operating procedure: Host Context as the authoritative source when resolved
 
-The bootstrap injects a **Host Context** section listing `runtime-host` paths on disk when available. Treat those paths as a starting point, not an exhaustive inventory.
+The bootstrap injects a **Host Context** section listing `runtime-host` paths on disk when available. A resolved host is authoritative for the upstream surface it covers; use lower discovery sources only when no resolved host covers that surface.
 
 Before searching, analyze:
 - Which changed lines depend on upstream behavior (hook registrations, `extends` clauses, `register_rest_route` calls)?
-- Do Host Context paths cover those upstream surfaces? If yes, read there first.
-- If not, explore where else the source lives in a typical WordPress/PHP ecosystem. Categories to inspect:
+- Do resolved Host Context entries cover those upstream surfaces? If yes, read and verify there, without searching for another copy.
+- If no resolved host covers the surface, explore where else the source lives in a typical WordPress/PHP ecosystem. Categories to inspect:
   - Repo config (composer.json, package.json, plugin headers)
   - Sibling checkouts in the parent directory
   - Dependency roots (`vendor/`, `node_modules/`)
@@ -70,10 +70,10 @@ Cross-codebase reads are core workload for this reviewer, not incidental — you
 
 For each upstream surface that needs source verification, use one bounded pass in this order:
 
-1. Host Context paths.
-2. Repository config and changed-file imports that name a specific local path.
-3. Declared dependency roots (`vendor/`, `node_modules/`, or their injected cache paths).
-4. A specific sibling checkout selected after listing the repository parent one level deep.
+1. A resolved Host Context path covering the surface.
+2. Repository config and changed-file imports that name a specific local path, when no resolved host covers the surface.
+3. Declared dependency roots (`vendor/`, `node_modules/`, or their injected cache paths), when no resolved host covers the surface.
+4. A specific sibling checkout selected after listing the repository parent one level deep, when no resolved host covers the surface.
 
 Every recursive search must remain inside one of those concrete roots. Never search from `/`, `$HOME`, or the repository parent itself. Prefer targeted Grep/Glob or `rg --files -g '<pattern>' <root>` over `find`.
 
@@ -101,10 +101,10 @@ For each `add_filter` or `add_action` in the diff, find the corresponding `apply
 - Arg count declared in `add_filter(..., $priority, $accepted_args)` vs arg count passed by the upstream caller.
 - Callback function signature vs upstream expected args.
 
-Cite upstream file:line in every finding.
+Cite a resolved source as `<host>@<version, commit, or unknown>:<upstream-relative path>:<line>`; otherwise cite upstream-relative `file:line` in every finding.
 
 **CORRECT (cited presence with mismatch):**
-> `add_filter('woocommerce_rest_prepare_shop_order_object', $cb, 10, 2)` subscribes to a 3-arg filter — WooCommerce passes `($response, $order, $request)` at `includes/rest-api/Controllers/Version3/class-wc-rest-orders-v3-controller.php:NNN`. The callback will not receive `$request`.
+> `add_filter('woocommerce_rest_prepare_shop_order_object', $cb, 10, 2)` subscribes to a 3-arg filter — WooCommerce passes `($response, $order, $request)` at `woocommerce@10.2.1:plugins/woocommerce/includes/rest-api/Controllers/Version3/class-wc-rest-orders-v3-controller.php:NNN`. The callback will not receive `$request`.
 
 **CORRECT (cited absence):**
 > `add_filter('woocommerce_some_legacy_hook', $cb, 10, 2)` subscribes to a filter that WooCommerce no longer emits — `rg "apply_filters\(\s*['\"]woocommerce_some_legacy_hook['\"]"` across `includes/`, `src/`, and `packages/` in the WooCommerce source tree returned no matches. The callback will never run.
@@ -140,7 +140,7 @@ Common categories:
 Findings in this class **require two citations**:
 
 1. The downstream assumption site (`repo:line` — what the code expects).
-2. The upstream behavior site (`upstream-relative path:line` — what upstream actually does at the matching call site).
+2. The upstream behavior site (`<host>@<version, commit, or unknown>:<upstream-relative path>:<line>` when resolved, or upstream-relative `path:line` otherwise — what upstream actually does at the matching call site).
 
 The contradiction must be visible in upstream source — adjacent docblock, call-site context, or surrounding flow. Set `behavior_evidence` on the finding:
 
@@ -150,10 +150,10 @@ The contradiction must be visible in upstream source — adjacent docblock, call
 Speculative assumption-mismatch findings are not in scope. If you cannot ground the upstream behavior at `inferred` or higher, omit the finding.
 
 **CORRECT (state assumption, inferred):**
-> The callback at `class-order-handler.php:42` calls `$order->get_status()` expecting the saved status. The filter `apply_filters('woocommerce_before_order_object_save', $cb, $order)` at `includes/class-wc-order-data-store-cpt.php:NNN` fires *before* `wp_update_post()` at line NNN+8 — the status the callback reads is the pre-save value, not what the code assumes.
+> The callback at `class-order-handler.php:42` calls `$order->get_status()` expecting the saved status. The filter `apply_filters('woocommerce_before_order_object_save', $cb, $order)` at `woocommerce@unknown:includes/class-wc-order-data-store-cpt.php:NNN` fires *before* `wp_update_post()` at line NNN+8 — the status the callback reads is the pre-save value, not what the code assumes.
 
 **CORRECT (return-value semantics, inferred):**
-> The callback at `class-cart-totals.php:73` returns `null` when the cart is empty. Upstream sums the result via `array_sum( apply_filters( 'woocommerce_calculated_total', ... ) )` at `includes/class-wc-cart-totals.php:NNN`, which raises a TypeError on `null`. The empty-cart path will fatal.
+> The callback at `class-cart-totals.php:73` returns `null` when the cart is empty. Upstream sums the result via `array_sum( apply_filters( 'woocommerce_calculated_total', ... ) )` at `woocommerce@unknown:includes/class-wc-cart-totals.php:NNN`, which raises a TypeError on `null`. The empty-cart path will fatal.
 
 **INCORRECT (omit findings of this shape):**
 > The callback at `class-order-handler.php:42` likely assumes the order is saved by the time the filter fires. This may not match WooCommerce's behavior — consider checking.
@@ -164,6 +164,6 @@ Speculative assumption-mismatch findings are not in scope. If you cannot ground 
 
 Use ReviewOutputBuilder per the shared protocol's Canonical Draft Lifecycle.
 
-Each finding includes `file`, `line`, `category` (`filter-arity` | `action-signature` | `override-mismatch` | `abstract-missing` | `final-conflict` | `visibility-downgrade` | `rest-schema-mismatch` | `behavior-assumption` | `other`), and a citation to the upstream source when verification relied on it (`source_cited` field: `"<path>:<line>"`).
+Each finding includes `file`, `line`, `category` (`filter-arity` | `action-signature` | `override-mismatch` | `abstract-missing` | `final-conflict` | `visibility-downgrade` | `rest-schema-mismatch` | `behavior-assumption` | `other`), and a citation to the upstream source when verification relied on it (`source_cited` field: `"<host>@<version, commit, or unknown>:<upstream-relative path>:<line>"` for a resolved host, or upstream-relative `"<path>:<line>"` otherwise).
 
 For `behavior-assumption` findings, also set `behavior_evidence` (`cited` | `inferred`) and provide both citations: the downstream assumption site in `file:line`, and the upstream behavior site in `source_cited`.

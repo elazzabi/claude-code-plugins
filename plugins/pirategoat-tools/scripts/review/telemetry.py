@@ -100,6 +100,7 @@ OPTIONAL_SECTION_AVAILABILITY_KEYS = (
     "dependency_refresh",
     "reviewer_markdown",
     "findings_markdown",
+    "host_context",
 )
 _BASE_FETCH_STATUSES = frozenset({"fetched", "failed"})
 _SCOPE_CHECK_STATUSES = frozenset({
@@ -887,6 +888,10 @@ class ReviewTelemetry:
         manifest["availability"]["dependency_refresh"] = (
             manifest["dependency_refresh"] is not None
         )
+        manifest["host_context"] = (
+            manifest_sections.build_host_context_manifest(self.output_dir)
+        )
+        manifest["availability"]["host_context"] = manifest["host_context"] is not None
         manifest["reviewer_markdown"] = (
             manifest_sections.build_reviewer_markdown_manifest(self.output_dir)
         )

@@ -25,6 +25,7 @@ from .contracts import (
     _MAX_DEPENDENCY_REFRESH_COMMANDS,
     _MAX_DIRTY_FILES,
     _MAX_WALL_TIME_MS,
+    _MANIFEST_SECTIONS_CONTRACT,
     _OPTIONAL_SECTION_AVAILABILITY_KEYS,
     _PRODUCER_AGENT_NAME_RE,
     _RECONCILIATION_AGENT_FIELDS,
@@ -1640,6 +1641,44 @@ def _sanitize_outcome(value: object) -> dict[str, Any]:
     return result
 
 
+def _sanitize_host_context(value: object) -> dict[str, Any] | None:
+    """Allowlist the producer's path-free host projection.
+
+    The field names come from the producer contract; the metrics boundary
+    applies its bounded-string policy to each. Paths never reach this
+    section: the projection carries no path field, and the sharing boundary
+    is the one guard that fails closed on a path-shaped string.
+    """
+    if not isinstance(value, dict):
+        return None
+    resolved = value.get("resolved")
+    unresolved = value.get("unresolved")
+    if not isinstance(resolved, list) or not isinstance(unresolved, list):
+        return None
+
+    def scalar(raw):
+        return _safe_string(raw)
+
+    return {
+        "resolved": [
+            {key: scalar(item.get(key))
+             for key in _MANIFEST_SECTIONS_CONTRACT.HOST_CONTEXT_ENTRY_FIELDS}
+            for item in resolved if isinstance(item, dict)
+        ],
+        "unresolved": [
+            {key: scalar(item.get(key))
+             for key in _MANIFEST_SECTIONS_CONTRACT.HOST_CONTEXT_UNRESOLVED_FIELDS}
+            for item in unresolved if isinstance(item, dict)
+        ],
+        "banner_reason": scalar(value.get("banner_reason")),
+        "self_provided": [
+            name for name in _safe_strings(value.get("self_provided"))
+            if scalar(name) is not None
+        ],
+        "scan_roots": _nonnegative_exact_int(value.get("scan_roots")),
+    }
+
+
 # One table-driven map from each producer-declared optional section
 # (`contracts._OPTIONAL_SECTION_AVAILABILITY_KEYS`, telemetry.py's own
 # `OPTIONAL_SECTION_AVAILABILITY_KEYS`) to the sanitizer that projects its
@@ -1658,6 +1697,7 @@ _OPTIONAL_SECTION_SANITIZERS: dict[str, Any] = {
     # vocabulary, shared by the producer's own two builders.
     "reviewer_markdown": _sanitize_derived_markdown_outcome,
     "findings_markdown": _sanitize_derived_markdown_outcome,
+    "host_context": _sanitize_host_context,
 }
 
 
@@ -1792,6 +1832,7 @@ def _sanitize_manifest(value: object) -> dict[str, Any]:
         "dependency_refresh": optional_sections.get("dependency_refresh"),
         "reviewer_markdown": optional_sections.get("reviewer_markdown"),
         "findings_markdown": optional_sections.get("findings_markdown"),
+        "host_context": optional_sections.get("host_context"),
         "outcome": _sanitize_outcome(value.get("outcome")),
         "availability": safe_availability,
         "warnings": warnings,

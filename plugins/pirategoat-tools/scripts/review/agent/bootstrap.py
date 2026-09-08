@@ -46,6 +46,7 @@ from review.reviewer_names import derive_reviewer_name
 from review.agent.review_assignment import ASSIGNMENT_SCHEMA, derive_reviewed_files
 from review.atomic_io import atomic_write_json
 from review.change_purpose import parse_change_purpose
+from review.manifest_sections import host_identity_phrase, project_host_entry
 from review.run_paths import artifact_path
 from review.triage_sources import strip_html_comments
 from review.reviewer_lifecycle import (
@@ -763,8 +764,9 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
     lines = [
         "## Host Context",
         "",
-        "Use these paths as starting points, not an exhaustive inventory. "
-        "If they do not match the code path under review, explore normally.",
+        "Read upstream code from the hosts listed here. The Host Context "
+        "Usage rules say how to cite a resolved host and what an unresolved "
+        "one means for your findings.",
         "",
     ]
     if resolved:
@@ -782,14 +784,11 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
                 "depends on upstream behavior):"
             )
             for e in runtime[:_HOST_CONTEXT_MAX_PER_KIND]:
-                version = (
-                    f" [version {_prompt_json_string(e.get('version'))}]"
-                    if e.get("version") else ""
-                )
+                identity = host_identity_phrase(project_host_entry(e), quote=_prompt_json_string)
                 lines.append(
                     f"  - name={_prompt_json_string(e.get('name'))} "
-                    f"[runtime-host]: path={_prompt_json_string(e.get('path'))}"
-                    f" (via source={_prompt_json_string(e.get('source'))}{version})"
+                    f"[runtime-host]: path={_prompt_json_string(e.get('path'))} "
+                    f"(via source={_prompt_json_string(e.get('source'))}, {identity})"
                 )
             if len(runtime) > _HOST_CONTEXT_MAX_PER_KIND:
                 extra = len(runtime) - _HOST_CONTEXT_MAX_PER_KIND
@@ -820,9 +819,10 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
         sorted_unresolved = sorted(unresolved, key=lambda u: u.get("name", ""))
         for u in sorted_unresolved[:_HOST_CONTEXT_MAX_UNRESOLVED]:
             reason = u.get("reason", "unknown")
+            declared = f' (declared {_prompt_json_string(u["version"])})' if u.get("version") else ""
             lines.append(
                 f"  - name={_prompt_json_string(u.get('name'))}: "
-                f"reason={_prompt_json_string(reason)}"
+                f"reason={_prompt_json_string(reason)}{declared}"
             )
         if len(sorted_unresolved) > _HOST_CONTEXT_MAX_UNRESOLVED:
             extra = len(sorted_unresolved) - _HOST_CONTEXT_MAX_UNRESOLVED

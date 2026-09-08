@@ -1,12 +1,14 @@
 """Tests for the docker-compose resolver."""
 
 import os
+import json
 import textwrap
 from pathlib import Path
 
 import pytest
 
 from hosts.resolvers.docker_compose import DockerComposeResolver
+from hosts.chain import ResolverChain
 
 
 def _write_compose(repo: Path, filename: str, content: str):
@@ -17,6 +19,45 @@ def test_empty_when_no_compose_files(make_repo):
     repo = make_repo({"README.md": "# x"})
     result = DockerComposeResolver().resolve(str(repo))
     assert result.entries == []
+
+
+@pytest.mark.parametrize("bad_document, field", [
+    pytest.param({"services": {"wp": None}}, "services.wp", id="null-service"),
+    pytest.param({"services": ["wp"]}, "services", id="services-list"),
+    pytest.param({"services": {"wp": {"volumes": 7}}}, "volumes", id="volumes-number"),
+])
+def test_malformed_nested_fields_preserve_other_files(tmp_path, bad_document, field):
+    pytest.importorskip("yaml")
+    repo = tmp_path / "repo"
+    wc = tmp_path / "woocommerce"
+    wc.mkdir()
+    bad = repo / "tools" / "bad"
+    good = repo / "tools" / "later"
+    bad.mkdir(parents=True)
+    good.mkdir()
+    (repo / "compose.yml").write_text(json.dumps({"services": {"wp": {"volumes": [
+        "../woocommerce:/var/www/html/wp-content/plugins/woocommerce",
+    ]}}}))
+    bad_file = bad / "compose.yml"
+    bad_file.write_text(json.dumps(bad_document))
+    (good / "compose.yml").write_text(json.dumps({"services": {"wp": {"volumes": [
+        "../../../missing:/var/www/html/wp-content/plugins/optional-plugin",
+    ]}}}))
+
+    manifest = ResolverChain([DockerComposeResolver()]).run(str(repo))
+
+    assert [(entry.name, entry.path) for entry in manifest.resolved] == [("woocommerce", str(wc))]
+    assert [item["name"] for item in manifest.unresolved] == ["optional-plugin"]
+    assert manifest.unresolved[0]["declared_by"] == [{
+        "source": "docker-compose", "reason": "path_missing",
+    }]
+    diagnostic = manifest.diagnostics["resolver_detail"]["docker-compose"]["notes"]["parse_error"]
+    assert str(bad_file) in diagnostic
+    assert field in diagnostic
+    assert "expected" in diagnostic
+    assert manifest.banner.degraded is True
+    assert manifest.banner.reason == "partial_unresolved"
+    assert manifest.banner.unresolved == manifest.unresolved
 
 
 def test_absolute_path_volume_produces_entry_and_personal_note(tmp_path):
@@ -79,6 +120,22 @@ def test_relative_path_volume_resolves_from_compose_dir(tmp_path):
     assert result.entries[0].name == "wc-calypso-bridge"
     assert result.entries[0].path == str(bridge.resolve())
     assert result.entries[0].notes.get("personal") is not True
+
+
+def test_a_compose_file_two_levels_down_is_read(tmp_path):
+    repo = tmp_path / "repo"
+    wp = tmp_path / "wordpress-develop"
+    wp.mkdir()
+    env = repo / "tools" / "docker"
+    env.mkdir(parents=True)
+    (env / "docker-compose.yml").write_text("""
+services:
+  wordpress:
+    volumes:
+      - ../../../wordpress-develop:/var/www/html
+""")
+    result = DockerComposeResolver().resolve(str(repo))
+    assert [(e.name, e.path) for e in result.entries] == [("wordpress", str(wp.resolve()))]
 
 
 def test_self_plugin_mount_is_not_reported_as_runtime_host(tmp_path):

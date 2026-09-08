@@ -43,6 +43,10 @@ _CRITIC_CONTRACT = _load_exact_path_module(
     _REVIEW_DIR / "critic_adjustments.py",
     "review critic adjustments contract unavailable",
 )
+_REVIEW_DOCUMENT_CONTRACT = _load_exact_path_module(
+    "review_document_contract", _REVIEW_DIR / "review_document.py",
+    "review document contract unavailable",
+)
 _SYNTHESIS_CONTRACT = _load_exact_path_module(
     "review_synthesis_lifecycle_contract",
     _REVIEW_DIR / "synthesis_lifecycle.py",
@@ -154,6 +158,7 @@ _PIPELINE_FAMILIES = (
     # and the decision critic produce neither, so they are measured as
     # their own family and never move a reviewer count.
     "synthesis_agents",
+    "usage_shares",
     "outcomes",
     "raw_findings",
     "final_findings",

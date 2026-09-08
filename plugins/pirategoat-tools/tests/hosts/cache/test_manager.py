@@ -7,6 +7,7 @@ from unittest import mock
 
 import pytest
 
+from helpers.pipeline_process import init_repo
 from hosts.cache.manager import (
     KNOWN_ECOSYSTEM_REPOS, cache_dir_for, update_host, list_hosts, verify_hosts,
 )
@@ -16,6 +17,186 @@ def test_known_repos_has_wordpress_and_woocommerce():
     names = {r.name for r in KNOWN_ECOSYSTEM_REPOS}
     assert "wordpress" in names
     assert "woocommerce" in names
+
+
+def test_known_ecosystem_names_is_the_one_spelling():
+    from hosts.cache.manager import KNOWN_ECOSYSTEM_NAMES
+    assert KNOWN_ECOSYSTEM_NAMES == frozenset({"wordpress", "woocommerce"})
+    assert KNOWN_ECOSYSTEM_NAMES == frozenset(r.name for r in KNOWN_ECOSYSTEM_REPOS)
+
+
+def _commit_all(slot: Path, message: str) -> str:
+    """Commit everything in the slot; returns the new HEAD sha."""
+    subprocess.run(["git", "-C", str(slot), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(slot), "commit", "-q", "-m", message], check=True)
+    return subprocess.run(
+        ["git", "-C", str(slot), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _init_slot(slot: Path, version_file: str, content: str) -> str:
+    """A real git repo in the slot with the version file committed; returns its HEAD sha."""
+    init_repo(slot, branch="trunk")
+    (slot / version_file).parent.mkdir(parents=True, exist_ok=True)
+    (slot / version_file).write_text(content)
+    (slot / ".last_updated").write_text("1788552248")
+    return _commit_all(slot, "seed")
+
+
+def test_slot_identity_reads_commit_version_and_refresh(tmp_path, monkeypatch):
+    from hosts.cache.manager import slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    slot = cache_dir_for("wordpress")
+    sha = _init_slot(slot, "src/wp-includes/version.php", "<?php\n$wp_version = '7.2-alpha-63166-src';\n")
+
+    identity = slot_identity("wordpress")
+
+    assert identity["present"] is True
+    assert identity["commit"] == sha
+    assert "branch" not in identity
+    assert identity["commit_date"].startswith("20")
+    assert identity["version"] == "7.2-alpha-63166-src"
+    assert identity["refreshed"] == "2026-09-04T20:04:08Z"
+
+
+def test_slot_identity_reads_version_from_the_captured_commit_during_a_refresh(tmp_path, monkeypatch):
+    from hosts.cache import manager
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    slot = cache_dir_for("wordpress")
+    first_sha = _init_slot(slot, "src/wp-includes/version.php", "<?php\n$wp_version = '7.2-alpha-a';\n")
+    (slot / "src/wp-includes/version.php").write_text("<?php\n$wp_version = '7.2-alpha-b';\n")
+    refreshed_sha = _commit_all(slot, "refresh")
+    subprocess.run(["git", "-C", str(slot), "reset", "--hard", "-q", first_sha], check=True)
+
+    from hosts import identity as identity_module
+
+    real_git_read = identity_module.git_read
+
+    def read_and_refresh(target, *args):
+        value = real_git_read(target, *args)
+        if args[0] == "log":  # the commit was just captured; the refresh lands now
+            subprocess.run(["git", "-C", str(slot), "reset", "--hard", "-q", refreshed_sha], check=True)
+        return value
+
+    monkeypatch.setattr(identity_module, "git_read", read_and_refresh)
+
+    identity = manager.slot_identity("wordpress")
+
+    assert identity["commit"] == first_sha
+    assert identity["version"] == "7.2-alpha-a"
+
+
+def test_slot_identity_ignores_an_uncommitted_version_change(tmp_path, monkeypatch):
+    from hosts.cache import manager
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    slot = cache_dir_for("wordpress")
+    _init_slot(slot, "src/wp-includes/version.php", "<?php\n$wp_version = '7.2-alpha-a';\n")
+    (slot / "src/wp-includes/version.php").write_text("<?php\n$wp_version = '7.2-alpha-b';\n")
+
+    identity = manager.slot_identity("wordpress")
+
+    assert identity["version"] == "7.2-alpha-a"
+
+
+def test_slot_identity_reads_the_woocommerce_plugin_header(tmp_path, monkeypatch):
+    from hosts.cache.manager import slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    _init_slot(
+        cache_dir_for("woocommerce"),
+        "plugins/woocommerce/woocommerce.php",
+        "<?php\n/**\n * Plugin Name: WooCommerce\n * Version: 11.2.0-dev\n */\n",
+    )
+
+    assert slot_identity("woocommerce")["version"] == "11.2.0-dev"
+
+
+def test_slot_identity_is_all_none_when_nothing_can_be_read(tmp_path, monkeypatch):
+    from hosts.cache.manager import slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert slot_identity("wordpress") == {
+        "present": False,
+        "commit": None,
+        "commit_date": None,
+        "version": None,
+        "refreshed": None,
+    }
+
+    slot = cache_dir_for("wordpress")
+    slot.mkdir(parents=True)
+    identity = slot_identity("wordpress")
+
+    assert identity["present"] is True
+    assert identity["commit"] is None
+    assert identity["version"] is None
+
+
+def test_slot_identity_reads_a_version_file_with_invalid_utf8(tmp_path, monkeypatch):
+    """git prints the file's bytes as they are; a stray byte elsewhere in the
+    file must not hide the version."""
+    from hosts.cache.manager import slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    slot = cache_dir_for("wordpress")
+    _init_slot(slot, "src/wp-includes/version.php", "<?php\n$wp_version = '6.9';\n")
+    (slot / "src/wp-includes/version.php").write_bytes(b"<?php\n$wp_version = '6.9';\n// \xff\n")
+    _commit_all(slot, "bytes")
+
+    assert slot_identity("wordpress")["version"] == "6.9"
+
+
+def test_slot_identity_reports_no_refresh_without_a_readable_marker(tmp_path, monkeypatch):
+    """A directory mtime is not a refresh time: without the marker the fact
+    is unknown, and an unreadable marker is the same unknown."""
+    from hosts.cache.manager import ensure_fresh, slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    slot = cache_dir_for("wordpress")
+    _init_slot(slot, "src/wp-includes/version.php", "<?php\n$wp_version = '6.9';\n")
+    (slot / ".last_updated").unlink()
+    assert slot_identity("wordpress")["refreshed"] is None
+
+    (slot / ".last_updated").write_text("1788552248")
+    (slot / ".last_updated").chmod(0)
+    try:
+        assert slot_identity("wordpress")["refreshed"] is None
+        monkeypatch.setattr("hosts.cache.manager.update_host", lambda name: {"name": name, "action": "pulled", "ok": True, "stderr": ""})
+        assert ensure_fresh("wordpress")["ok"] is True
+    finally:
+        (slot / ".last_updated").chmod(0o644)
+
+
+def test_slot_identity_survives_a_missing_git_binary(tmp_path, monkeypatch):
+    from hosts.cache.manager import slot_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    cache_dir_for("wordpress").mkdir(parents=True)
+
+    with mock.patch("hosts.cache.manager.subprocess.run", side_effect=FileNotFoundError("git")):
+        assert slot_identity("wordpress")["commit"] is None
+
+
+def test_list_hosts_carries_the_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    sha = _init_slot(cache_dir_for("wordpress"), "src/wp-includes/version.php", "<?php\n$wp_version = '7.2';\n")
+
+    rows = {row["name"]: row for row in list_hosts()}
+
+    assert rows["wordpress"]["identity"]["commit"] == sha
+    assert rows["woocommerce"]["identity"] is None
 
 
 def test_cache_dir_uses_ecosystem_namespace(tmp_path, monkeypatch):

@@ -16,8 +16,16 @@ from typing import Optional
 
 
 def contains(repo_path: str, candidate: str) -> bool:
-    """True when candidate's resolved identity lies inside repo_path's."""
-    return _is_prefix(os.path.realpath(repo_path), os.path.realpath(candidate))
+    """True when candidate's resolved identity lies inside repo_path's.
+
+    A spelling the filesystem cannot resolve (an embedded NUL) has no
+    identity inside the repository, so it is outside; callers never need
+    their own guard around this gate.
+    """
+    try:
+        return _is_prefix(os.path.realpath(repo_path), os.path.realpath(candidate))
+    except ValueError:
+        return False
 
 
 def contains_lexically(repo_path: str, candidate: str) -> bool:

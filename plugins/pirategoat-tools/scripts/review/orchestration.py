@@ -343,11 +343,22 @@ def _render_record_body(findings: dict) -> str:
     return strip_severity_floor_markers(render_review_body(findings))
 
 
-def _render_run_notes(state: dict) -> str:
-    """What the run did to itself, in two lines the ledger cannot carry.
+def _host_summary_phrase(entry):
+    """One already-projected runtime host for the durable record."""
+    return (
+        f"{entry.get('name')} via {entry.get('source')} "
+        f"({manifest_sections.host_identity_phrase(entry)})"
+    )
 
-    Both facts already live in pipeline state; nothing is re-derived from
-    the filesystem here. An absent fact says so — "not requested" and "not
+
+def _render_run_notes(state: dict, hosts) -> str:
+    """The run's own measurements and actions, which the ledger cannot carry.
+
+    These facts live in pipeline state, except the hosts: `hosts` is the
+    projection of the run's review-context host manifest, the same read
+    bootstrap and telemetry make, so a step-3 handoff that re-resolves
+    hosts after a dependency refresh is reflected here without a copy in
+    state to keep in sync. An absent fact says so — "not requested" and "not
     recorded" are different from a measured clean result, and none of the
     three may be reported as either of the others.
     """
@@ -390,6 +401,25 @@ def _render_run_notes(state: dict) -> str:
         )
     else:
         lines.append("- Dispatch: no plan summary recorded for this run.")
+
+    if not isinstance(hosts, dict):
+        lines.append("- Host context: not recorded.")
+    else:
+        runtime = [
+            entry for entry in hosts.get("resolved") or []
+            if isinstance(entry, dict) and entry.get("kind") == "runtime-host"
+        ]
+        if runtime:
+            lines.append("- Host context: " + "; ".join(_host_summary_phrase(e) for e in runtime) + ".")
+        else:
+            lines.append("- Host context: no runtime host resolved.")
+        unresolved = hosts.get("unresolved") or []
+        if unresolved:
+            lines.append(
+                "- Unresolved hosts: "
+                + ", ".join(f"{u.get('name')} ({u.get('reason', 'unknown')})" for u in unresolved)
+                + "."
+            )
 
     agents = state.get("agents")
     discarded_drafts = (
@@ -538,7 +568,9 @@ def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
             "",
             _render_record_body(findings).rstrip("\n"),
             "",
-            _render_run_notes(state),
+            _render_run_notes(
+                state, manifest_sections.build_host_context_manifest(output_dir)
+            ),
         ]
         verify_items = _render_verify_items(state, findings)
         if verify_items:
@@ -1352,9 +1384,6 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
         "--git-range", git_range,
         "--changed-files", context.get("git", {}).get("changed_files_csv", ""),
     ]
-    banner = (context.get("host_context") or {}).get("banner")
-    if banner:
-        recon_ctx_cmd.extend(["--host-banner-json", json.dumps(banner)])
     cp = state.get("change_purpose", "")
     if cp:
         recon_ctx_cmd.extend(["--change-purpose", cp])

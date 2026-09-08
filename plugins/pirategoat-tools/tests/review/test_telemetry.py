@@ -694,6 +694,22 @@ class TestNoFabricatedMeasurements:
 class TestRunManifest:
     """A fail-open sidecar materializes the current run state."""
 
+    def test_host_context_is_projected_from_the_review_context_without_paths(self, telemetry, output_dir):
+        (output_dir / "review-context.json").write_text(json.dumps({
+            "host_context": {
+                "resolved": [{"name": "wordpress", "kind": "runtime-host", "path": "/Users/x/cache/wordpress",
+                              "source": "ecosystem-cache", "version": "7.2", "version_freshness": "2026-09-04T00:04:08Z",
+                              "notes": {"commit": "abc", "branch": "trunk", "declared_minimum": "7.0"}}],
+                "unresolved": [], "banner": None, "diagnostics": {"scan_roots": 3, "self_provided": []},
+            },
+        }))
+        telemetry.start(run_id="run-1")
+        manifest = _read_manifest(telemetry)
+        assert manifest["availability"]["host_context"] is True
+        assert manifest["host_context"]["resolved"][0]["commit"] == "abc"
+        assert "branch" not in manifest["host_context"]["resolved"][0]
+        assert "/Users/" not in json.dumps(manifest["host_context"])
+
     def test_start_materializes_running_manifest(self, telemetry, mod):
         log_path = telemetry.start(
             run_id="run-1",
@@ -730,6 +746,7 @@ class TestRunManifest:
             "dependency_refresh": False,
             "reviewer_markdown": False,
             "findings_markdown": False,
+            "host_context": False,
         }
         assert manifest["assignment"] is None
 

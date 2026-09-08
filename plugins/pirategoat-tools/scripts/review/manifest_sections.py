@@ -201,6 +201,108 @@ def safe_dispatch_signal(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value in DISPATCH_SIGNALS else None
 
 
+HOST_CONTEXT_ENTRY_FIELDS = (
+    "name", "kind", "source", "version", "commit", "refreshed",
+    "declared_minimum",
+)
+HOST_CONTEXT_UNRESOLVED_FIELDS = ("name", "reason", "version")
+
+
+def _string_or_none(value: Any) -> Optional[str]:
+    """A declared host scalar, or None when the resolver recorded no string."""
+    return value if isinstance(value, str) else None
+
+
+def project_host_entry(entry: dict) -> dict:
+    """One resolved host as the declared path-free fields, nothing else.
+
+    The resolver's entry carries a local path and free-form notes; every
+    consumer that names the host — the reviewer prompt, the step-3 briefing,
+    the record, telemetry — reads this projection so they cannot disagree.
+    A branch name is never projected: the commit identifies a checkout, and
+    a personal branch's name would otherwise reach the shared manifest.
+    """
+    notes = entry.get("notes")
+    notes = notes if isinstance(notes, dict) else {}
+    fields = {
+        **{key: entry.get(key) for key in ("name", "kind", "source", "version")},
+        "commit": notes.get("commit"),
+        "refreshed": entry.get("version_freshness"),
+        "declared_minimum": notes.get("declared_minimum"),
+    }
+    return {
+        key: _string_or_none(fields[key])
+        for key in HOST_CONTEXT_ENTRY_FIELDS
+    }
+
+
+def host_identity_phrase(entry: dict, quote=str) -> str:
+    """The identity a run verified a host against, worded once.
+
+    `entry` is a projected host (`project_host_entry`). An unknown version or
+    commit is said to be unknown; a commit is shortened to twelve characters
+    and a refresh to its date. `quote` lets a prompt renderer wrap each
+    repo-derived value as a JSON string literal.
+    """
+    parts = [
+        f"version {quote(entry['version'])}" if entry.get("version") else "version unknown",
+    ]
+    if entry.get("commit"):
+        parts.append(f"commit {quote(str(entry['commit'])[:12])}")
+    else:
+        parts.append("commit unknown")
+    if entry.get("refreshed"):
+        parts.append(f"refreshed {quote(str(entry['refreshed'])[:10])}")
+    phrase = ", ".join(parts)
+    if entry.get("declared_minimum"):
+        phrase += f"; the repository declares it requires {quote(entry['declared_minimum'])}"
+    return phrase
+
+
+def summarize_host_context(manifest: Optional[dict]) -> Optional[dict]:
+    """The one path-free projection for the record and telemetry.
+
+    A non-object is unmeasured; an empty object records that nothing was
+    resolved. Rebuild only declared scalar fields, never raw resolver notes.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    entries = manifest.get("resolved")
+    resolved = [
+        project_host_entry(entry)
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict)
+    ]
+    entries = manifest.get("unresolved")
+    unresolved = [
+        {key: _string_or_none(item.get(key))
+         for key in HOST_CONTEXT_UNRESOLVED_FIELDS}
+        for item in (entries if isinstance(entries, list) else [])
+        if isinstance(item, dict)
+    ]
+    banner = manifest.get("banner")
+    banner = banner if isinstance(banner, dict) else {}
+    diagnostics = manifest.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    provided = diagnostics.get("self_provided")
+    return {
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "banner_reason": _string_or_none(banner.get("reason")),
+        "self_provided": [
+            name for name in (provided if isinstance(provided, list) else [])
+            if isinstance(name, str)
+        ],
+        "scan_roots": safe_nonnegative_int(diagnostics.get("scan_roots")),
+    }
+
+
+def build_host_context_manifest(output_dir: str) -> Optional[dict]:
+    """Project the review context's host manifest, preserving absence."""
+    context = read_artifact_file(output_dir, "review_context") or {}
+    return summarize_host_context(context.get("host_context"))
+
+
 def safe_nonnegative_int(value: Any) -> Optional[int]:
     """One non-negative whole number, or None when it was not measured.
 

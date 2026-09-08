@@ -9099,6 +9099,15 @@ def _derived_markdown_payload(**overrides) -> dict:
     return payload
 
 
+def _host_context_payload():
+    return {
+        "resolved": [{"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache", "version": "7.2",
+                      "commit": "abc", "refreshed": "2026-09-04T00:04:08Z", "declared_minimum": "7.0"}],
+        "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": None}],
+        "banner_reason": "partial_unresolved", "self_provided": [], "scan_roots": 2,
+    }
+
+
 def _optional_section_payload(name: str):
     return {
         "assignment": _manifest()["assignment"],
@@ -9109,6 +9118,7 @@ def _optional_section_payload(name: str):
         "dependency_refresh": _dependency_refresh_payload(),
         "reviewer_markdown": _derived_markdown_payload(),
         "findings_markdown": _derived_markdown_payload(),
+        "host_context": _host_context_payload(),
     }[name]
 
 
