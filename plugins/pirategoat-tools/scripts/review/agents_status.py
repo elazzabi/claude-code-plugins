@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 try:
     from .dispatch_status import (
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from .reviewer_names import derive_reviewer_name
     from .reviewer_lifecycle import (
@@ -57,7 +57,7 @@ except ImportError:
         sys.path.insert(0, _scripts_parent)
     from review.dispatch_status import (
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from review.reviewer_names import derive_reviewer_name
     from review.reviewer_lifecycle import (
@@ -134,11 +134,7 @@ def check_status(output_dir: str, timeout_seconds: int = None) -> dict:
         else:
             timeout_seconds = DEFAULT_TIMEOUT
 
-    with open(plan_path) as f:
-        plan = json.load(f)
-    if not isinstance(plan, dict):
-        raise ValueError(f"Dispatch plan must be a JSON object, got {plan!r}")
-    plan_agents = validate_dispatch_plan_agents(plan.get("agents"))
+    plan_agents = load_dispatch_plan(plan_path)["agents"]
 
     now = datetime.now(timezone.utc)
     agents = []

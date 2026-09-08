@@ -24,7 +24,7 @@ try:
     from .dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from .review_document import (
         load_review_document,
@@ -49,7 +49,7 @@ except ImportError:
     from review.dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from review.review_document import (
         load_review_document,
@@ -1185,16 +1185,8 @@ class ReviewTelemetry:
 
     def _extract_dispatch(self) -> Optional[dict]:
         """Extract dispatch plan summary."""
-        path = artifact_path(self.output_dir, "dispatch_plan")
-        if not os.path.isfile(path):
-            return None
         try:
-            with open(path) as f:
-                plan = json.load(f)
-            if not isinstance(plan, dict):
-                return None
-            raw_agents = plan.get("agents")
-            agents = validate_dispatch_plan_agents(raw_agents)
+            agents = load_dispatch_plan(artifact_path(self.output_dir, "dispatch_plan"))["agents"]
             by_status: Dict[str, List[str]] = {}
             for a in agents:
                 status = a["status"]

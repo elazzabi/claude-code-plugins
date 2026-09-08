@@ -3083,6 +3083,8 @@ class TestStep9CoverageMeasurement:
         assert state["file_review"] == {
             "scope_reporting_agent_count": 2,
             "unscoped_files": ["package-lock.json"],
+            "noise_filtered_files": None,
+            "override_orphaned_files": None,
             "agents_receiving_inline_diff_by_file": {
                 "src/a.py": ["security"]
             },
@@ -3093,6 +3095,58 @@ class TestStep9CoverageMeasurement:
                 "src/starved.php": ["code"]
             },
         }
+
+    def test_the_planner_s_exclusions_are_measured_from_the_dispatch_plan(
+        self, mod, tmp_path
+    ):
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "security-reviewer", "status": "DISPATCH"}],
+            "changed_files": ["src/a.py", "Gemfile"],
+        }))
+
+        state = self._run_step(
+            mod, tmp_path, "src/a.py,Gemfile,package-lock.json",
+        )
+
+        assert state["file_review"]["unscoped_files"] == [
+            "Gemfile", "package-lock.json",
+        ]
+        assert state["file_review"]["noise_filtered_files"] == [
+            "package-lock.json",
+        ]
+
+    def test_no_dispatch_plan_leaves_the_exclusions_unmeasured(
+        self, mod, tmp_path
+    ):
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+
+        state = self._run_step(mod, tmp_path, "src/a.py,package-lock.json")
+
+        assert state["file_review"]["unscoped_files"] == ["package-lock.json"]
+        assert state["file_review"]["noise_filtered_files"] is None
+
+    def test_excluded_files_reach_the_record_as_accounting(
+        self, mod, tmp_path
+    ):
+        (tmp_path / "review-findings.json").write_text(
+            json.dumps(_review_json("review-reconciliator"))
+        )
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "security-reviewer", "status": "DISPATCH"}],
+            "changed_files": ["src/a.py", "Gemfile"],
+        }))
+
+        self._run_step(
+            mod, tmp_path, "src/a.py,Gemfile,package-lock.json",
+        )
+
+        record = (tmp_path / "review-record.md").read_text()
+        assert "1 changed file(s) matched no reviewer's domain" in record
+        assert "- `Gemfile`" in record
+        assert "1 changed file(s) were excluded from review by design" in record
+        assert "- `package-lock.json`" in record
 
     def test_stale_populations_are_cleared_not_carried(self, mod, tmp_path):
         """A re-entered step 9 in a run with nothing to measure must not
@@ -3185,6 +3239,8 @@ class TestStep9Orchestration:
         assert state.get("file_review") == {
             "scope_reporting_agent_count": 2,
             "unscoped_files": [],
+            "noise_filtered_files": None,
+            "override_orphaned_files": None,
             "agents_receiving_inline_diff_by_file": {
                 "src/a.php": ["code", "security"]
             },

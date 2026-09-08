@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A reviewer check may name the Verify items it settles (`record_check(..., verifies=["V2"])`), rendered as `Settles:` and kept as a union when the reconciliator merges checks.
 - The findings ledger carries an evidence trail: every reconciled finding and check names the source findings and checks it merged, and every source the reconciliator read but did not carry forward is recorded with a reason and evidence.
 - The ledger save is rejected when a source is unaccounted for, a merged check drops a source's method text, or a severity matches no source without a note.
+- The orchestrator records dispatch adjustments through `dispatch_adjust.py` (`--skip NAME REASON`, `--dispatch NAME REASON`, `--dry-run`) instead of editing `dispatch-plan.json` by hand, and the step-6 briefing repeats them.
+- Each skip names the changed files whose only matching reviewer it removed, and the coverage section lists them as skipped by override rather than as matching no domain.
 - The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
 - Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
 ### Changed
@@ -24,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
 - Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
+- The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
 - A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
 
 ## [1.118.0] - 2026-09-04

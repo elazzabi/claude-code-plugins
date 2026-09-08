@@ -317,6 +317,69 @@ class TestUnscopedFiles:
         )
         assert cov["unscoped_files"] == [".editorconfig", "package-lock.json"]
 
+    def test_noise_filtered_files_are_the_planner_s_exclusions(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path),
+            changed_files=[
+                "src/a.php", "package-lock.json", "assets/logo.png", "Gemfile",
+            ],
+            reviewable_files=["src/a.php", "Gemfile"],
+        )
+        assert cov["unscoped_files"] == [
+            "Gemfile", "assets/logo.png", "package-lock.json",
+        ]
+        assert cov["noise_filtered_files"] == [
+            "assets/logo.png", "package-lock.json",
+        ]
+
+    def test_noise_is_unmeasured_without_the_planner_s_list(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php", "package-lock.json"],
+        )
+        assert cov["noise_filtered_files"] is None
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=None, reviewable_files=["src/a.php"],
+        )
+        assert cov["noise_filtered_files"] is None
+
+    def test_a_plan_list_outside_the_changed_files_is_unmeasured(self, tmp_path):
+        """The same guard the assignment manifest applies: a plan that does
+        not describe the changed range cannot be subtracted from it."""
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php"],
+            reviewable_files=["src/a.php", "src/b.php"],
+        )
+        assert cov["noise_filtered_files"] is None
+
+    def test_an_empty_reviewable_list_is_measured(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["a.png"], reviewable_files=[],
+        )
+        assert cov["noise_filtered_files"] == ["a.png"]
+
+    def test_override_orphans_are_the_unscoped_files_a_skip_left(self, tmp_path):
+        """The plan says which files a skipped agent's domain alone
+        matched; only the ones no scope contained are orphans here, so a
+        file another reviewer did receive is never reported as one."""
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php", "changelog/x", "Gemfile"],
+            override_orphans={"changelog/x": ["docs-drift-reviewer"], "src/a.php": ["a11y-reviewer"]},
+        )
+        assert cov["override_orphaned_files"] == {"changelog/x": ["docs-drift-reviewer"]}
+        assert cov["unscoped_files"] == ["Gemfile", "changelog/x"]
+
+    def test_override_orphans_are_unmeasured_without_the_plan(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(str(tmp_path), changed_files=["src/a.php", "changelog/x"])
+        assert cov["override_orphaned_files"] is None
+        cov = aggregate_file_review(str(tmp_path), changed_files=None, override_orphans={"changelog/x": ["docs-drift-reviewer"]})
+        assert cov["override_orphaned_files"] is None
+
     def test_union_covers_every_sidecar_file_list(self, tmp_path):
         """Inline, claimable, AND name-only listing all count as scoped —
         a file the agent was told about is not "matched no domain"."""

@@ -849,7 +849,6 @@ class TestStep5DispatchPlan:
         assert "human override" not in lowered
         assert "DISPATCH_OVERRIDE" in text
         assert "SKIPPED_OVERRIDE" in text
-        assert "override_reason" in text
 
     def test_override_writes_to_dispatch_plan(self, mod, tmp_path):
         state = self._make_state_with_plan()
@@ -859,6 +858,56 @@ class TestStep5DispatchPlan:
         assert "dispatch-plan.json" in text
         assert "DISPATCH_OVERRIDE" in text
         assert "SKIPPED_OVERRIDE" in text
+
+    def test_adjustments_go_through_the_entry_point_not_a_hand_edit(self, mod, tmp_path):
+        """Run 4's orchestrator wrote its own throwaway script to flip four
+        statuses with a non-atomic json.dump and printed nothing; the
+        briefing now hands it one validating, echoing command."""
+        state = self._make_state_with_plan()
+        ctx = {"git": {"git_range": "abc..HEAD"}}
+        g = mod.get_step_guidance(5, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert f'dispatch_adjust.py --output-dir "{tmp_path}" --skip <agent>' in text
+        assert "--dispatch <agent>" in text
+        assert "never edit the plan file by hand or with a script of your own" in text
+        assert "--dry-run" in text
+        assert "Force-skip" not in text and "set status to" not in text
+
+    def test_step6_repeats_the_recorded_adjustments(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4, 5],
+            "dispatched_agents": [{"name": "code-reviewer", "domain": "code"}],
+            "dispatch_adjustments": [
+                {"name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE",
+                 "override_reason": "no markup in the diff", "planner_status": "DISPATCH"},
+                {"name": "php-tests-reviewer", "status": "DISPATCH_OVERRIDE",
+                 "override_reason": "the fixtures are PHP", "planner_status": "SKIPPED"},
+            ],
+        }
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "**Adjustments recorded at step 5:**" in text
+        assert "- SKIPPED_OVERRIDE a11y-reviewer — no markup in the diff (planner: DISPATCH)" in text
+        assert "- DISPATCH_OVERRIDE php-tests-reviewer — the fixtures are PHP (planner: SKIPPED)" in text
+
+    def test_step6_repeats_the_files_a_skip_left_unreviewed(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4, 5],
+            "dispatched_agents": [{"name": "code-reviewer", "domain": "code"}],
+            "dispatch_adjustments": [
+                {"name": "docs-drift-reviewer", "status": "SKIPPED_OVERRIDE",
+                 "override_reason": "no docs mention the cache", "planner_status": "DISPATCH",
+                 "orphaned_files": ["changelog/x"]},
+            ],
+        }
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "`changelog/x`" in text.split("docs-drift-reviewer", 1)[1]
+
+    def test_step6_says_when_the_plan_stands_as_computed(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2, 3, 4, 5], "dispatched_agents": [], "dispatch_adjustments": []}
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        assert "No adjustments: the planner's plan is dispatched as computed." in "\n".join(g["situation"])
 
     def test_change_purpose_problems_are_warnings_before_dispatch(self, mod, tmp_path):
         state = {
@@ -1326,6 +1375,30 @@ class TestStep6DispatchAgents:
         summary = state["dispatch_plan_summary"]
         assert summary["dispatched"] == 2  # code-reviewer + security-reviewer
         assert summary["skipped"] == 2  # SKIPPED + SKIPPED_OVERRIDE
+        # The overrides are recorded for the step-6 briefing; a hand-edited
+        # plan carries no stamped planner status.
+        assert state["dispatch_adjustments"] == [{
+            "name": "concurrency-reviewer", "status": "SKIPPED_OVERRIDE",
+            "override_reason": "test", "planner_status": None, "orphaned_files": None,
+        }]
+
+    def test_step6_names_the_planner_status_the_adjustment_stamped(self, mod, tmp_path):
+        """`dispatch_adjust.py` stamps `planner_status` beside the override
+        reason, so the step-6 listing reads the transition from the final
+        plan alone."""
+        import json
+        final = {"agents": [
+            {"name": "code-reviewer", "status": "DISPATCH", "reason": "always"},
+            {"name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE", "reason": "conditional",
+             "override_reason": "no markup", "planner_status": "DISPATCH"},
+        ]}
+        _artifact(tmp_path, "dispatch_plan").write_text(json.dumps(final))
+        state = {"resolved_params": {"git_range": "abc..HEAD"}, "completed_steps": [1, 2, 3, 5]}
+        mod._orchestrate_step(6, "pr", {"mode": "pr", "interactive": True}, state, {"git": {"git_range": "abc..HEAD"}}, str(tmp_path))
+        assert state["dispatch_adjustments"] == [{
+            "name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE",
+            "override_reason": "no markup", "planner_status": "DISPATCH", "orphaned_files": None,
+        }]
 
     @pytest.mark.parametrize("step", [5, 6])
     def test_dispatch_summaries_use_the_canonical_dispatched_set(
@@ -1886,7 +1959,10 @@ class TestReviewCoverageSection:
     """
 
     @staticmethod
-    def _render(mod, gaps=None, claims=None, unscoped=None, inline=None):
+    def _render(
+        mod, gaps=None, claims=None, unscoped=None, inline=None, noise=None,
+        orphans=None,
+    ):
         # Straight at briefings.py: the renderer is shared by the record
         # assembler and step 11, so the facade is not the seam under test.
         from review.briefings import _render_file_review_section
@@ -1896,7 +1972,17 @@ class TestReviewCoverageSection:
             "agents_with_unclaimed_review_by_file": gaps,
             "agents_claiming_review_by_file": claims,
             "unscoped_files": unscoped,
+            "noise_filtered_files": noise,
+            "override_orphaned_files": orphans,
         })
+
+    def test_a_file_orphaned_by_an_override_names_the_skipped_reviewer(self, mod):
+        """Run 4dfe: the changelog fragment matched docs-drift, the
+        orchestrator skipped docs-drift, and the section said the file
+        matched no reviewer's domain. Its own sentence, its own cause."""
+        text = self._render(mod, unscoped=["changelog/x", "Gemfile"], noise=[], orphans={"changelog/x": ["docs-drift-reviewer"]})
+        assert "- `changelog/x` (skipped by override: `docs-drift-reviewer`)" in text
+        assert "- `Gemfile`" in text
 
     def test_all_three_populations_get_their_own_honest_sentence(self, mod):
         """The field failure this pins: a briefing that DESCRIBED a hedged
@@ -1927,11 +2013,66 @@ class TestReviewCoverageSection:
         assert "- `package-lock.json`" in text
         assert "- `.editorconfig`" in text
 
-        assert (
-            "### Reviewed-file claims — claims, not proof of "
-            "read" in text
-        )
+        assert "### Claimed from the review-claimable queue" in text
+        assert "The pipeline records the claim, not the read:" in text
         assert "- `src/big.py` (claimed by: `security-reviewer`)" in text
+
+    def test_excluded_by_design_files_are_accounted_not_reported_as_a_gap(
+        self, mod
+    ):
+        text = self._render(
+            mod,
+            unscoped=["Gemfile", "package-lock.json", "assets/logo.png"],
+            noise=["package-lock.json", "assets/logo.png"],
+        )
+        assert (
+            "1 changed file(s) matched no reviewer's domain and were "
+            "reviewed by no one" in text
+        )
+        assert "- `Gemfile`" in text
+        assert "2 changed file(s) were excluded from review by design" in text
+        assert "listed for accounting, not as a gap:" in text
+        assert "- `package-lock.json`" in text and "- `assets/logo.png`" in text
+        # The parenthetical about run-level metrics only applies when the
+        # split is unmeasured.
+        assert "run-level metrics count reviewable files only" not in text
+
+    def test_unmeasured_noise_keeps_the_single_unscoped_sentence(self, mod):
+        text = self._render(mod, unscoped=["package-lock.json"], noise=None)
+        assert "1 changed file(s) matched no reviewer's domain" in text
+        assert "run-level metrics count reviewable files only" in text
+        assert "excluded from review by design" not in text
+
+    def test_only_excluded_files_still_render_the_section_without_a_gap(
+        self, mod
+    ):
+        from review.briefings import _has_file_review_gap
+
+        file_review = {
+            "agents_receiving_inline_diff_by_file": {},
+            "agents_with_unclaimed_review_by_file": {},
+            "agents_claiming_review_by_file": {},
+            "unscoped_files": ["package-lock.json"],
+            "noise_filtered_files": ["package-lock.json"],
+        }
+        assert "## Review coverage" in self._render(
+            mod,
+            unscoped=["package-lock.json"],
+            noise=["package-lock.json"],
+        )
+        assert _has_file_review_gap(file_review) is False
+
+    def test_an_orphaned_file_is_a_gap(self):
+        from review.briefings import _has_file_review_gap
+
+        assert _has_file_review_gap({
+            "agents_receiving_inline_diff_by_file": {},
+            "agents_with_unclaimed_review_by_file": {},
+            "agents_claiming_review_by_file": {},
+            "unscoped_files": ["changelog/x"],
+            "noise_filtered_files": [],
+            "override_orphaned_files": {"changelog/x": ["docs-drift-reviewer"]},
+        })
 
     def test_unscoped_line_explains_why_it_can_exceed_the_metrics_figure(
         self, mod
@@ -2001,6 +2142,16 @@ class TestReviewCoverageSection:
         text = self._render(mod, gaps={"src/starved.php": ["code-reviewer"]})
         assert "## Review coverage" in text
         assert "matched no reviewer's domain" not in text
+
+
+# The sentence `manifest_sections.describe_reconciliation_verification`
+# words for a measured reconciliation; the record, step 9 and the critic
+# prompt all carry it verbatim.
+VERIFICATION_SENTENCES = [
+    (0, "unverified", "3 verified concern(s), 0 repository read(s) observed for the reconciliator — UNVERIFIED (no read observed; the read detector is not exhaustive)."),
+    (4, "verified", "3 verified concern(s), 4 repository read(s) observed for the reconciliator — verified."),
+    (None, "unmeasured", "3 verified concern(s), repository reads unmeasured (no transcript)."),
+]
 
 
 class TestStep9ReviewRecord:
@@ -2804,6 +2955,21 @@ class TestStep11ReportAuthoring:
                     "src/big.py": ["security-reviewer"]
                 },
                 "unscoped_files": [],
+            },
+        }
+        text = "\n".join(self._guidance(mod, state=state)["actions"])
+        assert "Review coverage" in text
+        assert "verdict must acknowledge" not in text
+
+    def test_excluded_by_design_files_do_not_force_the_verdict_clause(
+        self, mod
+    ):
+        state = {
+            "file_review": {
+                "agents_with_unclaimed_review_by_file": {},
+                "agents_claiming_review_by_file": {},
+                "unscoped_files": ["package-lock.json"],
+                "noise_filtered_files": ["package-lock.json"],
             },
         }
         text = "\n".join(self._guidance(mod, state=state)["actions"])

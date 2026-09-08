@@ -27,11 +27,13 @@ try:
         load_dependency_refresh_report,
     )
     from .dispatch_status import (
+        load_dispatch_plan,
         AGENT_NAME_RE,
         DISPATCH_OVERRIDE,
         DISPATCH_SIGNALS,
         DISPATCHED_STATUSES,
         SIGNAL_OVERRIDE,
+        OVERRIDE_REASON_KEY,
         SKIPPED_OVERRIDE,
         validate_dispatch_plan_agents,
     )
@@ -58,11 +60,13 @@ except ImportError:
         load_dependency_refresh_report,
     )
     from review.dispatch_status import (
+        load_dispatch_plan,
         AGENT_NAME_RE,
         DISPATCH_OVERRIDE,
         DISPATCH_SIGNALS,
         DISPATCHED_STATUSES,
         SIGNAL_OVERRIDE,
+        OVERRIDE_REASON_KEY,
         SKIPPED_OVERRIDE,
         validate_dispatch_plan_agents,
     )
@@ -236,15 +240,11 @@ def inspect_dispatch_plan(output_dir: str, artifact_key: str) -> dict:
         "index": {},
         "duplicates": [],
     }
-    plan = read_artifact_file(output_dir, artifact_key)
-    if plan is None:
-        return result
-
-    agents = plan.get("agents")
     try:
-        valid_entries = validate_dispatch_plan_agents(agents)
-    except ValueError:
+        plan = load_dispatch_plan(artifact_path(output_dir, artifact_key))
+    except (OSError, ValueError):
         return result
+    valid_entries = plan["agents"]
 
     names = []
     for agent in valid_entries:
@@ -456,7 +456,7 @@ def build_dispatch_manifest(output_dir: str, final_info: dict) -> dict:
                 or safe_dispatch_string(final.get("declared_model"))
             ),
             "adjustment_reason": safe_dispatch_string(
-                final.get("override_reason")
+                final.get(OVERRIDE_REASON_KEY)
             ),
             "change": change,
         }
@@ -579,9 +579,62 @@ def _unscoped_files(
     return sorted(set(normalized) - scoped_anywhere)
 
 
+def _override_orphaned_files(
+    unscoped: Optional[List[str]],
+    override_orphans: Optional[Dict[str, List[str]]],
+) -> Optional[Dict[str, List[str]]]:
+    if unscoped is None or not isinstance(override_orphans, dict):
+        return None
+    unscoped_set = set(unscoped)
+    return {
+        path: sorted(agents)
+        for path, agents in sorted(override_orphans.items())
+        if path in unscoped_set and isinstance(agents, list)
+    }
+
+
+def planner_excluded_files(
+    changed: List[str], reviewable: List[str]
+) -> Optional[List[str]]:
+    """Changed files the planner excluded by design — `agent/scope.py`'s
+    NOISE_PATTERNS: lock files, binaries, vendored and generated paths.
+
+    The one subtraction behind both the assignment manifest's
+    `file_exclusions` and `file_review`'s `noise_filtered_files`. Both
+    inputs are already-normalized repo-relative lists; the dispatch
+    plan's `changed_files` is the reviewable set, so an EMPTY list is a
+    measured "nothing reviewable". None when the plan list is not a
+    subset of the changed list, which means the two inputs did not
+    describe the same range and the subtraction would be a lie.
+    """
+    changed_set = set(changed)
+    reviewable_set = set(reviewable)
+    if not reviewable_set.issubset(changed_set):
+        return None
+    return sorted(changed_set - reviewable_set)
+
+
+def _noise_filtered_files(
+    changed_files: Optional[List[str]],
+    reviewable_files: Optional[List[str]],
+) -> Optional[List[str]]:
+    """`planner_excluded_files` over `file_review`'s raw inputs, or None
+    when either population was not measured (an absent plan, unlike an
+    empty one)."""
+    if not changed_files or reviewable_files is None:
+        return None
+    changed = normalize_repo_paths(changed_files, strict=True)
+    reviewable = normalize_repo_paths(reviewable_files, strict=True)
+    if changed is None or reviewable is None:
+        return None
+    return planner_excluded_files(changed, reviewable)
+
+
 def aggregate_file_review(
     output_dir: str,
     changed_files: Optional[List[str]] = None,
+    reviewable_files: Optional[List[str]] = None,
+    override_orphans: Optional[Dict[str, List[str]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Aggregate per-agent scope summaries into the run-level file review.
 
@@ -591,7 +644,11 @@ def aggregate_file_review(
     keeps every review-claimable path its summary reported visible as
     unclaimed. When ``changed_files`` is supplied, ``unscoped_files`` is its
     complement against every path any scope summary mentions; it stays None
-    when that population was not measured.
+    when that population was not measured. When ``reviewable_files`` (the
+    dispatch plan's noise-filtered list) is supplied too,
+    ``noise_filtered_files`` is the changed files the planner excluded by
+    design, so the renderer can keep them out of the gap count; None when
+    unmeasured.
 
     Returns None when no summaries exist (pre-sidecar runs) so callers can
     distinguish "no data" from "no gaps".
@@ -687,6 +744,7 @@ def aggregate_file_review(
         for f_path in unclaimed_paths:
             unclaimed.setdefault(f_path, set()).add(agent)
 
+    unscoped = _unscoped_files(changed_files, scoped_anywhere)
     return {
         # Distinct reviewers that produced at least one scope summary, not
         # summary files aggregated — an agent with a primary and a
@@ -702,7 +760,21 @@ def aggregate_file_review(
         # divergence note lives at the one other site, this module's
         # `UNASSIGNED_REVIEWABLE_FILES` key; read it before "reconciling"
         # the two.
-        "unscoped_files": _unscoped_files(changed_files, scoped_anywhere),
+        "unscoped_files": unscoped,
+        # The subset of `unscoped_files` the planner excluded by design.
+        # Kept as its own key rather than subtracted: `unscoped_files`
+        # keeps meaning "no scope contained it", which every consumer
+        # already reads, and the renderer does the split.
+        "noise_filtered_files": _noise_filtered_files(
+            changed_files, reviewable_files
+        ),
+        # The subset of `unscoped_files` an orchestrator skip left with no
+        # reviewer, each mapped to the skipped agents whose scope alone
+        # matched it (`dispatch_adjust.py` measures that at skip time).
+        # Restricted to the unscoped population, so a file another
+        # reviewer did receive is never reported as orphaned; None when
+        # either side is unmeasured.
+        "override_orphaned_files": _override_orphaned_files(unscoped, override_orphans),
         "agents_receiving_inline_diff_by_file": {
             f: sorted(a) for f, a in sorted(inline.items())
         },
@@ -745,10 +817,11 @@ def build_assignment_manifest(
         if changed is None or reviewable is None:
             return None
 
+        excluded = planner_excluded_files(changed, reviewable)
+        if excluded is None:
+            return None
         changed_set = set(changed)
         reviewable_set = set(reviewable)
-        if not reviewable_set.issubset(changed_set):
-            return None
 
         final_agents = final_info["index"]
         if any(
@@ -837,8 +910,7 @@ def build_assignment_manifest(
             ASSIGNED_FILES_BY_AGENT: assigned_files_by_agent,
             ASSIGNED_FILES: sorted(assigned_set),
             FILE_EXCLUSIONS: [
-                {"path": path, "reason": "noise_filtered"}
-                for path in sorted(changed_set - reviewable_set)
+                {"path": path, "reason": "noise_filtered"} for path in excluded
             ],
             # DIVERGENCE NOTE — this is NOT the same measurement as the
             # `unscoped_files` that this module's `aggregate_file_review()`

@@ -20,6 +20,8 @@ try:
         _stop_operation,
     )
     from .dispatch_status import (
+        ORPHANED_FILES_KEY,
+        ORPHANED_FILES_LEAD,
         DISPATCHED_STATUSES,
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
@@ -43,6 +45,8 @@ except ImportError:
         _stop_operation,
     )
     from review.dispatch_status import (
+        ORPHANED_FILES_KEY,
+        ORPHANED_FILES_LEAD,
         DISPATCHED_STATUSES,
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
@@ -987,10 +991,24 @@ def _step_5_dispatch_plan(mode, state, context, config, output_dir):
     )
     actions.append("")
     actions.append(
-        f"To record a main orchestrator adjustment, edit `{_artifact_display(od, 'dispatch_plan')}`:"
+        "Record every adjustment in ONE call — it validates each name and "
+        f"transition against `{_artifact_display(od, 'dispatch_plan')}`, writes "
+        "atomically, and prints one line per adjustment that the next briefing "
+        "repeats (never edit the plan file by hand or with a script of your own):"
     )
-    actions.append('- Force-skip a dispatched agent: set status to `"SKIPPED_OVERRIDE"` with `"override_reason": "..."`')
-    actions.append('- Force-dispatch a skipped agent: set status to `"DISPATCH_OVERRIDE"` with `"override_reason": "..."`')
+    actions.append("```")
+    actions.append(
+        f'python3 {SCRIPTS_DIR}/dispatch_adjust.py --output-dir "{od}" '
+        '--skip <agent> "<why the diff makes its focus irrelevant>" '
+        '--dispatch <agent> "<what it will find that the plan missed>"'
+    )
+    actions.append("```")
+    actions.append(
+        "`--skip` moves a dispatched agent to `SKIPPED_OVERRIDE`, `--dispatch` moves a "
+        "skipped one to `DISPATCH_OVERRIDE`; both are repeatable, `--dry-run` previews, "
+        "and a refused request exits 1 naming the fix. Skip the call when the plan "
+        "stands as computed."
+    )
 
     if config and config.get("quick"):
         actions.append("")
@@ -1033,6 +1051,27 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
         f"{len(dispatched)} agents ready for dispatch." if dispatched else
         "Agents will be dispatched based on the dispatch plan.",
     ]
+    # The adjustments step 5 recorded, repeated where the maintainer
+    # watching the session sees them: a silent skip looks like no skip.
+    adjustments = state.get("dispatch_adjustments")
+    if isinstance(adjustments, list):
+        if adjustments:
+            situation.append("")
+            situation.append("**Adjustments recorded at step 5:**")
+            for row in adjustments:
+                planner = row.get("planner_status") or "planner status unknown"
+                situation.append(
+                    f"- {row.get('status')} {row.get('name')} — "
+                    f"{row.get('override_reason') or 'no reason recorded'} "
+                    f"(planner: {planner})"
+                )
+                if row.get(ORPHANED_FILES_KEY):
+                    situation.append(
+                        "  " + ORPHANED_FILES_LEAD
+                        + ", ".join(f"`{path}`" for path in row[ORPHANED_FILES_KEY])
+                    )
+        else:
+            situation.append("No adjustments: the planner's plan is dispatched as computed.")
 
     codex_host = _host(config) == HOST_CODEX
     if codex_host:
@@ -1512,6 +1551,31 @@ def _run_wide_review_gaps(file_review):
     }
 
 
+def _split_unscoped(file_review):
+    """(unowned, excluded, orphaned): the unscoped files no domain owns but
+    the planner considered reviewable, the ones it excluded by design, and
+    the ones whose only matching reviewer the orchestrator skipped by
+    override (a dict of path to the skipped agents). When the exclusion
+    population is unmeasured everything not orphaned is unowned — the
+    honest reading, since nothing proved any of them were excluded."""
+    unscoped = file_review.get("unscoped_files")
+    unscoped = unscoped if isinstance(unscoped, list) else []
+    # Already restricted to the unscoped population by the producer
+    # (`manifest_sections._override_orphaned_files`).
+    orphaned = file_review.get("override_orphaned_files")
+    orphaned = orphaned if isinstance(orphaned, dict) else {}
+    rest = [path for path in unscoped if path not in orphaned]
+    noise = file_review.get("noise_filtered_files")
+    if not isinstance(noise, list):
+        return rest, [], orphaned
+    noise_set = set(noise)
+    return (
+        [path for path in rest if path not in noise_set],
+        [path for path in rest if path in noise_set],
+        orphaned,
+    )
+
+
 def _has_file_review_content(file_review):
     """True when the coverage section would render anything at all.
 
@@ -1535,7 +1599,8 @@ def _has_file_review_content(file_review):
 def _has_file_review_gap(file_review):
     """True when something is PROVEN uncovered, claims aside.
 
-    Files starved for every reviewer and domain-unmatched files are gaps.
+    Files starved for every reviewer and reviewable files no domain matched
+    are gaps; files the planner excluded by design are accounting.
     Inline receipt or a reviewed-file claim makes a file accounted for at
     run level; the latter remains a claim rather than proof of read. Demanding
     the verdict acknowledge "this gap" on a claims-only run converts that
@@ -1543,10 +1608,8 @@ def _has_file_review_gap(file_review):
     """
     if not isinstance(file_review, dict):
         return False
-    return bool(
-        _run_wide_review_gaps(file_review) or
-        file_review.get("unscoped_files")
-    )
+    unowned, _excluded, orphaned = _split_unscoped(file_review)
+    return bool(_run_wide_review_gaps(file_review) or unowned or orphaned)
 
 
 def _render_file_review_section(file_review):
@@ -1558,8 +1621,8 @@ def _render_file_review_section(file_review):
       earned no reviewed-file claim from any matching reviewer.
     * **unscoped** — matched no reviewer domain at all, so no agent's
       scope ever contained them.
-    * **claims** — never diffed inline, but a reviewer says it
-      reviewed them anyway. A claim, never proof of read.
+    * **claims** — never diffed inline, read from the queue by a reviewer's
+      own account — the mechanism working, recorded as a claim.
 
     They are never merged: "no one saw it" and "someone says they saw it"
     are different facts, and so are "starved by a budget" and "routed to
@@ -1571,10 +1634,10 @@ def _render_file_review_section(file_review):
         return ""
     gaps = _run_wide_review_gaps(file_review)
     claims = file_review.get("agents_claiming_review_by_file")
-    unscoped = file_review.get("unscoped_files")
     claims = claims if isinstance(claims, dict) else {}
-    unscoped = unscoped if isinstance(unscoped, list) else []
-    if not (gaps or claims or unscoped):
+    unowned, excluded, orphaned = _split_unscoped(file_review)
+    unscoped = unowned + excluded
+    if not (gaps or claims or unscoped or orphaned):
         return ""
 
     lines = ["## Review coverage", ""]
@@ -1594,26 +1657,57 @@ def _render_file_review_section(file_review):
                 f"- {_markdown_code_span(f_path)} (skipped by: {skipped_by})"
             )
         lines.append("")
-    if unscoped:
+    if orphaned:
         lines.append(
-            f"{len(unscoped)} changed file(s) matched no reviewer's domain "
-            "and were reviewed by no one — no agent's scope contained them "
-            "in any form (this counts every changed file, including "
-            "binaries and non-reviewable paths — run-level metrics count "
-            "reviewable files only, so its 'uncovered' figure can be "
-            "smaller):"
+            f"{len(orphaned)} changed file(s) matched only a reviewer the "
+            "orchestrator skipped and were reviewed by no one — the skip "
+            "removed the one agent whose scope would have contained them:"
         )
         lines.append("")
-        for f_path in sorted(unscoped):
+        for f_path, agents in sorted(orphaned.items()):
+            skipped_by = ", ".join(_markdown_code_span(agent) for agent in agents)
+            lines.append(
+                f"- {_markdown_code_span(f_path)} (skipped by override: {skipped_by})"
+            )
+        lines.append("")
+    if unowned:
+        measured = isinstance(file_review.get("noise_filtered_files"), list)
+        lines.append(
+            f"{len(unowned)} changed file(s) matched no reviewer's domain "
+            "and were reviewed by no one — no agent's scope contained them "
+            "in any form"
+            + ("" if measured else
+               " (this counts every changed file, including "
+               "binaries and non-reviewable paths — run-level metrics count "
+               "reviewable files only, so its 'uncovered' figure can be "
+               "smaller)")
+            + ":"
+        )
+        lines.append("")
+        for f_path in sorted(unowned):
+            lines.append(f"- {_markdown_code_span(f_path)}")
+        lines.append("")
+    if excluded:
+        lines.append(
+            f"{len(excluded)} changed file(s) were excluded from review by design "
+            "(the planner's noise patterns: lock files, media and binary assets, "
+            "translations, snapshots, minified or generated assets, vendored and "
+            "build paths) and matched no reviewer's domain — listed for "
+            "accounting, not as a gap:"
+        )
+        lines.append("")
+        for f_path in sorted(excluded):
             lines.append(f"- {_markdown_code_span(f_path)}")
         lines.append("")
     if claims:
-        lines.append("### Reviewed-file claims — claims, not proof of read")
+        lines.append("### Claimed from the review-claimable queue")
         lines.append("")
         lines.append(
             f"{len(claims)} changed file(s) never received their diff "
-            "inline, but an agent claims to have reviewed them from the "
-            "review-claimable queue. These claims are not proof of read:"
+            "inline: a reviewer read them from the review-claimable queue, "
+            "which is the designed path for files over the inline cap or "
+            "outside the inline budget. The pipeline records the claim, not "
+            "the read:"
         )
         lines.append("")
         for f_path, agents in sorted(claims.items()):

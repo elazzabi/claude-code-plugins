@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict
 
@@ -112,6 +113,32 @@ _REQUIRED_META_FIELDS = frozenset({
     "next_finding_number",
     "next_check_number",
 })
+
+
+MAX_LEDGER_TEXT_LENGTH = 4096
+
+
+def normalize_bounded_text(value, label):
+    """Validate and trim one bounded prose field: a ledger's evidence or
+    note, an orchestrator note, a dispatch-adjustment reason. Non-empty,
+    at most `MAX_LEDGER_TEXT_LENGTH` characters, no control characters
+    but newline and tab."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > MAX_LEDGER_TEXT_LENGTH
+        or "\x00" in value
+        or any(
+            character not in ("\n", "\t")
+            and unicodedata.category(character) in ("Cc", "Cf")
+            for character in value
+        )
+    ):
+        raise ValueError(
+            f"{label} must be non-empty text of at most "
+            f"{MAX_LEDGER_TEXT_LENGTH} characters with no control characters"
+        )
+    return value.strip()
 
 
 def coerce_text(value: Any, single_line: bool = False) -> str:

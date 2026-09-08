@@ -64,7 +64,6 @@ try:
     )
     from .orchestration import (
         _preserve_initial_dispatch_plan,
-        _load_dispatch_plan,
         _run_subprocess,
         _dependency_refresh_safety_state,
         _orchestrate_step_2,
@@ -141,7 +140,6 @@ except ImportError:
     )
     from review.orchestration import (
         _preserve_initial_dispatch_plan,
-        _load_dispatch_plan,
         _run_subprocess,
         _dependency_refresh_safety_state,
         _orchestrate_step_2,

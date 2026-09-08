@@ -18,9 +18,14 @@ try:
         _host,
     )
     from .dispatch_status import (
+        ORPHANED_FILES_KEY,
+        DISPATCH_OVERRIDE,
         DISPATCHED_STATUSES,
+        OVERRIDE_REASON_KEY,
+        PLANNER_STATUS_KEY,
+        SKIPPED_OVERRIDE,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from .dependency_refresh import (
         load_dependency_refresh_report,
@@ -62,9 +67,14 @@ except ImportError:
         _host,
     )
     from review.dispatch_status import (
+        ORPHANED_FILES_KEY,
+        DISPATCH_OVERRIDE,
         DISPATCHED_STATUSES,
+        OVERRIDE_REASON_KEY,
+        PLANNER_STATUS_KEY,
+        SKIPPED_OVERRIDE,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from review.dependency_refresh import (
         load_dependency_refresh_report,
@@ -168,16 +178,26 @@ def _preserve_initial_dispatch_plan(output_dir, plan):
             pass
 
 
-def _load_dispatch_plan(plan_path):
-    """Load one dispatch plan and validate its agent decisions."""
-    with open(plan_path) as plan_file:
-        plan = json.load(plan_file)
-    if not isinstance(plan, dict):
-        raise ValueError(
-            f"Dispatch plan at {plan_path} must be a JSON object, got {plan!r}"
-        )
-    validate_dispatch_plan_agents(plan.get("agents"))
-    return plan
+def _dispatch_adjustments(plan):
+    """The orchestrator's overrides in the final plan, each beside the
+    planner's status `dispatch_adjust.py` stamped when it overrode it, for
+    the step-6 briefing to repeat."""
+    return [
+        {
+            "name": a["name"],
+            "status": a.get("status"),
+            OVERRIDE_REASON_KEY: a.get(OVERRIDE_REASON_KEY),
+            PLANNER_STATUS_KEY: a.get(PLANNER_STATUS_KEY),
+            # The changed files a skip left with no reviewer; None when
+            # dispatch_adjust.py could not measure them.
+            ORPHANED_FILES_KEY: (
+                list(a[ORPHANED_FILES_KEY])
+                if isinstance(a.get(ORPHANED_FILES_KEY), list) else None
+            ),
+        }
+        for a in plan.get("agents", [])
+        if a.get("status") in (DISPATCH_OVERRIDE, SKIPPED_OVERRIDE)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1051,7 +1071,7 @@ def _orchestrate_step_5(mode, config, state, context, output_dir):
         plan_path = artifact_path(output_dir, "dispatch_plan")
         if os.path.isfile(plan_path):
             try:
-                plan = _load_dispatch_plan(plan_path)
+                plan = load_dispatch_plan(plan_path)
                 if ok:
                     _preserve_initial_dispatch_plan(output_dir, plan)
                 agents = plan["agents"]
@@ -1088,7 +1108,7 @@ def _orchestrate_step_6(mode, config, state, context, output_dir):
     plan_path = artifact_path(output_dir, "dispatch_plan")
     if os.path.isfile(plan_path):
         try:
-            plan = _load_dispatch_plan(plan_path)
+            plan = load_dispatch_plan(plan_path)
             dispatched = [
                 {
                     "name": a["name"],
@@ -1108,6 +1128,7 @@ def _orchestrate_step_6(mode, config, state, context, output_dir):
                 if a.get("status") in DISPATCHED_STATUSES
             ]
             state["dispatched_agents"] = dispatched
+            state["dispatch_adjustments"] = _dispatch_adjustments(plan)
             # Recompute dispatch_plan_summary from final plan (post-override)
             all_agents = plan["agents"]
             state["dispatch_plan_summary"] = {
@@ -1371,6 +1392,39 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
     return context
 
 
+def _load_plan_or_none(output_dir):
+    """The run's dispatch plan, or None when no valid plan exists — every
+    measurement taken from it is then unmeasured, not empty."""
+    try:
+        return load_dispatch_plan(artifact_path(output_dir, "dispatch_plan"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _plan_changed_files(plan):
+    """The plan's noise-filtered file list, or None when it has none."""
+    files = (plan or {}).get("changed_files")
+    if not isinstance(files, list):
+        return None
+    return [path for path in files if isinstance(path, str)]
+
+
+def _plan_override_orphans(plan):
+    """Every changed file an override skip left with no reviewer, mapped to
+    the skipped agents whose scope alone covered it, from what
+    `dispatch_adjust.py` stamped; None without a plan."""
+    if plan is None:
+        return None
+    orphans = {}
+    for agent in plan.get("agents", []):
+        if agent.get("status") != SKIPPED_OVERRIDE:
+            continue
+        for path in agent.get(ORPHANED_FILES_KEY) or []:
+            if isinstance(path, str):
+                orphans.setdefault(path, set()).add(agent["name"])
+    return {path: sorted(names) for path, names in sorted(orphans.items())}
+
+
 def _orchestrate_step_9(mode, config, state, context, output_dir):
     # First thing this step does: observe how the reconciliator's dispatch
     # ended. Step 9 is the next moment the SCRIPT re-enters after step 8's
@@ -1415,8 +1469,11 @@ def _orchestrate_step_9(mode, config, state, context, output_dir):
     # is — `unscoped_files` stays None rather than reading as a clean bill.
     changed_csv = context.get("git", {}).get("changed_files_csv", "")
     changed_files = [f.strip() for f in changed_csv.split(",") if f.strip()]
+    plan = _load_plan_or_none(output_dir)
     state["file_review"] = manifest_sections.aggregate_file_review(
-        output_dir, changed_files=changed_files
+        output_dir, changed_files=changed_files,
+        reviewable_files=_plan_changed_files(plan),
+        override_orphans=_plan_override_orphans(plan),
     )
 
     # Assemble the record LAST, once the coverage populations are in state:
