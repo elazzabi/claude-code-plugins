@@ -1389,6 +1389,15 @@ class TestReconcilerReviewDomainOwnership:
         assert "FindingsLedgerBuilder.open(" not in reconciler
         assert "builder.add_positive_observation(" in reconciler
 
+    def test_reconciler_uses_the_local_host_context_map_for_host_citations(self):
+        reconciler = (
+            PLUGIN_ROOT / "agents/review-reconciliator.md"
+        ).read_text()
+
+        assert "full local-only `review_context.host_context` manifest" in reconciler
+        assert "use the local `host_context` map" in reconciler
+        assert "host-qualified `source_cited`" in reconciler
+
 
 class TestAPIContractReviewerReturnSideHooks:
     """Regression guard for caller-side handling of filter return values."""

@@ -72,10 +72,7 @@ _markdown_spec.loader.exec_module(_markdown_mod)
 _render_markdown = _markdown_mod.render_markdown
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 def _write_critic_snapshot(output_dir, adjustments):
@@ -155,6 +152,19 @@ def _review_json(reviewer):
         return canonical_findings_ledger()
     return canonical_review_document(reviewer)
 
+
+
+def _record_timeouts(monkeypatch, orchestration_mod):
+    """Replace the orchestrator's subprocess seam with one that succeeds
+    and records the timeout each call was given."""
+    seen = []
+
+    def fake_run_subprocess(cmd, cwd=None, timeout=60):
+        seen.append(timeout)
+        return "", True
+
+    monkeypatch.setattr(orchestration_mod, "_run_subprocess", fake_run_subprocess)
+    return seen
 
 class TestReviewerDraftFinalizationLifecycle:
     def test_last_draft_is_the_only_synthesis_input(
@@ -1280,19 +1290,26 @@ class TestStep3Orchestration:
         mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
         assert "previous_change_purpose" not in state
 
+    def test_step_2_lets_the_pr_checkout_use_its_whole_timeout(
+        self, mod, orchestration_mod, tmp_path, monkeypatch
+    ):
+        """The workspace wrapper allows the checkout 300 s; the pipeline
+        must not kill the wrapper first, or the checkout keeps changing the
+        tree after the recovery metadata was lost."""
+        from review.workspace_setup import CHECKOUT_TIMEOUT_SECONDS
+        seen_timeouts = _record_timeouts(monkeypatch, orchestration_mod)
+        mod._orchestrate_step(
+            2, "pr", {"pr_number": "42"},
+            {"resolved_params": {}, "workspace": {}}, {}, str(tmp_path),
+        )
+        assert seen_timeouts
+        assert seen_timeouts[0] > CHECKOUT_TIMEOUT_SECONDS
+
     def test_step_3_allows_known_ecosystem_cache_refreshes_to_finish(
         self, mod, orchestration_mod, tmp_path, monkeypatch
     ):
         """The context wrapper should allow both known host caches to refresh."""
-        seen_timeouts = []
-
-        def fake_run_subprocess(cmd, cwd=None, timeout=60):
-            seen_timeouts.append(timeout)
-            return "", True
-
-        monkeypatch.setattr(
-            orchestration_mod, "_run_subprocess", fake_run_subprocess
-        )
+        seen_timeouts = _record_timeouts(monkeypatch, orchestration_mod)
         mod._orchestrate_step(
             3,
             "full",
@@ -3841,7 +3858,7 @@ class TestStep11Orchestration:
         assert "No workspace changes to restore" in consent.stdout
         assert "PIPELINE COMPLETE" in consent.stdout
 
-    def test_step_11_writes_pipeline_result(self, tmp_path):
+    def test_step_11_writes_pipeline_result_with_reconciliation_verification(self, tmp_path):
         """A pre-existing unbound report must be rewritten before publish."""
         run_pipeline("--step", "1", "--mode", "pr",
                    "--output-dir", str(tmp_path), "--pr-number", "42", cwd=tmp_path)
@@ -3877,6 +3894,7 @@ class TestStep11Orchestration:
             "fallback: no usable ledger verdict"
         )
         assert "report_path" in result
+        assert result["reconciliation_verification"] is None
 
     def test_step_11_leaves_the_findings_verdict_alone(self, tmp_path):
         """Rule 23's sync is gone end to end: the CLI reads the ledger's

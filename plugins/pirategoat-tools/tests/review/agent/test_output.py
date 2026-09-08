@@ -2828,6 +2828,43 @@ class TestTypeScriptContractLockstep:
             r"'([^']+)'", self._field_types("OrchestratorNote")["outcome"],
         )) == set(critic_adjustments.NOTE_OUTCOMES)
 
+    def test_invalidated_recommendations_keep_partial_priorities_and_adjustment_ids(self):
+        assert self._type_alias("ReviewRecommendations") == "ReviewContent['recommendations'];"
+        assert self._field_types("InvalidatedRecommendations") == {
+            "recommendations": "Partial<ReviewRecommendations>",
+            "invalidated_by_critic_adjustment_ids": "string[]",
+        }
+        content = self._interface_body("ReviewContent")
+        priorities = re.search(r"recommendations:\s*\{(.*?)\n {4}\};", content, re.DOTALL)
+        assert priorities is not None
+        assert set(re.findall(r"(\w+): string\[\]", priorities.group(1))) == set(
+            review_document.RECOMMENDATION_PRIORITIES
+        )
+
+    def test_request_replacements_are_optional_nullable_and_partial_by_priority(self):
+        fields = self._field_types("AdjudicationRequest")
+        assert fields.get("revised_assessment?") == "string | null"
+        assert fields.get("revised_recommendations?") == "Partial<ReviewRecommendations> | null"
+        assert fields["schema"] == "2"
+
+    def test_correct_excludes_severity_while_severity_actions_retain_it(self):
+        assert self._type_alias("FindingSeverityChangeFields") == (
+            "Pick<Finding, 'severity'> & Partial<Omit<FindingPatchFields, 'severity'>>;"
+        )
+        assert self._type_alias("FindingCorrectionFields") == (
+            "AtLeastOne<Omit<FindingPatchFields, 'severity'>> & { severity?: never };"
+        )
+        assert self._type_alias("CheckCorrectionFields") == (
+            "AtLeastOne<Pick<ReviewCheck, 'question' | 'method' | 'result'>> "
+            "& { severity?: never };"
+        )
+        proposal = self._type_alias("CriticProposalAdjustment")
+        assert "action: 'correct'; target: FindingTarget; fields: FindingCorrectionFields;" in proposal
+        assert "action: 'correct'; target: CheckTarget; fields: CheckCorrectionFields;" in proposal
+        assert "action: 'promote' | 'demote'; target: FindingTarget; fields: FindingSeverityChangeFields;" in proposal
+        provenance = self._type_alias("FindingCriticAdjustment")
+        assert "action: 'promote' | 'demote'; rationale: string; prior: FindingSeverityChangeFields" in provenance
+
     @pytest.mark.parametrize(
         "field", ["observations", "recommendations", "positive_observations"]
     )

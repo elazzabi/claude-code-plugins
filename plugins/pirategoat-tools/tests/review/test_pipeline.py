@@ -23,10 +23,7 @@ from conftest import PIPELINE_SCRIPT_PATH as SCRIPT_PATH
 from review import run_paths
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -3677,7 +3674,8 @@ class TestStep12Cleanup:
             "filenames outside the reviewed change",
             "per-agent", "model tier", "verdict", "which agents each file",
             "changed-file paths", "never file contents",
-            "the plugin version", "skips, and status flags",
+            "the plugin version and the plugin checkout's commit", "skips, and status flags",
+            "finding id and severity it came from",
             "triage checks", "token usage by model",
             "PR titles or authors",
             "vladolaru/pirategoat-tools-review-telemetry",

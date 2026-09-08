@@ -120,6 +120,75 @@ def out_dir(tmp_path):
 
 
 class TestRecordAssembly:
+    def test_record_preserves_upstream_source_citation(self, out_dir):
+        findings = _ledger()
+        findings["findings"][0]["source_cited"] = (
+            "wordpress@unknown:src/wp-includes/post.php:1234"
+        )
+        _write_ledger(out_dir, findings)
+
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "**Upstream evidence:** `wordpress@unknown:src/wp-includes/post.php:1234`" in text
+
+    @pytest.mark.parametrize("reads, status", [(0, "unverified"), (None, "unmeasured")])
+    def test_step_9_records_reconciliation_verification_without_rewriting_ledger(
+        self, out_dir, monkeypatch, reads, status
+    ):
+        _write_ledger(out_dir)
+        ledger_path = out_dir / "review-findings.json"
+        before = ledger_path.read_bytes()
+        monkeypatch.setattr(
+            orchestration_mod, "_run_subprocess",
+            lambda cmd, cwd=None, timeout=60: (json.dumps({
+                "schema": 1, "subagent_usage": [
+                    {"agent": "review-reconciliator", "repository_reads": reads},
+                ],
+            }), True),
+        )
+        state = {}
+        orchestration_mod._orchestrate_step_9(
+            "full", {}, state, {"git": {}}, str(out_dir),
+        )
+        assert state["reconciliation_verification"] == {
+            "verified_concern_count": 2, "repository_reads": reads, "status": status,
+        }
+        assert state["review_record"]["status"] == "complete"
+        assert ledger_path.read_bytes() == before
+        record = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert ("Reconciliation is UNVERIFIED" in record) == (status == "unverified")
+        assert "- Reconciliation verification: 2 verified concern(s)" in record
+
+    def test_run_notes_and_verdict_line_carry_reconciliation_verification(self, out_dir):
+        _write_ledger(out_dir)
+        state = {"reconciliation_verification": {
+            "verified_concern_count": 2, "repository_reads": 0, "status": "unverified",
+        }}
+        assemble_review_record(str(out_dir), state, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "- Reconciliation verification: 2 verified concern(s), 0 repository read(s) observed for the reconciliator — UNVERIFIED (no read observed; the read detector is not exhaustive)." in text
+        tail = text.rsplit("Verdict — from", 1)[1]
+        assert "Reconciliation is UNVERIFIED" in tail
+        assert "no repository read by the reconciliator was observed" in tail
+        assert "read no repository file" not in text
+
+    @pytest.mark.parametrize("state, note", [
+        ({"reconciliation_verification": {"verified_concern_count": 2,
+          "repository_reads": 5, "status": "verified"}},
+         "2 verified concern(s), 5 repository read(s) observed for the reconciliator — verified."),
+        ({"reconciliation_verification": {"verified_concern_count": 2,
+          "repository_reads": None, "status": "unmeasured"}},
+         "2 verified concern(s), repository reads unmeasured (no transcript)."),
+        ({}, "- Reconciliation verification: not measured."),
+    ])
+    def test_reconciliation_verification_without_warning(self, out_dir, state, note):
+        _write_ledger(out_dir)
+        assemble_review_record(str(out_dir), state, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert note in text
+        assert "Reconciliation is UNVERIFIED" not in text
+
     def test_canonical_findings_checks_and_assessment_render_mechanically(
         self, out_dir
     ):
@@ -191,6 +260,10 @@ class TestRecordAssembly:
     def test_sections_appear_in_the_documented_order(self, out_dir):
         _write_ledger(out_dir)
         state = {
+            "change_purpose_items": {
+                "structured": True, "problems": [], "context": [],
+                "verify": [{"id": "V1", "text": "x", "source": "PR description", "carried_over": False}],
+            },
             "file_review": {
                 "agents_with_unclaimed_review_by_file": {
                     "src/starved.php": ["code-reviewer"]
@@ -210,11 +283,75 @@ class TestRecordAssembly:
             "## High Findings",
             "## Verified Checks",
             "## Run notes",
+            "## Verify items",
             "## Review coverage",
             "Verdict — from the findings ledger",
         ]
         positions = [text.index(marker) for marker in order]
         assert positions == sorted(positions), text
+
+    def test_verify_items_table_names_who_settled_each_claim(self, out_dir):
+        ledger = _ledger()
+        ledger["checks"][0]["verifies"] = ["V1"]
+        _write_ledger(out_dir, ledger)
+        state = {"change_purpose_items": {
+            "structured": True, "problems": [], "context": [],
+            "verify": [
+                {"id": "V1", "text": "Nothing else calls the removed helper", "source": "PR description", "carried_over": False},
+                {"id": "V2", "text": "The retry loop | has a ceiling", "source": "inferred from the diff", "carried_over": True},
+            ],
+        }}
+        assemble_review_record(str(out_dir), state, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "## Verify items" in text
+        assert "| Item | Claim | Source | Settled by |" in text
+        assert "| V1 | Nothing else calls the removed helper | PR description | `c1` (code-reviewer) |" in text
+        assert "| V2 (carried over) | The retry loop \\| has a ceiling | inferred from the diff | no surviving check or confirmed note — unverified |" in text
+        assert text.index("## Run notes") < text.index("## Verify items") < text.index("Verdict — from the findings ledger")
+
+    def test_a_confirmed_note_settles_an_item_in_the_table(self, out_dir):
+        """WooCommerce PR #68063: V2 and V3 read "unverified" although the
+        reconciliator had reproduced the orchestrator's note that settled
+        them; the critic then spent four minutes re-verifying both."""
+        ledger = _ledger()
+        ledger["orchestrator_notes"] = [
+            {"id": "n1", "note": "lockfile regenerates with all three sections", "outcome": "confirmed",
+             "evidence": "deleted pnpm-lock.yaml and regenerated it", "verifies": ["V2"]},
+            {"id": "n2", "note": "claim", "outcome": "refuted", "evidence": "e"},
+        ]
+        _write_ledger(out_dir, ledger)
+        state = {"change_purpose_items": {
+            "structured": True, "problems": [], "context": [],
+            "verify": [
+                {"id": "V1", "text": "claim one", "source": "PR description", "carried_over": False},
+                {"id": "V2", "text": "claim two", "source": "PR description", "carried_over": False},
+            ],
+        }}
+        assemble_review_record(str(out_dir), state, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "| V1 | claim one | PR description | no surviving check or confirmed note — unverified |" in text
+        assert "| V2 | claim two | PR description | `n1` (review-reconciliator) |" in text
+
+    def test_a_citation_of_an_undeclared_item_is_listed_under_the_table(self, out_dir):
+        ledger = _ledger()
+        ledger["checks"][0]["verifies"] = ["V9"]
+        _write_ledger(out_dir, ledger)
+        state = {"change_purpose_items": {
+            "structured": True, "problems": [], "context": [],
+            "verify": [{"id": "V1", "text": "claim", "source": "PR description", "carried_over": False}],
+        }}
+        assemble_review_record(str(out_dir), state, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "| V1 | claim | PR description | no surviving check or confirmed note — unverified |" in text
+        assert "- `c1` (code-reviewer) cites V9, which the change purpose does not declare." in text
+        assert text.index("| V1 |") < text.index("cites V9")
+
+    def test_no_verify_items_means_no_table(self, out_dir):
+        _write_ledger(out_dir)
+        for state in ({}, {"change_purpose_items": None},
+                      {"change_purpose_items": {"structured": False, "verify": [], "context": [], "problems": []}}):
+            assemble_review_record(str(out_dir), state, _read(out_dir))
+            assert "## Verify items" not in (out_dir / REVIEW_RECORD_MD).read_text()
 
     def test_header_carries_verdict_and_severity_counts(self, out_dir):
         _write_ledger(out_dir)
@@ -337,6 +474,58 @@ class TestRecordAssembly:
 
         assert "> **⚠ Host Context Banner:** WooCommerce source" in text
         assert text.index("Host Context Banner") < text.index("## High Findings")
+
+    def test_run_notes_state_the_hosts_the_run_verified_against(self, out_dir):
+        _write_ledger(out_dir)
+        (out_dir / "review-context.json").write_text(json.dumps({"host_context": {
+            "resolved": [
+                {"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache", "path": "/x/cache/wordpress/latest",
+                 "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+                 "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk", "declared_minimum": "7.0"}},
+                {"name": "vendor", "kind": "library-dep", "source": "vendor-inspection", "path": "/x/repo/vendor", "notes": {}},
+            ],
+            "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": None}],
+            "banner": {"degraded": True, "reason": "partial_unresolved", "message": "m"},
+            "diagnostics": {"scan_roots": 1},
+        }}))
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "- Host context: wordpress via ecosystem-cache (version 7.2-alpha-63166-src, commit 474555a85c05, refreshed 2026-09-04; the repository declares it requires 7.0)." in text
+        assert "- Unresolved hosts: jetpack (declared_in_plugin_headers)." in text
+        assert "/x/cache/wordpress/latest" not in text
+
+    def test_the_record_reads_the_host_identity_current_at_assembly(self, out_dir):
+        """A step-3 handoff may re-resolve hosts after a dependency refresh
+        and replace `review-context.json`; the record reads that artifact
+        when it is assembled, so it cannot carry a stale copy."""
+        _write_ledger(out_dir)
+        context_path = out_dir / "review-context.json"
+        context_path.write_text(json.dumps({"host_context": {
+            "resolved": [{"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache",
+                          "path": "/local/wordpress", "version": "7.1", "notes": {"commit": "old123"}}],
+            "unresolved": [],
+        }}))
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+        assert "version 7.1, commit old123" in (out_dir / REVIEW_RECORD_MD).read_text()
+
+        context_path.write_text(json.dumps({"host_context": {
+            "resolved": [{"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache",
+                          "path": "/local/wordpress", "version": "7.2", "notes": {"commit": "new456"}}],
+            "unresolved": [],
+        }}))
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+        text = (out_dir / REVIEW_RECORD_MD).read_text()
+        assert "- Host context: wordpress via ecosystem-cache (version 7.2, commit new456)." in text
+        assert "old123" not in text
+        assert "/local/wordpress" not in text
+
+    def test_run_notes_say_when_no_host_was_resolved_or_recorded(self, out_dir):
+        _write_ledger(out_dir)
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+        assert "- Host context: not recorded." in (out_dir / REVIEW_RECORD_MD).read_text()
+        (out_dir / "review-context.json").write_text(json.dumps({"host_context": {"resolved": [], "unresolved": [], "banner": None, "diagnostics": {}}}))
+        assemble_review_record(str(out_dir), {}, _read(out_dir))
+        assert "- Host context: no runtime host resolved." in (out_dir / REVIEW_RECORD_MD).read_text()
 
     def test_run_notes_carry_dependency_refresh_and_dispatch(self, out_dir):
         _write_ledger(out_dir)

@@ -882,3 +882,98 @@ class TestStepElevenUsageSnapshot:
         assert result["usage"]["subagent_effective_input"] is None
         assert result["usage"]["by_model"] == {}
         assert result["usage"]["agents_measured"] == "0/?"
+
+
+class TestCriticProsePaths:
+    def _write(self, tmp_path, text):
+        path = run_paths.artifact_path(str(tmp_path), "critic_findings")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    @pytest.mark.parametrize("text, changed, expected", [
+        pytest.param(
+            "Claims Verified\n- **f1** — Evidence: src/admin.php:42 echoes it\n"
+            "Coverage: the review reached includes/class-wc-cart.php and "
+            "src/retry.php; wp-includes/formatting.php was consulted.\n",
+            ["src/admin.php", "src/retry.php"],
+            ["includes/class-wc-cart.php", "wp-includes/formatting.php"],
+            id="paths-the-diff-does-not-contain",
+        ),
+        pytest.param(
+            "Coverage: includes/class-wc-order.php was read; class-wc-order.php/other.php was not.\n",
+            ["plugins/woocommerce/includes/class-wc-order.php"],
+            ["class-wc-order.php/other.php"],
+            id="abbreviated-paths-name-their-changed-file",
+        ),
+        pytest.param(
+            "Run ./bin/lint.sh from ../tools/run.py; 3/4.5 of the cases pass; src/real.php was not read.\n",
+            [], ["src/real.php"], id="relative-prefixes-and-ratios-are-not-paths",
+        ),
+        pytest.param("Only src/a.py and src/b.py are named.", ["src/a.py", "src/b.py"], [], id="no-foreign-paths"),
+        pytest.param(
+            "See README.md and https://example.com/docs/page.html and v1.2.3.", [], [],
+            id="bare-filenames-and-urls-are-not-paths",
+        ),
+        pytest.param(
+            "Sentence final: includes/foreign.php.\n"
+            "Multi-dot: src/admin.test.php was checked.\n"
+            "Scoped: packages/@scope/lib/index.ts was checked.\n"
+            "Code: `lib/render.test.js` was checked.\n"
+            "Line: src/controller.test.php:42 echoes it.\n",
+            [],
+            ["includes/foreign.php", "lib/render.test.js", "packages/@scope/lib/index.ts",
+             "src/admin.test.php", "src/controller.test.php"],
+            id="complete-paths-in-ordinary-prose",
+        ),
+        pytest.param(
+            "See [docs](https://example.com/docs/page.html)—`includes/foreign.php`.", [],
+            ["includes/foreign.php"], id="url-does-not-swallow-an-adjacent-code-span",
+        ),
+        pytest.param("See https://example.com/?next=src/file.php and lib/local.php.", [], ["lib/local.php"],
+                     id="path-in-url-query-value"),
+        pytest.param("See https://example.com/docs#target=src/file.php.", [], [], id="path-in-url-fragment"),
+    ])
+    def test_names_paths_the_diff_does_not_contain(self, tmp_path, text, changed, expected):
+        self._write(tmp_path, text)
+        assert orchestration_mod._critic_prose_paths_outside_diff(str(tmp_path), changed) == expected
+
+    def test_absent_findings_file_is_none(self, tmp_path):
+        assert orchestration_mod._critic_prose_paths_outside_diff(str(tmp_path), ["a.py"]) is None
+
+    def test_step_11_stores_the_measurement_in_state(self, git_repo):
+        repo, out = git_repo
+        _seed_step_11(out)
+        self._write(
+            out,
+            "The review reached src/a.py and includes/foreign.php was consulted.",
+        )
+        state = {}
+
+        _orchestrate_step_11(
+            "pr",
+            {},
+            state,
+            {"git": {"changed_files_csv": "src/a.py"}},
+            str(out),
+        )
+
+        assert state["critic_prose_paths_outside_diff"] == [
+            "includes/foreign.php"
+        ]
+
+
+class TestPlanOverrideOrphans:
+    def test_reads_the_orphans_every_override_skip_recorded(self, orchestration_mod):
+        plan = {"agents": [
+            {"name": "docs-drift-reviewer", "status": "SKIPPED_OVERRIDE", "orphaned_files": ["changelog/x"]},
+            {"name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE", "orphaned_files": ["changelog/x", "assets/a.css"]},
+            {"name": "code-reviewer", "status": "DISPATCH"},
+        ], "changed_files": ["changelog/x", "assets/a.css", "src/a.php"]}
+        assert orchestration_mod._plan_override_orphans(plan) == {
+            "assets/a.css": ["a11y-reviewer"],
+            "changelog/x": ["a11y-reviewer", "docs-drift-reviewer"],
+        }
+
+    def test_no_plan_is_unmeasured(self, orchestration_mod, tmp_path):
+        assert orchestration_mod._load_plan_or_none(str(tmp_path)) is None
+        assert orchestration_mod._plan_override_orphans(None) is None
