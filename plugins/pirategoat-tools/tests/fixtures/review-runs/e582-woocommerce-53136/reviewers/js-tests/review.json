@@ -1,0 +1,72 @@
+{
+  "pr_id": "68258",
+  "reviewer": "js-tests",
+  "timestamp": "2026-09-04T09:48:04.070119",
+  "plugin_version": "1.116.0",
+  "schema": 2,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "assertion-quality",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/pages/test/user-profile.test.tsx",
+      "line": 95,
+      "recommendation": "<redacted>",
+      "confidence": 0.65
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 156739,
+    "confidence_score": 0.8,
+    "next_finding_number": 2,
+    "next_check_number": 3
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 1,
+  "reviewed_file_count": 1,
+  "in_scope_review_file_count": 1
+}

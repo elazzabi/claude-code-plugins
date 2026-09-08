@@ -1,0 +1,47 @@
+{
+  "schema": 2,
+  "adjustments": [
+    {
+      "action": "demote",
+      "target": {
+        "kind": "finding",
+        "id": "f1"
+      },
+      "fields": {
+        "severity": "low",
+        "title": "<redacted>",
+        "description": "<redacted>",
+        "recommendation": "<redacted>",
+        "confidence": 0.45
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "51151a912d7341f5b4aa4590032904f4"
+    },
+    {
+      "action": "correct",
+      "target": {
+        "kind": "finding",
+        "id": "f2"
+      },
+      "fields": {
+        "title": "<redacted>",
+        "description": "<redacted>",
+        "recommendation": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "7c84bb023f5c472fa44b01442623a15e"
+    },
+    {
+      "action": "demote",
+      "target": {
+        "kind": "finding",
+        "id": "f3"
+      },
+      "fields": {
+        "severity": "low"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "6f00621ad2044c73ad73869329f366e0"
+    }
+  ]
+}

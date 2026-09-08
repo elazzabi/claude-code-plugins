@@ -1,0 +1,252 @@
+{
+  "pr_id": "68258",
+  "timestamp": "2026-09-04T09:53:56.646071",
+  "plugin_version": "1.116.0",
+  "schema": 3,
+  "verdict": "approve",
+  "summary": {
+    "total_findings": 4,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 3,
+      "info": 1
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "accessibility",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/components/multiple-selector/multiple-selector.tsx",
+      "line": 47,
+      "recommendation": "<redacted>",
+      "confidence": 0.45,
+      "critic_adjustment": {
+        "action": "demote",
+        "rationale": "<redacted>",
+        "prior": {
+          "severity": "medium",
+          "title": "<redacted>",
+          "description": "<redacted>",
+          "recommendation": "<redacted>",
+          "confidence": 0.6
+        }
+      }
+    },
+    {
+      "id": "f2",
+      "category": "accessibility",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/components/multiple-selector/multiple-selector.tsx",
+      "line": 48,
+      "recommendation": "<redacted>",
+      "confidence": 0.85,
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "title": "<redacted>",
+          "description": "<redacted>",
+          "recommendation": "<redacted>"
+        }
+      }
+    },
+    {
+      "id": "f3",
+      "category": "test-quality",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/pages/test/user-profile.test.tsx",
+      "line": 95,
+      "recommendation": "<redacted>",
+      "confidence": 0.65,
+      "critic_adjustment": {
+        "action": "demote",
+        "rationale": "<redacted>",
+        "prior": {
+          "severity": "medium"
+        }
+      }
+    },
+    {
+      "id": "f4",
+      "category": "maintainability",
+      "severity": "info",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/components/multiple-selector/multiple-selector.tsx",
+      "line": 44,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y",
+        "code",
+        "history-insights",
+        "patterns"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code",
+        "js-tests"
+      ]
+    },
+    {
+      "id": "c6",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests"
+      ]
+    },
+    {
+      "id": "c7",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c8",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights"
+      ]
+    },
+    {
+      "id": "c9",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "patterns"
+      ]
+    },
+    {
+      "id": "c10",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests",
+        "code",
+        "patterns"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 248294,
+    "confidence_score": 0.95,
+    "next_finding_number": 5,
+    "next_check_number": 11,
+    "reconciliation": {
+      "grouped_concern_count": 4,
+      "verified_concern_count": 4,
+      "false_positive_concern_count": 0,
+      "out_of_scope_concern_count": 0,
+      "input_finding_count": 4,
+      "contributing_agent_count": 3,
+      "reviewing_agents": [
+        "a11y-review",
+        "code-review",
+        "history-insights-review",
+        "js-tests-review",
+        "patterns-review"
+      ],
+      "not_applicable_agents": [],
+      "dispatched_agents": [
+        "a11y-review",
+        "code-review",
+        "history-insights-review",
+        "js-tests-review",
+        "patterns-review"
+      ],
+      "missing_agents": []
+    }
+  },
+  "verdict_before_adjustments": "comment",
+  "applied_critic_adjustments": [
+    {
+      "adjustment_id": "51151a912d7341f5b4aa4590032904f4",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "7c84bb023f5c472fa44b01442623a15e",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "6f00621ad2044c73ad73869329f366e0",
+      "outcome": "verified"
+    }
+  ],
+  "invalidated_assessments": [
+    {
+      "text": "<redacted>",
+      "invalidated_by_critic_adjustment_ids": [
+        "51151a912d7341f5b4aa4590032904f4",
+        "7c84bb023f5c472fa44b01442623a15e",
+        "6f00621ad2044c73ad73869329f366e0"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,237 @@
+{
+  "mode": "pr",
+  "git_range": "192f51d64577ced8209386ec452a48c584a79ab3..fix/woopmnt-6265-ece-stale-click-during-refresh",
+  "output_dir": "<redacted>",
+  "changed_files": [
+    "changelog/fix-woopmnt-6265-ece-stale-click-during-refresh",
+    "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--order-pay-page.test.js",
+    "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--product-page.test.js",
+    "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+    "client/express-checkout/shortcode-buttons-express/button-ui.js",
+    "client/express-checkout/shortcode-buttons-express/index.js"
+  ],
+  "scope_summary": {
+    "total_files": 6,
+    "noise_filtered": 0,
+    "reviewable_files": 6,
+    "by_domain": {
+      "a11y": 5,
+      "api-contract": 2,
+      "architecture": 2,
+      "clarity": 2,
+      "code": 5,
+      "concurrency": 2,
+      "data-flow": 2,
+      "dead-code": 2,
+      "docs-drift": 2,
+      "js-tests": 3,
+      "patterns": 5,
+      "performance": 5,
+      "reference-integrity": 2,
+      "reliability": 2,
+      "security": 5,
+      "simplification": 2,
+      "wp-architecture": 5
+    },
+    "unrecognized_source": []
+  },
+  "agents": [
+    {
+      "name": "a11y-reviewer",
+      "domain": "a11y",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "api-contract-reviewer",
+      "domain": "api-contract",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "architecture-reviewer",
+      "domain": "architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "code-clarity-reviewer",
+      "domain": "clarity",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "code-reviewer",
+      "domain": "code",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "concurrency-reviewer",
+      "domain": "concurrency",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "data-flow-privacy-reviewer",
+      "domain": "data-flow",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "dead-code-reviewer",
+      "domain": "dead-code",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "devils-advocate-reviewer",
+      "domain": "architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "docs-drift-reviewer",
+      "domain": "docs-drift",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "e2e-tests-reviewer",
+      "domain": "e2e-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "ecosystem-integration-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "SKIPPED_TRIAGE",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "go-tests-reviewer",
+      "domain": "go-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "history-insights-reviewer",
+      "domain": "code",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "js-tests-reviewer",
+      "domain": "js-tests",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "patterns-reviewer",
+      "domain": "patterns",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "performance-reviewer",
+      "domain": "performance",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "php-tests-reviewer",
+      "domain": "php-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "python-tests-reviewer",
+      "domain": "python-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "reference-integrity-reviewer",
+      "domain": "reference-integrity",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "reliability-reviewer",
+      "domain": "reliability",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "rust-tests-reviewer",
+      "domain": "rust-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "security-reviewer",
+      "domain": "security",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "simplification-reviewer",
+      "domain": "simplification",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "toolchain-reviewer",
+      "domain": "toolchain",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "woo-regression-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "SKIPPED_TRIAGE",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "wp-architecture-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "SKIPPED_TRIAGE",
+      "reason": "<redacted>"
+    }
+  ],
+  "agent_signals": [],
+  "warnings": []
+}

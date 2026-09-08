@@ -1,0 +1,99 @@
+{
+  "pr_id": "12089",
+  "reviewer": "devils-advocate",
+  "timestamp": "2026-09-04T23:14:14.585368",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "request_changes",
+  "summary": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "simpler-mechanism-exists",
+      "severity": "high",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 787,
+      "recommendation": "<redacted>",
+      "confidence": 0.87
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 392568,
+    "confidence_score": 0.87,
+    "next_finding_number": 2,
+    "next_check_number": 6
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 2,
+  "reviewed_file_count": 2,
+  "in_scope_review_file_count": 2
+}

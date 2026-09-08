@@ -1,0 +1,89 @@
+{
+  "pr_id": "12089",
+  "reviewer": "history-insights",
+  "timestamp": "2026-09-04T23:12:53.941741",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 3,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 2,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "edge-case-precedent",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 555,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f2",
+      "category": "cautionary-precedent",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 577,
+      "recommendation": "<redacted>",
+      "confidence": 0.75
+    },
+    {
+      "id": "f3",
+      "category": "edge-case-precedent",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": null,
+      "recommendation": "<redacted>",
+      "confidence": 0.7
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 328977,
+    "confidence_score": 0.8,
+    "next_finding_number": 4,
+    "next_check_number": 2
+  },
+  "review_claimable_files": [
+    "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--order-pay-page.test.js"
+  ],
+  "reviewed_file_claims": [
+    "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--order-pay-page.test.js"
+  ],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 4,
+  "reviewed_file_count": 5,
+  "in_scope_review_file_count": 5
+}

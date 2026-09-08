@@ -30,6 +30,17 @@ if str(TESTS_DIR) not in sys.path:
 PIPELINE_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "review" / "pipeline.py"
 PIPELINE_TOTAL_STEPS = 12
 
+# Tests commit in throwaway repositories. A developer's global
+# `commit.gpgsign` would route every one of those commits through the
+# machine's signer (1Password's `op-ssh-sign` here), which blocks waiting
+# for an authorization nobody is present to give and hangs the suite at the
+# first commit. Git reads this environment as configuration in front of the
+# global file, every subprocess the tests spawn inherits it, and no user
+# configuration is touched.
+os.environ.setdefault("GIT_CONFIG_COUNT", "1")
+os.environ.setdefault("GIT_CONFIG_KEY_0", "commit.gpgsign")
+os.environ.setdefault("GIT_CONFIG_VALUE_0", "false")
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_telemetry_logs(tmp_path_factory):

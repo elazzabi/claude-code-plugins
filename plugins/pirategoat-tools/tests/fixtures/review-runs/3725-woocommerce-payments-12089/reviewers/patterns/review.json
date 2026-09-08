@@ -1,0 +1,72 @@
+{
+  "pr_id": "12089",
+  "reviewer": "patterns",
+  "timestamp": "2026-09-04T23:12:17.373701",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "request_changes",
+  "summary": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "missing-pattern",
+      "severity": "high",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 322,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "patterns"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "patterns"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 256069,
+    "confidence_score": 0.85,
+    "next_finding_number": 2,
+    "next_check_number": 3
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 5,
+  "reviewed_file_count": 5,
+  "in_scope_review_file_count": 5
+}

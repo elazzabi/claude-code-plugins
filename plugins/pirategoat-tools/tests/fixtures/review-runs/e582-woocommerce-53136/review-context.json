@@ -1,0 +1,75 @@
+{
+  "mode": "pr",
+  "git": {
+    "base_ref": "trunk",
+    "head_ref": "fix/53136-platform-selector-mobile-keyboard",
+    "merge_base": "434650beaba1a2c594c12a1262b9b139551f8df2",
+    "git_range": "434650beaba1a2c594c12a1262b9b139551f8df2..fix/53136-platform-selector-mobile-keyboard",
+    "head_sha": "659d57507389c3600bf41364de471ec8f39832e5",
+    "changed_files": [
+      "plugins/woocommerce/changelog/53136-platform-selector-mobile-keyboard",
+      "plugins/woocommerce/client/admin/client/core-profiler/components/multiple-selector/multiple-selector.tsx",
+      "plugins/woocommerce/client/admin/client/core-profiler/pages/test/user-profile.test.tsx"
+    ],
+    "commit_count": 1
+  },
+  "pr_size": {
+    "lines": 75,
+    "category": "small",
+    "files": 3
+  },
+  "host_context": {
+    "version": 1,
+    "resolved": [
+      {
+        "name": "node_modules",
+        "kind": "library-dep",
+        "path": "<redacted>",
+        "source": "vendor-inspection",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {}
+      }
+    ],
+    "unresolved": [],
+    "banner": null,
+    "diagnostics": {
+      "resolvers_consulted": [
+        "explicit",
+        "wp-env",
+        "docker-compose",
+        "plugin-headers",
+        "vendor-inspection"
+      ],
+      "resolver_detail": {
+        "explicit": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "wp-env": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "docker-compose": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "plugin-headers": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "vendor-inspection": {
+          "entries": 1,
+          "unresolved": 0,
+          "notes": {}
+        }
+      },
+      "runtime_ms": 0
+    }
+  }
+}

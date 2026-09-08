@@ -1,0 +1,103 @@
+{
+  "pr_id": "12089",
+  "reviewer": "code",
+  "timestamp": "2026-09-04T23:13:59.108874",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 3,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 2,
+      "low": 1,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "bug",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 774,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f2",
+      "category": "edge-case",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 786,
+      "recommendation": "<redacted>",
+      "confidence": 0.8
+    },
+    {
+      "id": "f3",
+      "category": "code-quality",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 782,
+      "recommendation": "<redacted>",
+      "confidence": 0.9
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 394671,
+    "confidence_score": 0.85,
+    "next_finding_number": 4,
+    "next_check_number": 4
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 5,
+  "reviewed_file_count": 5,
+  "in_scope_review_file_count": 5
+}

@@ -1,0 +1,74 @@
+{
+  "pr_id": "12089",
+  "reviewer": "js-tests",
+  "timestamp": "2026-09-04T23:15:49.504174",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "request_changes",
+  "summary": {
+    "total_findings": 2,
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 1,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "assertion-quality",
+      "severity": "high",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+      "line": 539,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f2",
+      "category": "over-mocking",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+      "line": 43,
+      "recommendation": "<redacted>",
+      "confidence": 0.7
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 474566,
+    "confidence_score": 0.82,
+    "next_finding_number": 3,
+    "next_check_number": 2
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 3,
+  "reviewed_file_count": 3,
+  "in_scope_review_file_count": 3
+}
