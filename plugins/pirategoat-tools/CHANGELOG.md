@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.119.0] - UNRELEASED
 
+Makes the review pipeline's own claims checkable: the range it reviewed, the upstream code it read, the evidence behind every surviving finding, and how much of the reconciliator's verification actually happened.
+
 ### Added
 
 - PR and branch reviews fetch the base branch before computing the review range, and a PR review compares its local changed-file list with GitHub's — path for path when GitHub returns the whole list, by count otherwise.
