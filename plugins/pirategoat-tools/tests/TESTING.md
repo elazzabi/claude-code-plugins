@@ -30,6 +30,8 @@ tests/
 │   ├── test_critic.py                # Decision critic tests
 │   ├── test_critic_adjustments.py    # Critic proposal adjudication -> review-findings.json ledger writer
 │   ├── test_dependency_refresh.py    # Dependency-refresh validating save-channel tests
+│   ├── test_dispatch_adjust.py       # dispatch_adjust.py: the orchestrator's validating, atomic dispatch-adjustment CLI
+│   ├── test_evidence_manifest.py     # Prose-free evidence projection and telemetry boundary tests
 │   ├── test_findings_ledger.py       # FindingsLedgerBuilder ledger-content builder tests
 │   ├── test_findings_save.py         # findings_save.py validating save-channel tests
 │   ├── test_orchestration_hygiene.py # Step-3 hygiene baseline + step-11 sweep/usage-capture tests
@@ -37,6 +39,7 @@ tests/
 │   ├── test_report_assembly.py       # review-record.md assembler tests
 │   ├── test_registry_docs.py         # AGENTS.md registry reference pinned to the registry
 │   ├── test_review_config.py         # Repo-contributed review config loader tests
+│   ├── test_review_run_fixtures.py   # Sanitized audited-run capture/replay, privacy, and projection tests
 │   ├── test_reviewer_lifecycle.py    # Mutable draft, intake close, immutable finalization tests
 │   ├── test_synthesis_lifecycle.py   # Reconciliator/critic lifecycle measurement
 │   ├── test_telemetry.py             # Telemetry logging + manifest-section tests
@@ -50,6 +53,7 @@ tests/
 │       ├── test_bootstrap_repo_rules.py   # Repo-contributed review-rule injection tests
 │       ├── test_diff_noise_filter.py # Semantic diff noise filter tests
 │       ├── test_ecosystem_integration_reviewer.py  # ecosystem-integration-reviewer compliance test
+│       ├── test_history_insights_reviewer.py # Scenario-budget and parallel-branch detection contract tests
 │       ├── test_output.py            # ReviewOutputBuilder unit tests
 │       ├── test_review_assignment.py # Reviewer assignment + reviewed-file derivation tests
 │       ├── test_scope.py             # Scope filtering unit tests
@@ -79,6 +83,7 @@ tests/
 │   ├── test_chain.py                 # Resolver chain composition tests
 │   ├── test_ecosystem_cache_cli.py   # ecosystem_cache.py CLI tests
 │   ├── test_host_context.py          # host_context.py CLI tests
+│   ├── test_identity.py              # identity.py: a local checkout's declared version and git identity
 │   ├── test_types.py                 # Host-context data type tests
 │   ├── cache/
 │   │   └── test_manager.py           # Ecosystem cache manager tests
@@ -105,6 +110,8 @@ tests/
 │   ├── pipeline_process.py           # Shared subprocess helper for invoking review/pipeline.py
 │   ├── gh_shim.py                    # `gh api` protocol double, its install, and the machine-local config writer
 │   ├── telemetry_run.py              # Drives ReviewTelemetry through one complete run for redaction fixtures
+│   ├── triage_run_fixture.py         # Captures one audited run's planner inputs from a clone; replays them through build_dispatch_plan without git
+│   ├── review_run_fixture.py          # Captures sanitized complete audited runs for generated replay fixtures
 │   └── review_fixtures.py            # Canonical finalized-review/ledger fixtures for consumer-boundary tests
 └── fixtures/
     ├── no-code-changes.diff          # Docs-only diff for NO_DOMAIN_FILES tests
@@ -121,12 +128,18 @@ tests/
     ├── ci-config-changes.diff        # CI/toolchain-only config diff
     ├── mixed-code-and-tests.diff     # Cart logic + PHP/JS tests
     ├── wp-hooks-and-i18n.diff        # WP plugin: hooks, i18n, escaping, $wpdb
+    ├── triage-runs/                  # Three audited review runs' planner inputs (e582, 6e6a on its correct range, 3725); re-capture, never hand-edit
+    ├── review-runs/                  # Generated-only sanitized complete audited-run fixtures; re-capture through review_run_fixture.py, never hand-edit
     └── multi-file-realistic.diff     # 7 files across all 9 domains
 ```
+
+`fixtures/review-runs/` is generated-only capture output: never hand-edit it. Re-capture through `helpers/review_run_fixture.py` from the source run, which redacts prose and local/session data before binding the critic verdict to the redacted proposal; `review/test_review_run_fixtures.py` pins that contract and deterministic replay.
 
 ### Review Pipeline Tests
 
 The review pipeline tests load `scripts/review/pipeline.py` as the stable compatibility facade, then divide assertions along the same ownership boundaries as production:
+
+`tests/review/test_triage_run_regressions.py` pins the planner's agent-by-agent decisions on three real runs; every keyword or hygiene change must show its effect there.
 
 | Source module | Concern | Test file |
 |---|---|---|
@@ -256,7 +269,7 @@ Direct tests for the mutable-draft/immutable-final state machine and schema-2 re
 
 ### Reconciliation Context Tests (`review/test_reconciliation_context.py`)
 
-Direct unit tests on `scripts/review/reconciliation_context.py` — finalized-review loading, scope and hunk checking, source-snippet extraction, and severity normalization. The module builds schema-3 `reconciliation-context.json` and nothing else now: its two Markdown renderers (`to_markdown` for the reconciliator, `build_critic_context` for the decision critic) were projections whose only readers were agents, and both are gone — the agents read the JSON, and the decision critic reads `review-record.md` beside it.
+Direct unit tests on `scripts/review/reconciliation_context.py` — finalized-review loading, scope and hunk checking, source-snippet extraction, and severity normalization. The module builds schema-4 `reconciliation-context.json` and nothing else now: its two Markdown renderers (`to_markdown` for the reconciliator, `build_critic_context` for the decision critic) were projections whose only readers were agents, and both are gone — the agents read the JSON, and the decision critic reads `review-record.md` beside it.
 
 | Class | What it verifies |
 |---|---|
@@ -271,10 +284,20 @@ Direct unit tests on `scripts/review/reconciliation_context.py` — finalized-re
 | `TestParseDiffHunks` | Unified-diff hunk ranges and quoted paths parse into deterministic source coordinates |
 | `TestLineNearHunk` | The bounded line-proximity predicate handles absent and malformed line evidence |
 | `TestFindFileHunks` | File lookup distinguishes matching, missing, and metadata-only diff entries |
-| `TestFullScript` | The CLI writes exact schema-3 reconciliation context from finalized schema-2 reviews and canonical assignments |
+| `TestFullScript` | The CLI writes exact schema-4 reconciliation context from finalized schema-2 reviews and canonical assignments, with the change purpose's `verify_items` carrying the reviewer checks that cite each |
 | `TestMissingAgentDetection` | Dispatched-minus-reporting is a measurement, with unknown dispatch (`null`) distinct from a measured-empty dispatch (`[]`), through the CLI and back |
 | `TestPrefilterAnnotation` | Structurally-certain out-of-scope findings are annotated in place with a checkable count, never deleted, and `not_in_hunk` is never annotated |
 | `TestReviewStem` | Reviewer artifact stems are derived through the shared trailing-`-reviewer` rule |
+
+### Change Purpose Tests (`review/test_change_purpose.py`)
+
+Direct unit tests on `scripts/review/change_purpose.py` — the parser behind the step-5 warnings, bootstrap's REVIEW FOCUS tiers, the reconciliation context's `verify_items`, and the record's Verify-items table.
+
+| Class | What it verifies |
+|---|---|
+| `TestParse` | Explicit ids, the `— source:` provenance, the `(carried over)` marker, continuation lines, and the extracted author description are read as written; a purpose without the headings is `structured: False` with no problems |
+| `TestProblems` | The parse facts reported as problems and nothing else: a missing heading, an item without a source, an inferred Context item, a duplicate id, an id under the other tier's heading, a tier body that parses to no item without reading `None.`, and more than eight Verify items |
+| `TestChecksSettling` | Checks are grouped by the Verify item their `verifies` list cites; `undeclared_citations` names every citation of an id the purpose does not declare |
 
 ### Run-Level File Review Tests (`review/test_file_review.py`)
 
@@ -283,7 +306,7 @@ Direct unit tests on `manifest_sections.aggregate_file_review()` — the run-lev
 | Class | What it verifies |
 |---|---|
 | `TestAggregateReviewedFiles` | `aggregate_file_review()` carries inline-diff receipt per agent from the scope sidecars and each reviewer's claimed/unclaimed files from its finalized review, never re-derived from the assignment sidecar; a malformed document receives no credit, and one reviewer's claim cannot conceal another reviewer's unclaimed work |
-| `TestUnscopedFiles` | `unscoped_files` — the changed files no reviewer's scope contained in any form, with the measured-empty case distinct from `None` when no changed-file list was supplied |
+| `TestUnscopedFiles` | `unscoped_files` — the changed files no reviewer's scope contained in any form, with the measured-empty case distinct from `None` when no changed-file list was supplied; `noise_filtered_files` is the planner's by-design exclusions, measured only when both the changed and the reviewable lists were supplied |
 | `TestAgentsReportingCountsAgents` | `scope_reporting_agent_count` counts distinct agent names, not scope-summary files — reviewers with a secondary `-config-ops` summary still count once |
 
 ### Review Record Assembly Tests (`review/test_report_assembly.py`)
@@ -781,6 +804,10 @@ with patch.object(mod, "datetime", FakeDatetime):
 
 Integration tests run the actual bootstrap script against real `reviewer-protocol.md` and `tests-reviewer-protocol.md` files. This means tests catch heading drift (e.g., someone renames a section that the skip-list references).
 
+### 8a. Pin the load-bearing token, not the sentence
+
+A test that reads a briefing, an agent or protocol file, a command file or a CLI's stdout asserts the smallest thing the pipeline's other half depends on: a flag, a path, a marker word, an artifact name, a vocabulary value another script parses (`checks[].result`, `` `OPEN` ``, `Plugin scripts directory:`), or a value imported from production. It never pins a sentence of prose. Prose is rewritten whenever a briefing is improved, and a sentence pin turns every rewording into a test edit that protects nothing: the range that introduced this rule had to rewrite seven such pins for one wording change. When a behavior has no token — the instruction is the sentence — pin the negative that the change removed (`"If empty: STOP" not in content`) or the structural line the reader consumes, and leave the wording free.
+
 ### 9. Mock git repos, not the real repo
 
 Integration tests that shell out to scripts (which run git commands) use temporary git repos created from `.diff` fixtures via `setup_temp_git_repo()` in `conftest.py`. This isolates tests from the real repository state — dirty working trees, recent commits, and branch structure don't affect results. The scripts resolve their plugin files via their own script path (`os.path.abspath(__file__)`), so changing `cwd` to a temp repo only affects git operations.
@@ -871,17 +898,9 @@ function_under_test = _mod.function_name
 
 ### Importing from helpers/
 
-Shared test utilities live in `tests/helpers/`. Unlike `scripts/` (added to
-`sys.path` once, in `conftest.py`), `conftest.py` does NOT add `tests/`
-itself — every caller inserts `TESTS_DIR` onto `sys.path` before importing
-from `helpers/`. `grading/test_graders.py` does this:
+Shared test utilities live in `tests/helpers/`. `conftest.py` adds `tests/` to `sys.path` beside `scripts/`, and pytest loads it before any module under it, so a test module imports from `helpers/` directly — no per-file `sys.path.insert(0, str(TESTS_DIR))` is needed, and `test_pytest_layout.py::TestFocusedCollection` pins that a module importing `helpers` collects when named on its own. Older modules still carry the insert; it is redundant, not a convention to copy.
 
-```python
-TESTS_DIR = Path(__file__).resolve().parent.parent  # grading/ -> tests/
-sys.path.insert(0, str(TESTS_DIR))
-```
-
-Then import as normal:
+Import as normal:
 
 ```python
 from helpers.graders import grade_review_json, grade_output_pair
