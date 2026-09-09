@@ -170,7 +170,7 @@ For each suspected gap, reason through:
 
 1. Is this a **concurrency correctness** issue? (Race conditions, TOCTOU, idempotency → concurrency-reviewer's domain.)
 2. Is this a **security vulnerability**? (Injection, XSS, auth bypass → security-reviewer's domain.)
-3. Is this **existing infrastructure** unchanged by this PR? (Only flag resilience gaps in changed code.)
+3. Is this **existing infrastructure** unchanged by this PR, and does no changed hunk alter what happens when it fails? (Only flag resilience gaps caused by changed code — but a callee's new failure behavior puts an untouched caller in scope. Before clearing on this ground, apply the shared protocol's unchanged caller exception: trace the callers of any function whose failure behavior changed and anchor the finding at the changed hunk, not at the caller.)
 4. Is the failure mode **already handled by the framework**? (e.g., WordPress catches fatal errors, WooCommerce has default retry logic — verify it's actually missing before reporting.)
 5. Is this a **style preference** about error message format without operational impact? (Inconsistent but functional error formats are LOW, not missing error handling.)
 

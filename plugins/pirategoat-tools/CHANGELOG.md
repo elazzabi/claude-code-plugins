@@ -5,6 +5,13 @@ All notable changes to the pirategoat-tools plugin will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.119.1] - UNRELEASED
+
+### Fixed
+
+- A hunk that changes a function's contract (failure behavior, return shape, side effects, ordering, validation) now puts every caller that relied on the old contract in scope, even in a file with no diff; reviewers anchor the finding at the changed hunk and clear callers through a recorded check instead of dropping the finding because the caller's own diff is empty.
+- `reliability-reviewer`'s "existing infrastructure unchanged" gate defers to the shared unchanged-caller exception instead of clearing a resilience gap on the caller's empty diff.
+
 ## [1.119.0] - 2026-09-09
 
 Makes the review pipeline's own claims checkable: the range it reviewed, the upstream code it read, the evidence behind every surviving finding, and how much of the reconciliator's verification actually happened.
