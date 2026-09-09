@@ -1,0 +1,192 @@
+{
+  "mode": "pr",
+  "git": {
+    "base_ref": "develop",
+    "head_ref": "fix/woopmnt-6265-ece-stale-click-during-refresh",
+    "merge_base": "192f51d64577ced8209386ec452a48c584a79ab3",
+    "git_range": "192f51d64577ced8209386ec452a48c584a79ab3..fix/woopmnt-6265-ece-stale-click-during-refresh",
+    "head_sha": "407d70566052a6417c8276a6d795467deffa4407",
+    "changed_files": [
+      "changelog/fix-woopmnt-6265-ece-stale-click-during-refresh",
+      "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--order-pay-page.test.js",
+      "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--product-page.test.js",
+      "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+      "client/express-checkout/shortcode-buttons-express/button-ui.js",
+      "client/express-checkout/shortcode-buttons-express/index.js"
+    ],
+    "commit_count": 6
+  },
+  "pr_size": {
+    "lines": 594,
+    "category": "medium",
+    "files": 6
+  },
+  "host_context": {
+    "version": 1,
+    "resolved": [
+      {
+        "name": "woocommerce",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "woocommerce-beta-tester",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "woocommerce-payments-dev-tools",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "woocommerce-subscriptions",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "wc-calypso-bridge",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "wpcom-local-helper",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "docker-compose",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "wp_kind": "plugin",
+          "personal": false
+        }
+      },
+      {
+        "name": "vendor",
+        "kind": "library-dep",
+        "path": "<redacted>",
+        "source": "vendor-inspection",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {}
+      },
+      {
+        "name": "node_modules",
+        "kind": "library-dep",
+        "path": "<redacted>",
+        "source": "vendor-inspection",
+        "version": null,
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {}
+      },
+      {
+        "name": "wordpress",
+        "kind": "runtime-host",
+        "path": "<redacted>",
+        "source": "ecosystem-cache",
+        "version": "latest",
+        "version_freshness": null,
+        "confidence": "high",
+        "notes": {
+          "fulfillment": true,
+          "refresh_action": "cloned",
+          "refresh_ok": true
+        }
+      }
+    ],
+    "unresolved": [],
+    "banner": null,
+    "diagnostics": {
+      "resolvers_consulted": [
+        "explicit",
+        "wp-env",
+        "docker-compose",
+        "plugin-headers",
+        "vendor-inspection",
+        "ecosystem-cache-fulfillment"
+      ],
+      "resolver_detail": {
+        "explicit": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "wp-env": {
+          "entries": 0,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "docker-compose": {
+          "entries": 6,
+          "unresolved": 1,
+          "notes": {}
+        },
+        "plugin-headers": {
+          "entries": 0,
+          "unresolved": 2,
+          "notes": {
+            "detected": "plugin"
+          }
+        },
+        "vendor-inspection": {
+          "entries": 2,
+          "unresolved": 0,
+          "notes": {}
+        },
+        "ecosystem-cache-fulfillment": {
+          "entries": 1,
+          "unresolved": 0,
+          "notes": {
+            "fulfilled": [
+              "wordpress"
+            ]
+          }
+        }
+      },
+      "runtime_ms": 8194
+    }
+  }
+}

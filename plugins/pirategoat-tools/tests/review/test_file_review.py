@@ -317,6 +317,69 @@ class TestUnscopedFiles:
         )
         assert cov["unscoped_files"] == [".editorconfig", "package-lock.json"]
 
+    def test_noise_filtered_files_are_the_planner_s_exclusions(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path),
+            changed_files=[
+                "src/a.php", "package-lock.json", "assets/logo.png", "Gemfile",
+            ],
+            reviewable_files=["src/a.php", "Gemfile"],
+        )
+        assert cov["unscoped_files"] == [
+            "Gemfile", "assets/logo.png", "package-lock.json",
+        ]
+        assert cov["noise_filtered_files"] == [
+            "assets/logo.png", "package-lock.json",
+        ]
+
+    def test_noise_is_unmeasured_without_the_planner_s_list(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php", "package-lock.json"],
+        )
+        assert cov["noise_filtered_files"] is None
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=None, reviewable_files=["src/a.php"],
+        )
+        assert cov["noise_filtered_files"] is None
+
+    def test_a_plan_list_outside_the_changed_files_is_unmeasured(self, tmp_path):
+        """The same guard the assignment manifest applies: a plan that does
+        not describe the changed range cannot be subtracted from it."""
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php"],
+            reviewable_files=["src/a.php", "src/b.php"],
+        )
+        assert cov["noise_filtered_files"] is None
+
+    def test_an_empty_reviewable_list_is_measured(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["a.png"], reviewable_files=[],
+        )
+        assert cov["noise_filtered_files"] == ["a.png"]
+
+    def test_override_orphans_are_the_unscoped_files_a_skip_left(self, tmp_path):
+        """The plan says which files a skipped agent's domain alone
+        matched; only the ones no scope contained are orphans here, so a
+        file another reviewer did receive is never reported as one."""
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(
+            str(tmp_path), changed_files=["src/a.php", "changelog/x", "Gemfile"],
+            override_orphans={"changelog/x": ["docs-drift-reviewer"], "src/a.php": ["a11y-reviewer"]},
+        )
+        assert cov["override_orphaned_files"] == {"changelog/x": ["docs-drift-reviewer"]}
+        assert cov["unscoped_files"] == ["Gemfile", "changelog/x"]
+
+    def test_override_orphans_are_unmeasured_without_the_plan(self, tmp_path):
+        _write_summary(str(tmp_path), "security-reviewer", ["src/a.php"], [])
+        cov = aggregate_file_review(str(tmp_path), changed_files=["src/a.php", "changelog/x"])
+        assert cov["override_orphaned_files"] is None
+        cov = aggregate_file_review(str(tmp_path), changed_files=None, override_orphans={"changelog/x": ["docs-drift-reviewer"]})
+        assert cov["override_orphaned_files"] is None
+
     def test_union_covers_every_sidecar_file_list(self, tmp_path):
         """Inline, claimable, AND name-only listing all count as scoped —
         a file the agent was told about is not "matched no domain"."""
@@ -513,3 +576,73 @@ class TestAgentsReportingCountsAgents:
         broken.parent.mkdir(parents=True, exist_ok=True)
         broken.write_text("{not json")
         assert aggregate_file_review(str(tmp_path)) is None
+
+
+class TestHostContextSummary:
+    @pytest.mark.parametrize("value", [42, "bad", {"unexpected": "container"}], ids=["number", "string", "object"])
+    def test_malformed_lists_are_ignored(self, value):
+        summary = manifest_sections.summarize_host_context({
+            "resolved": value, "unresolved": value,
+            "diagnostics": {"self_provided": value, "scan_roots": True},
+        })
+        assert summary == {
+            "resolved": [], "unresolved": [], "banner_reason": None,
+            "self_provided": [], "scan_roots": None,
+        }
+
+    @pytest.mark.parametrize("value", [
+        {"path": "/Users/private"}, ["/Users/private"], 42,
+    ], ids=["object", "list", "number"])
+    def test_non_string_identity_fields_are_unknown(self, value):
+        summary = manifest_sections.summarize_host_context({
+            "resolved": [{
+                "name": value, "kind": value, "source": value, "version": value,
+                "version_freshness": value,
+                "notes": {"commit": value, "branch": value, "declared_minimum": value},
+            }],
+            "unresolved": [{"name": value, "reason": value, "version": value}],
+            "banner": {"reason": value},
+            "diagnostics": {"self_provided": [value]},
+        })
+        assert all(v is None for v in summary["resolved"][0].values())
+        assert all(v is None for v in summary["unresolved"][0].values())
+        assert summary["banner_reason"] is None
+        assert summary["self_provided"] == []
+
+    MANIFEST = {
+        "version": 1,
+        "resolved": [
+            {"name": "wordpress", "kind": "runtime-host", "path": "/Users/x/.cache/pirategoat/ecosystem/wordpress/latest",
+             "source": "ecosystem-cache", "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+             "confidence": "high", "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk",
+                                             "commit_date": "2026-09-04T18:35:44Z", "declared_minimum": "7.0",
+                                             "declared_by": [{"source": "plugin-headers", "root": "plugins/woocommerce"}]}},
+            {"name": "node_modules", "kind": "library-dep", "path": "/Users/x/repo/node_modules",
+             "source": "vendor-inspection", "version": None, "version_freshness": None, "confidence": "high", "notes": {}},
+        ],
+        "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "source": "plugin-headers", "version": None}],
+        "banner": {"degraded": True, "reason": "partial_unresolved", "message": "…", "unresolved": []},
+        "diagnostics": {"self_provided": ["woocommerce"], "scan_roots": 4, "resolvers_consulted": []},
+    }
+
+    def test_projects_identity_and_never_a_path(self):
+        summary = manifest_sections.summarize_host_context(self.MANIFEST)
+        assert summary == {
+            "resolved": [
+                {"name": "wordpress", "kind": "runtime-host", "source": "ecosystem-cache", "version": "7.2-alpha-63166-src",
+                 "commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "refreshed": "2026-09-04T00:04:08Z",
+                 "declared_minimum": "7.0"},
+                {"name": "node_modules", "kind": "library-dep", "source": "vendor-inspection", "version": None,
+                 "commit": None, "refreshed": None, "declared_minimum": None},
+            ],
+            "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": None}],
+            "banner_reason": "partial_unresolved",
+            "self_provided": ["woocommerce"],
+            "scan_roots": 4,
+        }
+        assert "/Users/" not in json.dumps(summary)
+
+    def test_absent_or_malformed_manifests_are_unmeasured(self):
+        assert manifest_sections.summarize_host_context(None) is None
+        assert manifest_sections.summarize_host_context("nope") is None
+        assert manifest_sections.summarize_host_context({}) == {"resolved": [], "unresolved": [], "banner_reason": None, "self_provided": [], "scan_roots": None}

@@ -71,6 +71,20 @@ def test_reviewer_protocol_has_no_tmp_pr_review_fallback():
     assert "/tmp/pr-review" not in protocol
 
 
+def test_reviewer_protocol_says_a_mounted_host_is_not_always_upstream():
+    """Run e08e: a WooCommerce core review listed WooPayments as a runtime
+    host because the clone's local wp-env override mounts it. A mapping
+    proves co-installation, not direction; the reviewer decides that from
+    the diff, so the protocol has to say so instead of calling every host
+    upstream."""
+    protocol = (
+        PLUGIN_ROOT / "agents" / "shared" / "reviewer-protocol.md"
+    ).read_text(encoding="utf-8")
+    section = protocol.split("## Host Context Usage", 1)[1].split("\n## ", 1)[0]
+
+    assert "downstream" in section
+
+
 # ---------------------------------------------------------------------------
 # Independent oracles for the rendered briefing
 # ---------------------------------------------------------------------------
@@ -1375,6 +1389,15 @@ class TestReconcilerReviewDomainOwnership:
         assert "FindingsLedgerBuilder.open(" not in reconciler
         assert "builder.add_positive_observation(" in reconciler
 
+    def test_reconciler_uses_the_local_host_context_map_for_host_citations(self):
+        reconciler = (
+            PLUGIN_ROOT / "agents/review-reconciliator.md"
+        ).read_text()
+
+        assert "full local-only `review_context.host_context` manifest" in reconciler
+        assert "use the local `host_context` map" in reconciler
+        assert "host-qualified `source_cited`" in reconciler
+
 
 class TestAPIContractReviewerReturnSideHooks:
     """Regression guard for caller-side handling of filter return values."""
@@ -1678,7 +1701,7 @@ class TestReviewOutputBuilderAPIExample:
 
     def test_output_uses_positive_claims_as_the_only_coverage_input(self, tmp_path):
         output = self._build(tmp_path)
-        assert 'builder.claim_files_reviewed("path/read1.py", "path/read2.py")' in output
+        assert "# No review-claimable files in this assignment: do not call claim_files_reviewed()." in output
         assert "builder.add_un" + "reviewed" not in output
         assert "builder.set_files_" + "reviewed" not in output
 
@@ -2622,3 +2645,77 @@ class TestReviewClaimableOrderingEndToEnd:
         assert assignment["review_claimable_files"] == [
             "tests/huge_test.py", "src/small_prod.py",
         ]
+
+
+# Registry agents that are not dispatched through bootstrap.py. The critic
+# receives the record and ledger paths in its dispatch prompt and runs
+# critic.py; its definition only uses bootstrap.py's path to locate the
+# plugin root. The cross-validators and the reconciliator are also not
+# bootstrap-dispatched but are not in AGENT_CONFIG, so they need no entry —
+# and an entry naming an unregistered agent fails the subset test below
+# instead of silently exempting nothing.
+BOOTSTRAP_EXEMPT_AGENTS = {
+    "decision-reviewer",
+}
+
+
+class TestEveryReviewerMandatesBootstrap:
+    """Run 6e6a: ecosystem-integration-reviewer lacked the MANDATORY SETUP
+    section, read the bare bootstrap command as context, explored for 43
+    calls, never saved, and was re-dispatched (8 % of subagent cost)."""
+
+    def test_exempt_set_names_only_registered_agents(self):
+        assert BOOTSTRAP_EXEMPT_AGENTS <= set(ALL_AGENTS), (
+            BOOTSTRAP_EXEMPT_AGENTS - set(ALL_AGENTS)
+        )
+
+    @pytest.mark.parametrize("agent", ALL_AGENTS)
+    def test_definition_contains_mandatory_bootstrap_section(self, agent):
+        if agent in BOOTSTRAP_EXEMPT_AGENTS:
+            pytest.skip("not dispatched through bootstrap")
+        path = PLUGIN_ROOT / "agents" / f"{agent}.md"
+        # Deliberately not a skip: a registry entry whose definition file is
+        # missing is a worse version of the defect this test exists to catch.
+        assert path.is_file(), f"{agent} is in the registry with no definition"
+        text = path.read_text()
+        assert "## MANDATORY SETUP — Run Bootstrap Before Reviewing" in text, agent
+        assert f"bootstrap.py --agent {agent}" in text, agent
+
+
+class TestBuilderSnippetSignatures:
+    """Run e582 and 6e6a: both Opus reviewers called add_observation with
+    one positional string, copied from the add_positive_observation
+    example, and failed their first save with
+    'missing 1 required positional argument: note'."""
+
+    def _build(self, tmp_path, review_claimable_count):
+        return build_output(
+            agent_name="security-reviewer",
+            plugin_root="/fake/root",
+            status="OK",
+            review_rules="rules",
+            domain_rules=None,
+            scope_output="=== FILES ===\n=== DIFFS ===",
+            exploration_scope=None,
+            output_dir=str(tmp_path),
+            pr_number="42",
+            reviewer_name="security",
+            review_claimable_count=review_claimable_count,
+            has_php=False,
+        )
+
+    def test_snippet_shows_add_observation_with_its_real_signature(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=0)
+        assert 'builder.add_observation(file="path/to/file.py",' in output
+        assert 'note="' in output
+        assert 'category="tradeoff")' in output
+
+    def test_claim_example_present_when_files_are_claimable(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=3)
+        assert 'builder.claim_files_reviewed("path/read1.py", "path/read2.py")' in output
+        assert "do not call claim_files_reviewed()" not in output
+
+    def test_claim_example_replaced_when_nothing_is_claimable(self, tmp_path):
+        output = self._build(tmp_path, review_claimable_count=0)
+        assert 'builder.claim_files_reviewed("path/read1.py"' not in output
+        assert "# No review-claimable files in this assignment: do not call claim_files_reviewed()." in output

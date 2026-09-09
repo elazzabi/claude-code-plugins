@@ -25,7 +25,7 @@ def test_returns_wordpress_when_cache_present(tmp_path, monkeypatch):
     names = [e.name for e in result.entries]
     assert "wordpress" in names
     e = next(e for e in result.entries if e.name == "wordpress")
-    assert e.version == "latest"
+    assert e.version is None
     assert e.source == "ecosystem-cache"
 
 
@@ -125,6 +125,43 @@ class TestResolveForNames:
         assert ensure_calls == ["wordpress"]  # only known host refreshed
         names = [e.name for e in result.entries]
         assert names == ["wordpress"]
+
+    def test_a_fulfilled_entry_carries_the_slot_identity(self, tmp_path, monkeypatch):
+        import hosts.resolvers.ecosystem_cache as ec_mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        (tmp_path / ".cache" / "pirategoat" / "ecosystem" / "wordpress" / "latest").mkdir(parents=True)
+        self._stub_ensure_fresh(monkeypatch, action="pulled")
+        monkeypatch.setattr(ec_mod, "slot_identity", lambda name: {
+            "present": True,
+            "commit": "474555a85c052de90ddd22d4abdf163e678b88ac",
+            "branch": "trunk",
+            "commit_date": "2026-09-04T18:35:44Z",
+            "version": "7.2-alpha-63166-src",
+            "refreshed": "2026-09-04T00:04:08Z",
+        })
+
+        entry = EcosystemCacheResolver().resolve_for_names({"wordpress"}).entries[0]
+
+        assert entry.version == "7.2-alpha-63166-src"
+        assert entry.version_freshness == "2026-09-04T00:04:08Z"
+        assert entry.notes["commit"] == "474555a85c052de90ddd22d4abdf163e678b88ac"
+        assert "branch" not in entry.notes  # never projected, never shared
+        assert entry.notes["commit_date"] == "2026-09-04T18:35:44Z"
+        assert entry.notes["refresh_action"] == "pulled"
+
+    def test_an_unreadable_slot_identity_is_none_not_latest(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        (tmp_path / ".cache" / "pirategoat" / "ecosystem" / "wordpress" / "latest").mkdir(parents=True)
+        self._stub_ensure_fresh(monkeypatch)
+
+        entry = EcosystemCacheResolver().resolve_for_names({"wordpress"}).entries[0]
+
+        assert entry.version is None
+        assert entry.version_freshness is None
+        assert entry.notes["commit"] is None
 
 
 def test_xdg_cache_home_overrides_default(tmp_path, monkeypatch):

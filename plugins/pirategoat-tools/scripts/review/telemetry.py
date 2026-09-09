@@ -21,10 +21,11 @@ from typing import Any, Dict, List, Optional
 
 try:
     from . import manifest_sections
+    from .evidence_manifest import build_evidence_manifest
     from .dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from .review_document import (
         load_review_document,
@@ -46,10 +47,11 @@ except ImportError:
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
     from review import manifest_sections
+    from review.evidence_manifest import build_evidence_manifest
     from review.dispatch_status import (
         DISPATCHED_STATUSES,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from review.review_document import (
         load_review_document,
@@ -67,7 +69,7 @@ except ImportError:
     )
     from review.telemetry_share import repo_identity
 
-from git_paths import normalize_repo_paths
+from git_paths import FULL_SHA_RE, normalize_repo_paths
 
 
 LOG_DIR = os.path.expanduser("~/.pirategoat-tools/logs/reviews")
@@ -92,6 +94,7 @@ EVENT_SCHEMA = 3
 # `agents`, and `transcript`'s comes from a measurement source outside
 # the manifest entirely.
 OPTIONAL_SECTION_AVAILABILITY_KEYS = (
+    "evidence",
     "assignment",
     "worktree_hygiene",
     "synthesis_agents",
@@ -100,10 +103,12 @@ OPTIONAL_SECTION_AVAILABILITY_KEYS = (
     "dependency_refresh",
     "reviewer_markdown",
     "findings_markdown",
+    "host_context",
 )
-# Full SHA-1 (40 hex) or SHA-256 (64 hex) object name — matches the
-# pipeline's _FULL_SHA_RE contract for durable git identity.
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+_BASE_FETCH_STATUSES = frozenset({"fetched", "failed"})
+_SCOPE_CHECK_STATUSES = frozenset({
+    "match", "mismatch", "count_only", "unavailable",
+})
 _STEP_MANIFEST_FIELDS = (
     "schema",
     "run_id",
@@ -137,6 +142,56 @@ _AGENT_COMPLETE_MANIFEST_FIELDS = (
     "review_digest",
 )
 _SEVERITY_FIELDS = VALID_SEVERITIES
+
+
+def _project_base_fetch(value):
+    """Project the step-3 fetch without exposing its base reference."""
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    sha = value.get("sha")
+    shallow = value.get("shallow")
+    return {
+        "status": (
+            status
+            if isinstance(status, str) and status in _BASE_FETCH_STATUSES
+            else None
+        ),
+        "sha": sha if isinstance(sha, str) and FULL_SHA_RE.fullmatch(sha) else None,
+        "shallow": shallow if isinstance(shallow, bool) else None,
+    }
+
+
+def _project_scope_check(value):
+    """Project the local/GitHub range comparison without its file lists."""
+    if not isinstance(value, dict):
+        return None
+
+    def count(name):
+        return manifest_sections.safe_nonnegative_int(value.get(name))
+
+    def flag(name):
+        item = value.get(name)
+        return item if isinstance(item, bool) else None
+
+    def listed(name):
+        item = value.get(name)
+        return len(item) if isinstance(item, list) else None
+
+    status = value.get("status")
+    return {
+        "status": (
+            status
+            if isinstance(status, str) and status in _SCOPE_CHECK_STATUSES
+            else None
+        ),
+        "github_changed_files": count("github_changed_files"),
+        "local_changed_files": count("local_changed_files"),
+        "head_matches": flag("head_matches"),
+        "base_matches": flag("base_matches"),
+        "extra_local_file_count": listed("extra_local_files"),
+        "missing_local_file_count": listed("missing_local_files"),
+    }
 
 
 def _advisory_fields(summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -248,6 +303,7 @@ class ReviewTelemetry:
               mode: str = "", repo_path: str = "",
               identifier: str = "", run_id: str = "",
               session_id: str = "", plugin_version: str = "",
+              plugin_commit: str = "",
               git_range: str = "", base_sha: str = "",
               head_sha: str = "") -> str:
         """Create log file + marker. Write pipeline_start. Return log path.
@@ -298,6 +354,11 @@ class ReviewTelemetry:
                 "quick_mode": quick_mode,
                 "session_id": session_id,
                 "plugin_version": plugin_version,
+                # The build identity: the plugin checkout's short HEAD.
+                # `plugin_version` only moves at release, so every
+                # dev-mount run between two releases stamps the same
+                # number; this is the only field that tells them apart.
+                "plugin_commit": plugin_commit,
                 "mode": mode,
                 "repo_path": repo_path,
                 "repo": repo,
@@ -739,8 +800,17 @@ class ReviewTelemetry:
                 ("head_sha", "head_sha"),
             ):
                 value = resolved_git.get(context_name)
-                if isinstance(value, str) and _FULL_SHA_RE.fullmatch(value):
+                if isinstance(value, str) and FULL_SHA_RE.fullmatch(value):
                     git[manifest_name] = value
+            git["base_fetch"] = _project_base_fetch(
+                resolved_git.get("base_fetch")
+            )
+            git["scope_check"] = _project_scope_check(
+                resolved_git.get("scope_check")
+            )
+        else:
+            git["base_fetch"] = None
+            git["scope_check"] = None
 
         steps = [
             self._manifest_step_event(event)
@@ -773,6 +843,7 @@ class ReviewTelemetry:
                 "id": start.get("run_id", ""),
                 "session_id": pipeline.get("session_id") or None,
                 "plugin_version": pipeline.get("plugin_version") or None,
+                "plugin_commit": pipeline.get("plugin_commit") or None,
                 "mode": pipeline.get("mode") or None,
                 "repo_path": pipeline.get("repo_path") or None,
                 "repo": pipeline.get("repo") or None,
@@ -794,6 +865,7 @@ class ReviewTelemetry:
                 "verdict": pipeline_result.get("verdict"),
                 "critic_verdict": pipeline_result.get("critic_verdict"),
                 "verdict_source": pipeline_result.get("verdict_source"),
+                "reconciliation_verification": pipeline_result.get("reconciliation_verification"),
                 "reconciliation": (
                     findings.get("reconciliation") if findings else None
                 ),
@@ -827,6 +899,12 @@ class ReviewTelemetry:
         manifest["availability"]["dependency_refresh"] = (
             manifest["dependency_refresh"] is not None
         )
+        manifest["host_context"] = (
+            manifest_sections.build_host_context_manifest(self.output_dir)
+        )
+        manifest["availability"]["host_context"] = manifest["host_context"] is not None
+        manifest["evidence"] = build_evidence_manifest(self.output_dir) if settled else None
+        manifest["availability"]["evidence"] = manifest["evidence"] is not None
         manifest["reviewer_markdown"] = (
             manifest_sections.build_reviewer_markdown_manifest(self.output_dir)
         )
@@ -1125,16 +1203,8 @@ class ReviewTelemetry:
 
     def _extract_dispatch(self) -> Optional[dict]:
         """Extract dispatch plan summary."""
-        path = artifact_path(self.output_dir, "dispatch_plan")
-        if not os.path.isfile(path):
-            return None
         try:
-            with open(path) as f:
-                plan = json.load(f)
-            if not isinstance(plan, dict):
-                return None
-            raw_agents = plan.get("agents")
-            agents = validate_dispatch_plan_agents(raw_agents)
+            agents = load_dispatch_plan(artifact_path(self.output_dir, "dispatch_plan"))["agents"]
             by_status: Dict[str, List[str]] = {}
             for a in agents:
                 status = a["status"]

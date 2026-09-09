@@ -10,7 +10,7 @@ from hosts.types import HostEntry
 class VendorResolver(HostResolver):
     source = "vendor-inspection"
 
-    def resolve(self, repo_path: str) -> ResolverResult:
+    def resolve(self, repo_path: str, scan=None) -> ResolverResult:
         entries: List[HostEntry] = []
 
         # Composer dependencies: expose the root; agents can inspect contents.

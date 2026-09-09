@@ -1,0 +1,328 @@
+{
+  "mode": "pr",
+  "git_range": "c725aac2a426bae735943d13e810ff8376104d3f..fix/35520-stale-coupon-code-lookup-cache",
+  "output_dir": "<redacted>",
+  "changed_files": [
+    ".ai/skills/woocommerce-backend-dev/code-entities.md",
+    ".ai/skills/woocommerce-backend-dev/hooks.md",
+    ".ai/skills/woocommerce-git-commit/SKILL.md",
+    ".ai/skills/woocommerce-git-draft-pr/SKILL.md",
+    ".github/actions/assign-reviewers/action.yml",
+    ".github/actions/assign-reviewers/assign.js",
+    ".github/actions/assign-reviewers/test.js",
+    ".github/automate-team-review-assignment-config.json",
+    ".github/automate-team-review-assignment-config.yml",
+    ".github/project-community-pr-assigner.json",
+    ".github/project-community-pr-assigner.yml",
+    ".github/workflows/automate-team-review-assignment.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/pr-check-local-actions.yml",
+    ".github/workflows/release-feature-highlights-notification.yml",
+    "AGENTS.md",
+    "changelog.txt",
+    "packages/js/components/changelog/dev-migrate-advanced-filters-to-ts",
+    "packages/js/components/src/advanced-filters/attribute-filter.tsx",
+    "packages/js/components/src/advanced-filters/date-filter.tsx",
+    "packages/js/components/src/advanced-filters/index.tsx",
+    "packages/js/components/src/advanced-filters/item.tsx",
+    "packages/js/components/src/advanced-filters/number-filter.tsx",
+    "packages/js/components/src/advanced-filters/search-filter.tsx",
+    "packages/js/components/src/advanced-filters/select-filter.tsx",
+    "packages/js/components/src/advanced-filters/stories/advanced-filters.story.tsx",
+    "packages/js/components/src/advanced-filters/test/advanced-filters.test.tsx",
+    "packages/js/components/src/advanced-filters/test/search-filter.test.tsx",
+    "packages/js/components/src/advanced-filters/test/utils.tsx",
+    "packages/js/components/src/advanced-filters/types.ts",
+    "packages/js/components/src/advanced-filters/utils.ts",
+    "packages/js/components/src/index.ts",
+    "packages/js/email-editor/CHANGELOG.md",
+    "packages/js/email-editor/changelog/fix-back-button-wp71-detection",
+    "packages/js/email-editor/changelog/fix-button-block-personalization-tags-toolbar",
+    "packages/js/email-editor/package.json",
+    "packages/js/settings-ui/changelog/update-remove-group-actions",
+    "packages/js/settings-ui/src/index.ts",
+    "packages/js/settings-ui/src/registry.ts",
+    "packages/js/settings-ui/src/types.ts",
+    "packages/php/email-editor/changelog.md",
+    "packages/php/email-editor/changelog/fix-pill-shape-padding-locale",
+    "packages/php/email-editor/changelog/fix-preload-routes-filter-guard",
+    "packages/php/email-editor/changelog/fix-recent-emails-preload",
+    "packages/php/email-editor/changelog/fix-social-links-rendered-spacing",
+    "packages/php/email-editor/changelog/fix-yoast-replace-editor-reentry",
+    "packages/php/email-editor/changelog/personalizer-value-interception",
+    "packages/php/email-editor/composer.json",
+    "plugins/woocommerce/changelog/35520-fix-stale-coupon-code-cache-on-unpublish",
+    "plugins/woocommerce/changelog/dev-clean-settings-ui-styles",
+    "plugins/woocommerce/changelog/dev-remove-settings-ui-group-actions",
+    "plugins/woocommerce/changelog/dev-report-header-advanced-filters-type",
+    "plugins/woocommerce/changelog/fix-store-api-item-schema-extensions",
+    "plugins/woocommerce/changelog/fix-wooplug-7659-order-key-array-guards",
+    "plugins/woocommerce/changelog/test-rest-api-shipping-reports-webhooks-customers",
+    "plugins/woocommerce/changelog/test-rest-api-taxes",
+    "plugins/woocommerce/client/admin/client/analytics/components/report-header/report-header.tsx",
+    "plugins/woocommerce/client/admin/client/wp-admin-scripts/settings-embed/settings-ui.scss",
+    "plugins/woocommerce/includes/class-wc-form-handler.php",
+    "plugins/woocommerce/includes/class-woocommerce.php",
+    "plugins/woocommerce/includes/data-stores/class-wc-coupon-data-store-cpt.php",
+    "plugins/woocommerce/includes/gateways/paypal/includes/class-wc-gateway-paypal-response.php",
+    "plugins/woocommerce/includes/shortcodes/class-wc-shortcode-checkout.php",
+    "plugins/woocommerce/includes/wc-cart-functions.php",
+    "plugins/woocommerce/includes/wc-coupon-functions.php",
+    "plugins/woocommerce/includes/wc-update-functions.php",
+    "plugins/woocommerce/src/Internal/Admin/Settings/SettingsUISchema.php",
+    "plugins/woocommerce/src/Internal/Caches/CouponCodeLookupInvalidator.php",
+    "plugins/woocommerce/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestController.php",
+    "plugins/woocommerce/src/Internal/PushNotifications/Controllers/PushTokenRestController.php",
+    "plugins/woocommerce/src/Internal/PushNotifications/PushNotifications.php",
+    "plugins/woocommerce/src/Internal/PushNotifications/ROADMAP.md",
+    "plugins/woocommerce/src/Internal/PushNotifications/Services/DriverAvailabilityService.php",
+    "plugins/woocommerce/src/Internal/PushNotifications/Traits/AuthorizesPushNotificationRequests.php",
+    "plugins/woocommerce/tests/e2e/test-plugins/settings-ui-component-registration/settings-ui-component-registration.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/coupon/data-store.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/customers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-sales.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-top-sellers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-methods.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-zones.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-taxes-controller-tests.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-webhooks-controller-tests.php",
+    "plugins/woocommerce/tests/php/includes/shortcodes/class-wc-shortcode-checkout-test.php",
+    "plugins/woocommerce/tests/php/src/Internal/Admin/Settings/SettingsUISchemaTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestControllerTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/PushNotificationsTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Services/DriverAvailabilityServiceTest.php"
+  ],
+  "scope_summary": {
+    "total_files": 91,
+    "noise_filtered": 1,
+    "reviewable_files": 90,
+    "by_domain": {
+      "a11y": 52,
+      "api-contract": 32,
+      "architecture": 32,
+      "clarity": 32,
+      "code": 52,
+      "concurrency": 32,
+      "config-ops": 4,
+      "data-flow": 32,
+      "dead-code": 33,
+      "docs-drift": 52,
+      "e2e-tests": 1,
+      "js-tests": 2,
+      "patterns": 52,
+      "performance": 51,
+      "php-tests": 16,
+      "reference-integrity": 43,
+      "reliability": 32,
+      "security": 51,
+      "simplification": 33,
+      "toolchain": 6,
+      "wp-architecture": 51
+    },
+    "unrecognized_source": []
+  },
+  "agents": [
+    {
+      "name": "a11y-reviewer",
+      "domain": "a11y",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "api-contract-reviewer",
+      "domain": "api-contract",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "architecture-reviewer",
+      "domain": "architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "code-clarity-reviewer",
+      "domain": "clarity",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "code-reviewer",
+      "domain": "code",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "concurrency-reviewer",
+      "domain": "concurrency",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "data-flow-privacy-reviewer",
+      "domain": "data-flow",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "dead-code-reviewer",
+      "domain": "dead-code",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "devils-advocate-reviewer",
+      "domain": "architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "docs-drift-reviewer",
+      "domain": "docs-drift",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "e2e-tests-reviewer",
+      "domain": "e2e-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "ecosystem-integration-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "go-tests-reviewer",
+      "domain": "go-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "history-insights-reviewer",
+      "domain": "code",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "js-tests-reviewer",
+      "domain": "js-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "patterns-reviewer",
+      "domain": "patterns",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "performance-reviewer",
+      "domain": "performance",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "php-tests-reviewer",
+      "domain": "php-tests",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "python-tests-reviewer",
+      "domain": "python-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "reference-integrity-reviewer",
+      "domain": "reference-integrity",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "reliability-reviewer",
+      "domain": "reliability",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "rust-tests-reviewer",
+      "domain": "rust-tests",
+      "focus": "<redacted>",
+      "status": "SKIPPED",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "security-reviewer",
+      "domain": "security",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "simplification-reviewer",
+      "domain": "simplification",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "toolchain-reviewer",
+      "domain": "toolchain",
+      "focus": "<redacted>",
+      "status": "SKIPPED_OVERRIDE",
+      "reason": "<redacted>",
+      "override_reason": "<redacted>"
+    },
+    {
+      "name": "woo-regression-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    },
+    {
+      "name": "wp-architecture-reviewer",
+      "domain": "wp-architecture",
+      "focus": "<redacted>",
+      "status": "DISPATCH",
+      "reason": "<redacted>"
+    }
+  ],
+  "agent_signals": [],
+  "warnings": []
+}

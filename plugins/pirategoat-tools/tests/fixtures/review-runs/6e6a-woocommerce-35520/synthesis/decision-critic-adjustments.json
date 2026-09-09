@@ -1,0 +1,45 @@
+{
+  "schema": 2,
+  "adjustments": [
+    {
+      "action": "correct",
+      "target": {
+        "kind": "finding",
+        "id": "f2"
+      },
+      "fields": {
+        "description": "<redacted>",
+        "recommendation": "<redacted>",
+        "confidence": 0.8
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "d3be50ad98cf4593b1030b6067fdf30b"
+    },
+    {
+      "action": "correct",
+      "target": {
+        "kind": "finding",
+        "id": "f5"
+      },
+      "fields": {
+        "title": "<redacted>",
+        "description": "<redacted>",
+        "recommendation": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "6b414e0af0ee48ceba013a7be98b928d"
+    },
+    {
+      "action": "correct",
+      "target": {
+        "kind": "check",
+        "id": "c13"
+      },
+      "fields": {
+        "method": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "18b442b36c2e4533818093814da6c15d"
+    }
+  ]
+}

@@ -64,11 +64,13 @@ try:
     from ..run_paths import artifact_path, synthesis_started_marker
     from ..review_document import (
         CHECK_TEXT_FIELDS,
+        OPTIONAL_CHECK_FIELDS,
         RECOMMENDATION_PRIORITIES,
         REQUIRED_FINDING_FIELDS,
         REVIEW_OUTPUT_SCHEMA,
         VALID_CHANNELS,
         coerce_text,
+        normalize_verifies,
         validate_check_shape,
         validate_finding_shape,
         validate_review_document,
@@ -86,11 +88,13 @@ except ImportError:
     from review.run_paths import artifact_path, synthesis_started_marker
     from review.review_document import (
         CHECK_TEXT_FIELDS,
+        OPTIONAL_CHECK_FIELDS,
         RECOMMENDATION_PRIORITIES,
         REQUIRED_FINDING_FIELDS,
         REVIEW_OUTPUT_SCHEMA,
         VALID_CHANNELS,
         coerce_text,
+        normalize_verifies,
         validate_check_shape,
         validate_finding_shape,
         validate_review_document,
@@ -370,7 +374,7 @@ class ReviewOutputBuilder:
         # being uniform across reviewers. Coerce once, at construction.
         self.pr_id = pr_id if isinstance(pr_id, str) else str(pr_id)
         self.reviewer = reviewer
-        self.timestamp = datetime.now().isoformat()
+        self.timestamp = datetime.now(timezone.utc).isoformat()
         self.findings = []
         self.observations = []
         self.recommendations = {'immediate': [], 'important': [], 'suggestions': []}
@@ -586,12 +590,16 @@ class ReviewOutputBuilder:
         result: str,
         *,
         source_reviewers: Optional[List[str]] = None,
+        verifies: Optional[List[str]] = None,
     ) -> str:
         """Record one check; ``source_reviewers`` defaults to this reviewer.
 
         One entry point for both producers: a reviewer recording its own
         verification work, and the reconciliator recording a check merged
         from several reviewers' — which names them all.
+
+        ``verifies`` names the change purpose's Verify items this check settles
+        (``["V2"]``); absent when it cites none.
         """
         if source_reviewers is None:
             source_reviewers = [self.reviewer]
@@ -618,18 +626,25 @@ class ReviewOutputBuilder:
             dict.fromkeys(source.strip() for source in source_reviewers)
         )
         check_id = self._allocate_check_id()
-        self.checks.append({
+        check = {
             "id": check_id,
             "question": values[0],
             "method": values[1],
             "result": values[2],
             "source_reviewers": normalized_sources,
-        })
+        }
+        if verifies is not None:
+            check["verifies"] = normalize_verifies(verifies, "record_check")
+        self.checks.append(check)
         return check_id
 
     def update_check(self, check_id: str, **fields) -> None:
-        """Strictly patch check content without changing identity or sources."""
-        allowed = set(CHECK_TEXT_FIELDS)
+        """Strictly patch check content without changing identity or sources.
+
+        ``verifies`` is replaced, never cleared: a citation is withdrawn by
+        ``remove_check`` and a fresh ``record_check`` without it.
+        """
+        allowed = set(CHECK_TEXT_FIELDS) | OPTIONAL_CHECK_FIELDS
         rejected = sorted(set(fields) - allowed)
         if rejected:
             raise ValueError(
@@ -643,9 +658,17 @@ class ReviewOutputBuilder:
         candidate.update(
             (field, coerce_text(value).strip())
             for field, value in fields.items()
+            if field in CHECK_TEXT_FIELDS
         )
-        validate_check_shape(candidate, index)
+        if "verifies" in fields:
+            candidate["verifies"] = normalize_verifies(fields["verifies"], "update_check")
+        self._validate_check_candidate(candidate, index)
         self.checks[index] = candidate
+
+    def _validate_check_candidate(self, candidate: dict, index: int) -> None:
+        """The grammar a patched check must satisfy: the reviewer's. The
+        ledger's checks also carry provenance and validate it elsewhere."""
+        validate_check_shape(candidate, index)
 
     def remove_check(self, check_id: str) -> None:
         """Remove one check without recycling its stable ID."""
@@ -852,6 +875,10 @@ class ReviewOutputBuilder:
         not three — and the positive-claim caller has a second error class to
         report in the same raise.
         """
+        # One list or tuple is the batch: the intent is unambiguous, and
+        # refusing it as a mis-typed path aborts the whole publication script.
+        if len(files) == 1 and isinstance(files[0], (list, tuple)):
+            files = tuple(files[0])
         if not files:
             raise ValueError(f"{api_name} requires at least one file path")
         normalized: List[str] = []
@@ -1140,6 +1167,21 @@ class ReviewOutputBuilder:
         )
         print(f"DRAFT SAVED: verdict {review['verdict']}")
         print(f"DRAFT TOTALS: {' | '.join(totals)}")
+        if not (
+            review["findings"] or review["checks"]
+            or review.get("observations") or review.get("positive_observations")
+        ):
+            # An approve that records nothing reads downstream as a clean
+            # approve. The one seen in the field followed a builder script
+            # that raised after its content was added.
+            print(
+                f"NOTE: verdict {review['verdict']} with nothing recorded — no "
+                "finding, check, observation or positive observation. If an "
+                "earlier builder script raised, re-run the whole script with "
+                "its content, not only the save; if the review truly found "
+                "nothing to record, say what you checked with record_check().",
+                file=sys.stderr,
+            )
         unclaimed = list(review["unclaimed_review_files"])
         if unclaimed:
             shown = ", ".join(unclaimed[:3])

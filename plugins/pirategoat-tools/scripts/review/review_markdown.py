@@ -324,10 +324,23 @@ def render_review_body(data: Dict) -> str:
                     location = f"**File:** `{finding['file']}`"
                 md.append(location + "\n\n")
                 md.append(f"{finding['description']}\n\n")
+                if finding.get('source_cited'):
+                    md.append(
+                        f"**Upstream evidence:** `{finding['source_cited']}`\n\n"
+                    )
                 if finding.get('severity_floor'):
                     md.append(
                         f"**Severity floor:** {finding['severity_floor']}\n\n"
                     )
+                sources = finding.get('sources')
+                if isinstance(sources, list) and sources:
+                    md.append("**Sources:** " + ", ".join(
+                        f"{s.get('reviewer')} {s.get('id')}"
+                        + (f" ({s['severity']})" if s.get('severity') else "")
+                        for s in sources if isinstance(s, dict)
+                    ) + "\n\n")
+                if finding.get('severity_note'):
+                    md.append(f"**Severity note:** {finding['severity_note']}\n\n")
                 md.append(f"**Fix:** {finding['recommendation']}\n\n")
 
     # Recommendations — prioritized, and rendered because the producer
@@ -335,6 +348,7 @@ def render_review_body(data: Dict) -> str:
     # Markdown before this: add_recommendation() wrote them to the JSON
     # and nothing ever read them back out.
     recommendations = data.get('recommendations')
+    invalidated_recommendations = data.get('invalidated_recommendations')
     if isinstance(recommendations, dict):
         # The three known priorities render first and in their meaningful
         # order; anything else the producer wrote renders after, labelled
@@ -353,11 +367,20 @@ def render_review_body(data: Dict) -> str:
             groups.append(f"**{priority.title()}:**\n\n")
             groups.extend(f"- {entry}\n" for entry in entries)
             groups.append("\n")
-        # The header is emitted only once something will actually appear
-        # beneath it.
         if groups:
             md.append("## Recommendations\n\n")
             md.extend(groups)
+            if data.get('applied_critic_adjustments'):
+                md.append(
+                    "*Post-critic recommendations, installed after the critic "
+                    "adjustments applied.*\n\n"
+                )
+        elif invalidated_recommendations:
+            md.append("## Recommendations\n\n")
+            md.append(
+                "No current recommendations: the reconciler's were invalidated "
+                "by critic revision and not replaced; see the findings.\n\n"
+            )
 
     checks = data.get('checks')
     if checks:
@@ -375,6 +398,8 @@ def render_review_body(data: Dict) -> str:
                 + ", ".join(check['source_reviewers'])
                 + "\n"
             )
+            if check.get("verifies"):
+                md.append("  - Settles: " + ", ".join(check["verifies"]) + "\n")
         md.append("\n")
 
     removed_checks = data.get('checks_removed_by_critic')
@@ -394,13 +419,63 @@ def render_review_body(data: Dict) -> str:
             )
         md.append("\n")
 
+    # What the reconciliator read and did not carry forward, with the
+    # reason and evidence it recorded. This is the evidence trail the
+    # decision critic tests: a drop whose evidence does not hold is a
+    # finding the review lost.
+    dropped_findings = data.get('dropped_findings')
+    dropped_checks = data.get('dropped_checks')
+    dropped_findings = dropped_findings if isinstance(dropped_findings, list) else []
+    dropped_checks = dropped_checks if isinstance(dropped_checks, list) else []
+    if dropped_findings or dropped_checks:
+        md.append("## Dropped by the Reconciliator\n\n")
+        md.append(
+            "Source findings and checks the reconciliator read and did not "
+            "carry forward, with the reason and evidence it recorded.\n\n"
+        )
+        for drop in dropped_findings:
+            if not isinstance(drop, dict):
+                continue
+            detail = drop.get('evidence') or drop.get('scope_status') or "no evidence recorded"
+            md.append(
+                f"- Finding {drop.get('reviewer')} {drop.get('id')} — "
+                f"{drop.get('reason')}: {detail}\n"
+            )
+        for drop in dropped_checks:
+            if not isinstance(drop, dict):
+                continue
+            md.append(
+                f"- Check {drop.get('reviewer')} {drop.get('id')} — "
+                f"{drop.get('reason')}: {drop.get('evidence') or 'no evidence recorded'}\n"
+            )
+        md.append("\n")
+
+    # Claims the orchestrator registered before reconciliation, each one
+    # answered with evidence. Rendered as answered claims, never as facts.
+    notes = data.get('orchestrator_notes')
+    if isinstance(notes, list) and notes:
+        md.append("## Orchestrator Notes\n\n")
+        md.append(
+            "Claims the orchestrator registered before reconciliation, each "
+            "answered by the reconciliator with evidence.\n\n"
+        )
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            md.append(f"- **{note.get('id')}** — {note.get('note')}\n")
+            md.append(f"  - Outcome: {note.get('outcome')}\n")
+            md.append(f"  - Evidence: {note.get('evidence')}\n")
+            if note.get("verifies"):
+                md.append("  - Settles: " + ", ".join(note["verifies"]) + "\n")
+        md.append("\n")
+
     # What the critic took out. The ledger deliberately moves a removed
     # finding into `findings_removed_by_critic` rather than deleting it, so the
     # decision stays auditable; a reading copy that dropped the section
     # would hide exactly the record the JSON went out of its way to keep.
     removed = data.get('findings_removed_by_critic')
     if isinstance(removed, list) and removed:
-        md.append("## Removed by the Decision Critic\n\n")
+        md.append("## Findings Removed by the Decision Critic\n\n")
         for entry in removed:
             if not isinstance(entry, dict):
                 continue

@@ -49,6 +49,17 @@ def test_list_reports_both_hosts(tmp_path):
     assert names == {"wordpress", "woocommerce"}
 
 
+def test_list_prints_the_identity_slot_for_every_known_host(tmp_path):
+    result = _run_cli(
+        "--list",
+        env_extra={"HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "xdg")},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert [row["identity"] for row in payload["hosts"]] == [None, None]
+
+
 def test_verify_runs_without_error(tmp_path):
     result = _run_cli("--verify", env_extra={"HOME": str(tmp_path)})
     assert result.returncode == 0

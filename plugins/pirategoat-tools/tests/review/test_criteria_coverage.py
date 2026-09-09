@@ -591,6 +591,16 @@ CRITERIA_PROBES = {
             ["includes/class-checkout.php"],
             diff="+do_action( 'wc_after_checkout_processed', $order );",
         ),
+        probe(
+            "Changelog fragments under a `changelog/` directory, whose significance, type, and note must match the diff",
+            ["changelog/fix-stale-coupon-cache"],
+            diff=(
+                "+Significance: patch\n"
+                "+Type: fix\n"
+                "+\n"
+                "+Invalidate the coupon code lookup cache when a coupon is unpublished."
+            ),
+        ),
     ],
     "ecosystem-integration-reviewer": [
         probe(
@@ -1051,7 +1061,7 @@ class TestCriteriaProbesDispatch:
     )
     def test_probe_dispatches(self, agents, agent_name, idx, p):
         config = agents[agent_name]
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             agent_name,
             config,
             build_domain_counts(p["files"]),
@@ -1093,7 +1103,7 @@ class TestProbeNeutrality:
         if any(marker in crit for marker in self._TEXT_ORIENTED_MARKERS):
             pytest.skip("criterion is explicitly about commit/PR text")
         config = agents[agent_name]
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             agent_name,
             config,
             build_domain_counts(p["files"]),
@@ -1317,7 +1327,7 @@ class TestLanguageMatrix:
             f"matrix anchor criterion drifted for {agent_name}: {criterion!r}"
         )
         p = probe(criterion, [filepath], diff=diff)
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             agent_name,
             config,
             build_domain_counts(p["files"]),
@@ -1346,7 +1356,7 @@ class TestDetectorSilenceConservatism:
         }
 
     def test_c_signature_change_dispatches_clarity(self, agents):
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             "code-clarity-reviewer", agents["code-clarity-reviewer"],
             build_domain_counts(["src/parser.c"]),
             clean_files=["src/parser.c"],
@@ -1359,7 +1369,7 @@ class TestDetectorSilenceConservatism:
         assert status == "DISPATCH", reason
 
     def test_cpp_include_change_dispatches_dead_code(self, agents):
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             "dead-code-reviewer", agents["dead-code-reviewer"],
             build_domain_counts(["src/parser.cpp"]),
             clean_files=["src/parser.cpp"],
@@ -1372,7 +1382,7 @@ class TestDetectorSilenceConservatism:
         assert status == "DISPATCH", reason
 
     def test_representative_language_coverage_does_not_authorize_skip(self, agents):
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             "concurrency-reviewer", agents["concurrency-reviewer"],
             build_domain_counts(["src/utils/format.py"]),
             clean_files=["src/utils/format.py"],
@@ -1386,7 +1396,7 @@ class TestDetectorSilenceConservatism:
 
     def test_mixed_language_files_dispatch_conservatively(self, agents):
         files = ["src/utils/format.py", "src/native/parser.c"]
-        status, reason = decide_agent_dispatch(
+        status, reason, _signal = decide_agent_dispatch(
             "concurrency-reviewer", agents["concurrency-reviewer"],
             build_domain_counts(files),
             clean_files=files,
@@ -1413,7 +1423,7 @@ class TestDetectorSilenceConservatism:
             "triage_keywords": ["auth", "token"],
             "require_triage_keyword_match": True,
         }
-        status, reason = _mod.triage_conditional_agent(
+        status, reason, _signal = _mod.triage_conditional_agent(
             "synthetic-gated-reviewer", config,
             ["src/native/parser.c"],
             "tidy parser",

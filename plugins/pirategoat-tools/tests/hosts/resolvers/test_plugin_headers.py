@@ -6,6 +6,24 @@ from pathlib import Path
 from hosts.resolvers.plugin_headers import PluginHeadersResolver
 
 
+WC_HEADER = """<?php
+/**
+ * Plugin Name: WooCommerce
+ * Text Domain: woocommerce
+ * Requires at least: 7.0
+ */
+"""
+
+BETA_TESTER_HEADER = """<?php
+/**
+ * Plugin Name: WooCommerce Beta Tester
+ * Text Domain: woocommerce-beta-tester
+ * Requires at least: 5.8
+ * WC requires at least: 9.4
+ */
+"""
+
+
 def _write_plugin(repo: Path, name: str, headers: str) -> Path:
     full = repo / name
     full.write_text(textwrap.dedent(headers))
@@ -45,12 +63,10 @@ def test_plugin_with_requires_at_least_emits_wordpress_unresolved(tmp_path):
          */
     """)
     result = PluginHeadersResolver().resolve(str(repo))
-    names = [u["name"] for u in result.unresolved]
-    assert "wordpress" in names
-    wp = next(u for u in result.unresolved if u["name"] == "wordpress")
-    assert wp["version"] == "6.0"
-    assert wp["reason"] == "declared_in_plugin_headers"
-    assert wp["source"] == "plugin-headers"
+    assert result.unresolved == [{
+        "name": "wordpress", "version": "6.0",
+        "reason": "declared_in_plugin_headers", "source": "plugin-headers", "root": "",
+    }]
 
 
 def test_plugin_with_wc_requires_at_least_emits_woocommerce_unresolved(tmp_path):
@@ -64,10 +80,10 @@ def test_plugin_with_wc_requires_at_least_emits_woocommerce_unresolved(tmp_path)
          */
     """)
     result = PluginHeadersResolver().resolve(str(repo))
-    names = [u["name"] for u in result.unresolved]
-    assert "woocommerce" in names
-    wc = next(u for u in result.unresolved if u["name"] == "woocommerce")
-    assert wc["version"] == "7.6"
+    assert result.unresolved == [{
+        "name": "woocommerce", "version": "7.6",
+        "reason": "declared_in_plugin_headers", "source": "plugin-headers", "root": "",
+    }]
 
 
 def test_plugin_with_requires_plugins_emits_each_slug(tmp_path):
@@ -82,12 +98,16 @@ def test_plugin_with_requires_plugins_emits_each_slug(tmp_path):
          */
     """)
     result = PluginHeadersResolver().resolve(str(repo))
-    names = sorted(u["name"] for u in result.unresolved)
-    assert names == ["jetpack", "woocommerce"]
-    wc = next(u for u in result.unresolved if u["name"] == "woocommerce")
-    jp = next(u for u in result.unresolved if u["name"] == "jetpack")
-    assert wc["fulfillable"] is True  # in _FULFILLABLE_PLUGIN_SLUGS
-    assert jp["fulfillable"] is False
+    assert result.unresolved == [
+        {
+            "name": "woocommerce", "reason": "declared_in_plugin_headers",
+            "source": "plugin-headers", "fulfillable": True, "root": "",
+        },
+        {
+            "name": "jetpack", "reason": "declared_in_plugin_headers",
+            "source": "plugin-headers", "fulfillable": False, "root": "",
+        },
+    ]
 
 
 def test_woocommerce_dedupes_across_wc_header_and_requires_plugins(tmp_path):
@@ -105,8 +125,10 @@ def test_woocommerce_dedupes_across_wc_header_and_requires_plugins(tmp_path):
     """)
     result = PluginHeadersResolver().resolve(str(repo))
     wc_entries = [u for u in result.unresolved if u["name"] == "woocommerce"]
-    assert len(wc_entries) == 1
-    assert wc_entries[0]["version"] == "7.6"  # the version-bearing one wins
+    assert wc_entries == [{
+        "name": "woocommerce", "version": "7.6",
+        "reason": "declared_in_plugin_headers", "source": "plugin-headers", "root": "",
+    }]
 
 
 def test_woopayments_style_full_header_block(tmp_path):
@@ -132,7 +154,7 @@ def test_woopayments_style_full_header_block(tmp_path):
     result = PluginHeadersResolver().resolve(str(repo))
     names = sorted(u["name"] for u in result.unresolved)
     assert names == ["woocommerce", "wordpress"]
-    assert result.notes.get("detected") == "plugin"
+    assert result.notes == {"detected": [{"root": "", "kind": "plugin"}]}
 
 
 def test_first_php_file_with_plugin_name_wins(tmp_path):
@@ -152,8 +174,10 @@ def test_first_php_file_with_plugin_name_wins(tmp_path):
          */
     """)
     result = PluginHeadersResolver().resolve(str(repo))
-    names = [u["name"] for u in result.unresolved]
-    assert "wordpress" in names
+    assert result.unresolved == [{
+        "name": "wordpress", "version": "6.0",
+        "reason": "declared_in_plugin_headers", "source": "plugin-headers", "root": "",
+    }]
 
 
 def test_theme_with_requires_at_least_emits_wordpress_unresolved(tmp_path):
@@ -167,9 +191,11 @@ def test_theme_with_requires_at_least_emits_wordpress_unresolved(tmp_path):
         */
     """))
     result = PluginHeadersResolver().resolve(str(repo))
-    names = [u["name"] for u in result.unresolved]
-    assert "wordpress" in names
-    assert result.notes.get("detected") == "theme"
+    assert result.unresolved == [{
+        "name": "wordpress", "version": "6.0",
+        "reason": "declared_in_plugin_headers", "source": "plugin-headers", "root": "",
+    }]
+    assert result.notes == {"detected": [{"root": "", "kind": "theme"}]}
 
 
 def test_theme_without_theme_name_header_ignored(tmp_path):
@@ -186,3 +212,78 @@ def test_unreadable_repo_returns_empty(tmp_path):
     result = PluginHeadersResolver().resolve(str(tmp_path / "does-not-exist"))
     assert result.entries == []
     assert result.unresolved == []
+
+
+def test_a_monorepo_s_plugin_roots_are_read_two_levels_down(tmp_path):
+    """The WooCommerce monorepo layout as measured on 2026-09-05."""
+    repo = tmp_path / "woocommerce-develop"
+    (repo / "plugins" / "woocommerce").mkdir(parents=True)
+    (repo / "plugins" / "woocommerce-beta-tester").mkdir(parents=True)
+    (repo / "plugins" / "woocommerce" / "woocommerce.php").write_text(WC_HEADER)
+    (repo / "plugins" / "woocommerce-beta-tester" / "woocommerce-beta-tester.php").write_text(BETA_TESTER_HEADER)
+    (repo / "package.json").write_text("{}")
+
+    result = PluginHeadersResolver().resolve(str(repo))
+
+    assert result.entries == []
+    assert result.unresolved == [
+        {"name": "wordpress", "version": "7.0", "reason": "declared_in_plugin_headers",
+         "source": "plugin-headers", "root": "plugins/woocommerce"},
+        {"name": "wordpress", "version": "5.8", "reason": "declared_in_plugin_headers",
+         "source": "plugin-headers", "root": "plugins/woocommerce-beta-tester"},
+        {"name": "woocommerce", "version": "9.4", "reason": "declared_in_plugin_headers",
+         "source": "plugin-headers", "root": "plugins/woocommerce-beta-tester"},
+    ]
+    assert result.notes == {
+        "detected": [
+            {"root": "plugins/woocommerce", "kind": "plugin"},
+            {"root": "plugins/woocommerce-beta-tester", "kind": "plugin"},
+        ],
+        "provides": ["woocommerce"],
+    }
+
+
+def test_provides_falls_back_to_the_main_file_name_without_a_text_domain(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_plugin(repo, "woocommerce.php", """\
+        <?php
+        /**
+         * Plugin Name: WooCommerce
+         * Requires at least: 7.0
+         */
+    """)
+    result = PluginHeadersResolver().resolve(str(repo))
+    assert result.notes["provides"] == ["woocommerce"]
+    assert result.unresolved[0]["root"] == ""
+
+
+def test_a_plugin_that_is_not_an_ecosystem_host_provides_nothing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_plugin(repo, "woocommerce-payments.php", """\
+        <?php
+        /**
+         * Plugin Name: WooPayments
+         * Text Domain: woocommerce-payments
+         * Requires at least: 6.0
+         */
+    """)
+    result = PluginHeadersResolver().resolve(str(repo))
+    assert "provides" not in result.notes
+    assert result.notes["detected"] == [{"root": "", "kind": "plugin"}]
+
+
+def test_a_configured_root_is_read(tmp_path):
+    import json
+    repo = tmp_path / "jetpack"
+    plugin = repo / "projects" / "plugins" / "jetpack"
+    plugin.mkdir(parents=True)
+    (plugin / "jetpack.php").write_text("<?php\n/**\n * Plugin Name: Jetpack\n * Requires at least: 6.9\n */\n")
+    (repo / ".pirategoat").mkdir()
+    (repo / ".pirategoat" / "config.json").write_text(json.dumps({"hosts": {"roots": ["projects/plugins/jetpack"]}}))
+    result = PluginHeadersResolver().resolve(str(repo))
+    assert result.unresolved == [{
+        "name": "wordpress", "version": "6.9", "reason": "declared_in_plugin_headers",
+        "source": "plugin-headers", "root": "projects/plugins/jetpack",
+    }]

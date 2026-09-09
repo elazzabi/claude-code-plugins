@@ -1,0 +1,87 @@
+{
+  "pr_id": "68258",
+  "reviewer": "code",
+  "timestamp": "2026-09-04T09:49:10.081075",
+  "plugin_version": "1.116.0",
+  "schema": 2,
+  "verdict": "approve",
+  "summary": {
+    "total_findings": 0,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 227828,
+    "confidence_score": 0.88,
+    "next_finding_number": 1,
+    "next_check_number": 6
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 2,
+  "reviewed_file_count": 2,
+  "in_scope_review_file_count": 2
+}

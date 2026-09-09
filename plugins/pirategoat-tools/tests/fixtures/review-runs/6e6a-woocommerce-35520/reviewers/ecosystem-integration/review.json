@@ -1,0 +1,145 @@
+{
+  "pr_id": "66900",
+  "reviewer": "ecosystem-integration",
+  "timestamp": "2026-09-04T10:51:36.264912",
+  "plugin_version": "1.116.0",
+  "schema": 2,
+  "verdict": "approve",
+  "summary": {
+    "total_findings": 0,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    },
+    {
+      "id": "c6",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "ecosystem-integration"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 317229,
+    "confidence_score": 0.85,
+    "next_finding_number": 1,
+    "next_check_number": 7
+  },
+  "review_claimable_files": [
+    "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Services/DriverAvailabilityServiceTest.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-webhooks-controller-tests.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestControllerTest.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/customers.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-taxes-controller-tests.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-sales.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-zones.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-methods.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-top-sellers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/coupon/data-store.php",
+    "plugins/woocommerce/tests/php/src/Internal/Admin/Settings/SettingsUISchemaTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/PushNotificationsTest.php",
+    "plugins/woocommerce/tests/php/includes/shortcodes/class-wc-shortcode-checkout-test.php",
+    "plugins/woocommerce/tests/e2e/test-plugins/settings-ui-component-registration/settings-ui-component-registration.php",
+    "packages/js/components/src/advanced-filters/number-filter.tsx",
+    "packages/js/components/src/advanced-filters/search-filter.tsx",
+    "packages/js/components/src/advanced-filters/stories/advanced-filters.story.tsx",
+    "packages/js/components/src/advanced-filters/utils.ts",
+    "packages/js/components/src/advanced-filters/test/advanced-filters.test.tsx",
+    "packages/js/components/src/advanced-filters/test/search-filter.test.tsx",
+    "packages/js/components/src/advanced-filters/test/utils.tsx"
+  ],
+  "reviewed_file_claims": [
+    "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php"
+  ],
+  "unclaimed_review_files": [
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Services/DriverAvailabilityServiceTest.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-webhooks-controller-tests.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestControllerTest.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/customers.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-taxes-controller-tests.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-sales.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-zones.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-methods.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-top-sellers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/coupon/data-store.php",
+    "plugins/woocommerce/tests/php/src/Internal/Admin/Settings/SettingsUISchemaTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/PushNotificationsTest.php",
+    "plugins/woocommerce/tests/php/includes/shortcodes/class-wc-shortcode-checkout-test.php",
+    "plugins/woocommerce/tests/e2e/test-plugins/settings-ui-component-registration/settings-ui-component-registration.php",
+    "packages/js/components/src/advanced-filters/number-filter.tsx",
+    "packages/js/components/src/advanced-filters/search-filter.tsx",
+    "packages/js/components/src/advanced-filters/stories/advanced-filters.story.tsx",
+    "packages/js/components/src/advanced-filters/utils.ts",
+    "packages/js/components/src/advanced-filters/test/advanced-filters.test.tsx",
+    "packages/js/components/src/advanced-filters/test/search-filter.test.tsx",
+    "packages/js/components/src/advanced-filters/test/utils.tsx"
+  ],
+  "inline_diff_file_count": 28,
+  "reviewed_file_count": 29,
+  "in_scope_review_file_count": 51
+}

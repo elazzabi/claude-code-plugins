@@ -18,15 +18,50 @@ import sys
 # Shell helpers
 # ---------------------------------------------------------------------------
 
-def _run_cmd(cmd, cwd=None):
-    """Run a shell command and return stdout, or None on failure."""
+# `gh pr checkout` fetches the PR head; on a monorepo that alone can pass
+# the 30 s the local git calls get.
+CHECKOUT_TIMEOUT_SECONDS = 300
+# What the pipeline allows this whole script: the checkout plus the git
+# calls around it (dirty check, stash, branch). The pipeline must never
+# time out first, or the checkout keeps changing the tree after the
+# recovery metadata (original branch, stash ref) was lost.
+SETUP_TIMEOUT_SECONDS = CHECKOUT_TIMEOUT_SECONDS + 60
+_GIT_TIMEOUT_SECONDS = 30
+
+
+def _run(cmd, timeout):
+    """The one subprocess seam. Raises what subprocess raises."""
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _run_cmd(cmd):
+    """Run a command and return stdout, or None on failure."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=30)
+        r = _run(cmd, _GIT_TIMEOUT_SECONDS)
         if r.returncode == 0:
             return r.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return None
+
+
+def _checkout_failure(gh_cmd, pr_number):
+    """Run the checkout; return None on success, else the reason.
+
+    The reason carries gh's last stderr line and the exit status (or the
+    timeout), because the step-2 briefing repeats it verbatim and the
+    orchestrator acts on it; a bare "failed" invites a guess.
+    """
+    try:
+        r = _run([gh_cmd, "pr", "checkout", str(pr_number)], CHECKOUT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return f"timed out after {CHECKOUT_TIMEOUT_SECONDS}s"
+    except FileNotFoundError:
+        return f"{gh_cmd} is not installed"
+    if r.returncode == 0:
+        return None
+    lines = [line.strip() for line in (r.stderr or "").splitlines() if line.strip()]
+    return f"{lines[-1]} (exit {r.returncode})" if lines else f"exit {r.returncode}"
 
 
 def resolve_gh_cmd():
@@ -85,11 +120,11 @@ def setup_workspace(pr_number, gh_cmd="gh"):
                     result["stash_ref"] = first_line[:colon_idx]
 
     # 4. Check out the PR branch
-    checkout = _run_cmd([gh_cmd, "pr", "checkout", str(pr_number)])
-    if checkout is not None:
+    reason = _checkout_failure(gh_cmd, pr_number)
+    if reason is None:
         result["checkout_ok"] = True
     else:
-        result["error"] = f"Failed to checkout PR #{pr_number}"
+        result["error"] = f"Failed to checkout PR #{pr_number}: {reason}"
 
     return result
 

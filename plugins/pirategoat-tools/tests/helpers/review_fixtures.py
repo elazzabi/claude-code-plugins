@@ -6,8 +6,43 @@ from pathlib import Path
 import pytest
 
 from review.agent.review_assignment import ASSIGNMENT_SCHEMA
+from review.reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
 from review.reviewer_lifecycle import review_paths
+from review.run_paths import artifact_path
 from review.verdict_rules import derive_review_state
+
+
+def artifact_file(output_dir, key):
+    """The registry-owned path of one run artifact, its directory created."""
+    path = artifact_path(str(output_dir), key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_artifact(output_dir, key, payload):
+    """Write one run artifact as JSON; returns its path."""
+    path = artifact_file(output_dir, key)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def write_reconciliation_context(
+    output_dir, reviews_by_agent, *, schema=RECONCILIATION_CONTEXT_SCHEMA,
+    dispatched=None, missing=None, banner=None, notes=(),
+):
+    """Write the reconciliation context the save gate, the notes CLI and
+    the ledger builder read; returns its path."""
+    context = {
+        "schema": schema,
+        "reviews_by_agent": reviews_by_agent,
+        "missing_agents": missing,
+        "host_context_banner": banner,
+        "prefiltered_out_of_scope": {"count": 0, "by_agent": {}},
+        "orchestrator_notes": [dict(note) for note in notes],
+    }
+    if dispatched is not None:
+        context["dispatched_agents"] = dispatched
+    return write_artifact(output_dir, "reconciliation_context", context)
 
 
 def canonical_review_document(

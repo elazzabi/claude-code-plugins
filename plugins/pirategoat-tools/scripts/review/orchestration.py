@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,14 +19,20 @@ try:
         _host,
     )
     from .dispatch_status import (
+        ORPHANED_FILES_KEY,
+        DISPATCH_OVERRIDE,
         DISPATCHED_STATUSES,
+        OVERRIDE_REASON_KEY,
+        PLANNER_STATUS_KEY,
+        SKIPPED_OVERRIDE,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from .dependency_refresh import (
         load_dependency_refresh_report,
         observe_tracked_worktree,
     )
+    from .change_purpose import checks_settling, ledger_citations, undeclared_citations
     from . import agents_status
     from . import atomic_io
     from .atomic_io import atomic_write_json, atomic_write_text
@@ -47,6 +54,7 @@ try:
         render_review_body,
     )
     from .verdict_rules import publish_verdict
+    from .workspace_setup import SETUP_TIMEOUT_SECONDS
 except ImportError:
     _scripts_parent = str(Path(__file__).resolve().parent.parent)
     if _scripts_parent not in sys.path:
@@ -60,14 +68,20 @@ except ImportError:
         _host,
     )
     from review.dispatch_status import (
+        ORPHANED_FILES_KEY,
+        DISPATCH_OVERRIDE,
         DISPATCHED_STATUSES,
+        OVERRIDE_REASON_KEY,
+        PLANNER_STATUS_KEY,
+        SKIPPED_OVERRIDE,
         SKIPPED_STATUSES,
-        validate_dispatch_plan_agents,
+        load_dispatch_plan,
     )
     from review.dependency_refresh import (
         load_dependency_refresh_report,
         observe_tracked_worktree,
     )
+    from review.change_purpose import checks_settling, ledger_citations, undeclared_citations
     from review import agents_status
     from review import atomic_io
     from review.atomic_io import atomic_write_json, atomic_write_text
@@ -89,6 +103,7 @@ except ImportError:
         render_review_body,
     )
     from review.verdict_rules import publish_verdict
+    from review.workspace_setup import SETUP_TIMEOUT_SECONDS
 
 from git_paths import decode_git_c_quoted_path
 
@@ -164,16 +179,26 @@ def _preserve_initial_dispatch_plan(output_dir, plan):
             pass
 
 
-def _load_dispatch_plan(plan_path):
-    """Load one dispatch plan and validate its agent decisions."""
-    with open(plan_path) as plan_file:
-        plan = json.load(plan_file)
-    if not isinstance(plan, dict):
-        raise ValueError(
-            f"Dispatch plan at {plan_path} must be a JSON object, got {plan!r}"
-        )
-    validate_dispatch_plan_agents(plan.get("agents"))
-    return plan
+def _dispatch_adjustments(plan):
+    """The orchestrator's overrides in the final plan, each beside the
+    planner's status `dispatch_adjust.py` stamped when it overrode it, for
+    the step-6 briefing to repeat."""
+    return [
+        {
+            "name": a["name"],
+            "status": a.get("status"),
+            OVERRIDE_REASON_KEY: a.get(OVERRIDE_REASON_KEY),
+            PLANNER_STATUS_KEY: a.get(PLANNER_STATUS_KEY),
+            # The changed files a skip left with no reviewer; None when
+            # dispatch_adjust.py could not measure them.
+            ORPHANED_FILES_KEY: (
+                list(a[ORPHANED_FILES_KEY])
+                if isinstance(a.get(ORPHANED_FILES_KEY), list) else None
+            ),
+        }
+        for a in plan.get("agents", [])
+        if a.get("status") in (DISPATCH_OVERRIDE, SKIPPED_OVERRIDE)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -319,11 +344,22 @@ def _render_record_body(findings: dict) -> str:
     return strip_severity_floor_markers(render_review_body(findings))
 
 
-def _render_run_notes(state: dict) -> str:
-    """What the run did to itself, in two lines the ledger cannot carry.
+def _host_summary_phrase(entry):
+    """One already-projected runtime host for the durable record."""
+    return (
+        f"{entry.get('name')} via {entry.get('source')} "
+        f"({manifest_sections.host_identity_phrase(entry)})"
+    )
 
-    Both facts already live in pipeline state; nothing is re-derived from
-    the filesystem here. An absent fact says so — "not requested" and "not
+
+def _render_run_notes(state: dict, hosts) -> str:
+    """The run's own measurements and actions, which the ledger cannot carry.
+
+    These facts live in pipeline state, except the hosts: `hosts` is the
+    projection of the run's review-context host manifest, the same read
+    bootstrap and telemetry make, so a step-3 handoff that re-resolves
+    hosts after a dependency refresh is reflected here without a copy in
+    state to keep in sync. An absent fact says so — "not requested" and "not
     recorded" are different from a measured clean result, and none of the
     three may be reported as either of the others.
     """
@@ -367,6 +403,25 @@ def _render_run_notes(state: dict) -> str:
     else:
         lines.append("- Dispatch: no plan summary recorded for this run.")
 
+    if not isinstance(hosts, dict):
+        lines.append("- Host context: not recorded.")
+    else:
+        runtime = [
+            entry for entry in hosts.get("resolved") or []
+            if isinstance(entry, dict) and entry.get("kind") == "runtime-host"
+        ]
+        if runtime:
+            lines.append("- Host context: " + "; ".join(_host_summary_phrase(e) for e in runtime) + ".")
+        else:
+            lines.append("- Host context: no runtime host resolved.")
+        unresolved = hosts.get("unresolved") or []
+        if unresolved:
+            lines.append(
+                "- Unresolved hosts: "
+                + ", ".join(f"{u.get('name')} ({u.get('reason', 'unknown')})" for u in unresolved)
+                + "."
+            )
+
     agents = state.get("agents")
     discarded_drafts = (
         agents.get("discarded_drafts") if isinstance(agents, dict) else None
@@ -383,6 +438,11 @@ def _render_run_notes(state: dict) -> str:
         for warning in warnings:
             lines.append(f"- ⚠ Dispatch warning: {warning}")
 
+    lines.append(
+        "- Reconciliation verification: "
+        + manifest_sections.describe_reconciliation_verification(state)
+    )
+
     return "\n".join(lines)
 
 
@@ -395,7 +455,7 @@ def _tri_state(value) -> str:
     return "unknown"
 
 
-def _render_record_verdict_line(findings: dict) -> str:
+def _render_record_verdict_line(findings: dict, state: dict) -> str:
     """The record's closing verdict, stated at the layer that computed it.
 
     The ledger verdict is the only one derived from findings. The published
@@ -409,13 +469,68 @@ def _render_record_verdict_line(findings: dict) -> str:
     gone: they described states the reader had already rejected.
     """
     ledger = findings["verdict"]
-    return (
+    line = (
         f"**Verdict — from the findings ledger: `{ledger}` "
         f"({publish_verdict(ledger)} at the published layer).** A critic "
         "ESCALATE overrides the published verdict to COMMENT at finalize; "
         "this line reports the ledger, the only verdict actually computed "
         "from findings."
     )
+    verification = state.get("reconciliation_verification")
+    if isinstance(verification, dict) and verification.get("status") == "unverified":
+        line += (
+            " Reconciliation is UNVERIFIED: no repository read by the "
+            "reconciliator was observed (the read detector is not "
+            "exhaustive), so the verified concerns above are not evidenced "
+            "by its transcript and rest on the reviewers' own claims and "
+            "the source snippets."
+        )
+    return line
+
+
+def _table_cell(text):
+    return " ".join(str(text or "").split()).replace("|", "\\|")
+
+
+def _render_verify_items(state, findings):
+    """The change purpose's Verify items and the ledger checks that settle
+    each, or "" when the purpose declared none. Derived from the ledger,
+    not the reconciliation context: this is what survived reconciliation
+    and adjudication, which is what the critic is stress-testing."""
+    items = (state.get("change_purpose_items") or {}).get("verify") or []
+    if not items:
+        return ""
+    labelled = ledger_citations(findings)
+    settled = checks_settling(items, labelled)
+    lines = [
+        "## Verify items", "",
+        "*The claims the orchestrator said the verdict rests on, and the "
+        "surviving checks and confirmed orchestrator notes that cite each. "
+        "An item nobody settled is a claim the review rests on unverified.*", "",
+        "| Item | Claim | Source | Settled by |",
+        "|---|---|---|---|",
+    ]
+    for item in items:
+        cites = settled.get(item["id"]) or []
+        settled_by = (
+            "; ".join(f"`{c['id']}` ({c['reviewer']})" for c in cites)
+            if cites else "no surviving check or confirmed note — unverified"
+        )
+        marker = " (carried over)" if item.get("carried_over") else ""
+        lines.append(
+            f"| {item['id']}{marker} | {_table_cell(item.get('text'))} | "
+            f"{_table_cell(item.get('source') or 'no source')} | {settled_by} |"
+        )
+    # A citation of an id the purpose never declared is the trace of a
+    # renumbering after dispatch or a wrong-tier id; dropping it would
+    # leave the real item reading as unverified with nothing to explain.
+    for citation in undeclared_citations(items, labelled):
+        lines.append("")
+        lines.append(
+            f"- `{citation['id']}` ({citation['reviewer']}) cites "
+            f"{citation['cites']}, which the change purpose does not declare."
+        )
+    return "\n".join(lines)
 
 
 def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
@@ -470,8 +585,13 @@ def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
             "",
             _render_record_body(findings).rstrip("\n"),
             "",
-            _render_run_notes(state),
+            _render_run_notes(
+                state, manifest_sections.build_host_context_manifest(output_dir)
+            ),
         ]
+        verify_items = _render_verify_items(state, findings)
+        if verify_items:
+            sections.extend(["", verify_items])
         file_review = _render_file_review_section(
             state.get("file_review")
         )
@@ -481,7 +601,7 @@ def assemble_review_record(output_dir: str, state: dict, read) -> tuple:
             "",
             "---",
             "",
-            _render_record_verdict_line(findings),
+            _render_record_verdict_line(findings, state),
             "",
         ])
         atomic_write_text(
@@ -536,7 +656,7 @@ def _orchestrate_step_2(mode, config, state, context, output_dir):
             sys.executable, str(SCRIPTS_DIR / "workspace_setup.py"),
             "--pr-number", str(pr_number),
         ]
-        stdout, ok = _run_subprocess(setup_cmd, timeout=60)
+        stdout, ok = _run_subprocess(setup_cmd, timeout=SETUP_TIMEOUT_SECONDS)
         if ok and stdout:
             try:
                 ws_result = json.loads(stdout)
@@ -708,6 +828,117 @@ def _usage_summary(output_dir):
         # still partial is the other story — damaged transcript evidence —
         # and a consumer cannot tell them apart without this.
         "window_closed": section["window"]["closed"],
+    }
+
+
+# A repository path as prose names one: at least one directory segment,
+# including scoped segments, and a filename with one or more extensions.
+# The boundaries prevent starting inside a URL or another path-shaped token;
+# an optional :line suffix belongs to the prose reference, not the path.
+# This is a token match, not a judgement: it finds paths the critic wrote,
+# and the briefing says only that they are not in the diff.
+_PROSE_PATH_RE = re.compile(
+    r"(?<![\w@./:-])"
+    r"((?:@?[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]+)"
+    r"(?::\d+)?"
+    r"(?![\w@/-]|:|\.[\w-])"
+)
+_PROSE_URL_RE = re.compile(
+    r'''https?://[^\s<>{}\[\]()`"'—–]+'''
+)
+
+
+def _critic_prose_paths_outside_diff(output_dir, changed_files):
+    """Paths the critic's findings prose names that the diff does not hold.
+
+    Run 6e6a's critic wrote a coverage sentence about files the review
+    never reached and the report repeated it. The pipeline cannot judge
+    prose, but it can list every path the prose names that is not in the
+    diff, so the report author knows which statements are not facts of
+    this review. None when the critic wrote no findings file.
+    """
+    path = artifact_path(output_dir, "critic_findings")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    changed = set(changed_files)
+    url_spans = [match.span() for match in _PROSE_URL_RE.finditer(text)]
+    return sorted(
+        {
+            match.group(1)
+            for match in _PROSE_PATH_RE.finditer(text)
+            if _is_prose_path(match.group(1))
+            and not _names_changed_file(match.group(1), changed)
+            and not any(
+                match.start(1) < url_end and url_start < match.end(1)
+                for url_start, url_end in url_spans
+            )
+        }
+    )
+
+
+def _is_prose_path(path):
+    """A path-shaped token that can name a repository file.
+
+    A relative prefix (`./`, `../`) is not a repository location, and a
+    first segment with no letter (`3/4.5`) is a ratio, not a directory.
+    """
+    first = path.split("/", 1)[0]
+    return first not in (".", "..") and re.search(r"[A-Za-z]", first) is not None
+
+
+def _names_changed_file(path, changed):
+    """True when the prose path names a changed file, in full or abbreviated.
+
+    Critics abbreviate: `includes/class-wc-order.php` names
+    `plugins/woocommerce/includes/class-wc-order.php` in the diff. An
+    exact-membership test would report that file as outside the diff,
+    which is a false fact, so a prose path counts as in-diff when it is
+    a changed file or a trailing-segment suffix of one.
+    """
+    if path in changed:
+        return True
+    suffix = "/" + path
+    return any(item.endswith(suffix) for item in changed)
+
+
+def _reconciliation_verification(output_dir, read):
+    """Compare claimed verified concerns with measured repository reads.
+
+    Measure the reconciliator's own transcript through stdout mode so step 9
+    cannot replace or reproject the durable usage snapshot. Missing evidence
+    stays unmeasured; measured zero reads is unverified, never a save gate.
+    """
+    verified = None
+    if read.status == critic_adjustments.FINDINGS_READ_OK:
+        verified = manifest_sections.safe_nonnegative_int(
+            read.findings.get("meta", {}).get("reconciliation", {}).get("verified_concern_count")
+        )
+    stdout, ok = _run_subprocess(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR.parent / "analysis" / "usage_snapshot.py"),
+            "--output-dir", str(output_dir),
+            "--stdout",
+        ],
+        timeout=USAGE_SNAPSHOT_TIMEOUT,
+    )
+    reads = None
+    if ok and stdout:
+        try:
+            snapshot = json.loads(stdout)
+        except json.JSONDecodeError:
+            snapshot = None
+        rows = snapshot.get("subagent_usage") if isinstance(snapshot, dict) else None
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("agent") == synthesis_lifecycle.RECONCILIATOR:
+                reads = manifest_sections.safe_nonnegative_int(row.get("repository_reads"))
+    status = "unmeasured" if reads is None else "unverified" if reads == 0 else "verified"
+    return {
+        "verified_concern_count": verified,
+        "repository_reads": reads,
+        "status": status,
     }
 
 
@@ -894,6 +1125,21 @@ def _check_worktree_hygiene(output_dir):
     return result
 
 
+def _previous_change_purpose(config, output_dir):
+    """The previous run's change-purpose path from the incremental baseline,
+    or None when there is no baseline, no recorded run, or no such file."""
+    try:
+        with open(baseline_path(config, output_dir), encoding="utf-8") as handle:
+            baseline = json.load(handle)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    last_run_dir = baseline.get("last_run_dir") if isinstance(baseline, dict) else None
+    if not isinstance(last_run_dir, str) or not last_run_dir:
+        return None
+    path = artifact_path(last_run_dir, "change_purpose")
+    return str(path) if os.path.isfile(path) else None
+
+
 def _orchestrate_step_3(mode, config, state, context, output_dir):
     context_path = artifact_path(output_dir, "review_context")
 
@@ -934,6 +1180,11 @@ def _orchestrate_step_3(mode, config, state, context, output_dir):
     if config.get("refresh_dependencies"):
         state["dependency_refresh_precheck"] = _dependency_refresh_safety_state()
 
+    if mode == "incremental":
+        previous = _previous_change_purpose(config, output_dir)
+        if previous:
+            state["previous_change_purpose"] = previous
+
     # Baseline for the step-11 hygiene comparison. Taken at the end of
     # context gathering — the earliest point the run has a settled view of
     # the tree — so everything already there is recorded as the user's
@@ -946,6 +1197,7 @@ def _orchestrate_step_3(mode, config, state, context, output_dir):
 
 
 def _orchestrate_step_5(mode, config, state, context, output_dir):
+    state["change_purpose_items"] = manifest_sections.read_change_purpose(output_dir)
     if config.get("refresh_dependencies"):
         try:
             report = load_dependency_refresh_report(output_dir)
@@ -979,7 +1231,7 @@ def _orchestrate_step_5(mode, config, state, context, output_dir):
         plan_path = artifact_path(output_dir, "dispatch_plan")
         if os.path.isfile(plan_path):
             try:
-                plan = _load_dispatch_plan(plan_path)
+                plan = load_dispatch_plan(plan_path)
                 if ok:
                     _preserve_initial_dispatch_plan(output_dir, plan)
                 agents = plan["agents"]
@@ -1016,7 +1268,7 @@ def _orchestrate_step_6(mode, config, state, context, output_dir):
     plan_path = artifact_path(output_dir, "dispatch_plan")
     if os.path.isfile(plan_path):
         try:
-            plan = _load_dispatch_plan(plan_path)
+            plan = load_dispatch_plan(plan_path)
             dispatched = [
                 {
                     "name": a["name"],
@@ -1036,6 +1288,7 @@ def _orchestrate_step_6(mode, config, state, context, output_dir):
                 if a.get("status") in DISPATCHED_STATUSES
             ]
             state["dispatched_agents"] = dispatched
+            state["dispatch_adjustments"] = _dispatch_adjustments(plan)
             # Recompute dispatch_plan_summary from final plan (post-override)
             all_agents = plan["agents"]
             state["dispatch_plan_summary"] = {
@@ -1087,6 +1340,9 @@ def _orchestrate_step_7(mode, config, state, context, output_dir):
         "review_count": review_count + 1,
         "base_ref": base_ref,
         "git_range_used": git_range or f"{head_sha}..HEAD",
+        # Where this run's artifacts live, so the next incremental review
+        # can point the orchestrator at this change purpose (plan C, item 12e).
+        "last_run_dir": output_dir,
     }
     with open(review_baseline_path, "w") as f:
         json.dump(baseline, f, indent=2)
@@ -1224,6 +1480,7 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
                 state["change_purpose"] = f.read().strip()
         except OSError:
             pass
+    state["change_purpose_items"] = manifest_sections.read_change_purpose(output_dir)
 
     git = context.get("git", {})
     git_range = state.get("resolved_params", {}).get("git_range") or git.get("git_range", "")
@@ -1255,9 +1512,6 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
         "--git-range", git_range,
         "--changed-files", context.get("git", {}).get("changed_files_csv", ""),
     ]
-    banner = (context.get("host_context") or {}).get("banner")
-    if banner:
-        recon_ctx_cmd.extend(["--host-banner-json", json.dumps(banner)])
     cp = state.get("change_purpose", "")
     if cp:
         recon_ctx_cmd.extend(["--change-purpose", cp])
@@ -1293,6 +1547,39 @@ def _orchestrate_step_8(mode, config, state, context, output_dir):
     )
 
     return context
+
+
+def _load_plan_or_none(output_dir):
+    """The run's dispatch plan, or None when no valid plan exists — every
+    measurement taken from it is then unmeasured, not empty."""
+    try:
+        return load_dispatch_plan(artifact_path(output_dir, "dispatch_plan"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _plan_changed_files(plan):
+    """The plan's noise-filtered file list, or None when it has none."""
+    files = (plan or {}).get("changed_files")
+    if not isinstance(files, list):
+        return None
+    return [path for path in files if isinstance(path, str)]
+
+
+def _plan_override_orphans(plan):
+    """Every changed file an override skip left with no reviewer, mapped to
+    the skipped agents whose scope alone covered it, from what
+    `dispatch_adjust.py` stamped; None without a plan."""
+    if plan is None:
+        return None
+    orphans = {}
+    for agent in plan.get("agents", []):
+        if agent.get("status") != SKIPPED_OVERRIDE:
+            continue
+        for path in agent.get(ORPHANED_FILES_KEY) or []:
+            if isinstance(path, str):
+                orphans.setdefault(path, set()).add(agent["name"])
+    return {path: sorted(names) for path, names in sorted(orphans.items())}
 
 
 def _orchestrate_step_9(mode, config, state, context, output_dir):
@@ -1339,8 +1626,14 @@ def _orchestrate_step_9(mode, config, state, context, output_dir):
     # is — `unscoped_files` stays None rather than reading as a clean bill.
     changed_csv = context.get("git", {}).get("changed_files_csv", "")
     changed_files = [f.strip() for f in changed_csv.split(",") if f.strip()]
+    plan = _load_plan_or_none(output_dir)
     state["file_review"] = manifest_sections.aggregate_file_review(
-        output_dir, changed_files=changed_files
+        output_dir, changed_files=changed_files,
+        reviewable_files=_plan_changed_files(plan),
+        override_orphans=_plan_override_orphans(plan),
+    )
+    state["reconciliation_verification"] = _reconciliation_verification(
+        output_dir, read
     )
 
     # Assemble the record LAST, once the coverage populations are in state:
@@ -1751,6 +2044,12 @@ def _orchestrate_step_11(mode, config, state, context, output_dir):
 
     critic_verdict = state["critic_verdict"]
 
+    changed_csv = context.get("git", {}).get("changed_files_csv", "")
+    state["critic_prose_paths_outside_diff"] = _critic_prose_paths_outside_diff(
+        output_dir,
+        [f.strip() for f in changed_csv.split(",") if f.strip()],
+    )
+
     findings_path = artifact_path(output_dir, "review_findings_json")
     # The step's one read of the ledger, and therefore its one authority on
     # whether a ledger exists. Everything below asks this result, never the
@@ -2021,6 +2320,8 @@ def _orchestrate_step_11(mode, config, state, context, output_dir):
         # the critic's override, or from the fallback the degradation note
         # beside it already explains.
         "verdict_source": verdict_source,
+        # Step 9 owns this measurement; None when that step never ran.
+        "reconciliation_verification": state.get("reconciliation_verification"),
     }
     result_path = artifact_path(output_dir, "pipeline_result")
 

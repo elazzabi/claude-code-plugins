@@ -7,8 +7,8 @@ proposal-only fields through ``critic.py --save``, which calls
 :func:`write_critic_verdict` to publish the proposal beside a digest-bound
 verdict marker. **The proposal is never rewritten afterwards.** The
 orchestrator then submits only verified IDs, refuted IDs with reasons, and an
-optional revised assessment through :func:`adjudicate`, which takes the output
-lock once and makes exactly one ledger write: verified and unchecked entries
+optional revised assessment and recommendations through :func:`adjudicate`,
+which takes the output lock once and makes exactly one ledger write: verified and unchecked entries
 are applied with provenance, refuted entries are recorded with their reasons,
 and every entry's ``outcome`` lands in the findings ledger.
 
@@ -25,7 +25,6 @@ import json
 import os
 import re
 import sys
-import unicodedata
 import uuid
 from typing import Mapping
 
@@ -33,18 +32,28 @@ try:
     from . import atomic_io
     from .review_document import (
         CHECK_TEXT_FIELDS,
+        normalize_verifies,
+        OPTIONAL_CHECK_FIELDS,
+        RECOMMENDATION_PRIORITIES,
         REQUIRED_CHECK_FIELDS,
         REQUIRED_FINDING_FIELDS,
+        normalize_bounded_text,
         validate_finding_content_field,
         validate_ledger_ids,
         validate_review_content,
     )
     from .dispatch_status import AGENT_NAME_RE
     from .findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
         LEDGER_SCHEMA,
+        NOTE_ID_RE,
+        NOTE_OUTCOMES,
         RECONCILIATION_AGENT_LIST_FIELDS,
         RECONCILIATION_COUNT_FIELDS,
         RECONCILIATION_FIELDS,
+        SOURCE_ID_RE,
+        normalized_sources,
     )
     from .verdict_rules import (
         LEDGER_VERDICTS,
@@ -59,18 +68,28 @@ except ImportError:
     from review import atomic_io
     from review.review_document import (
         CHECK_TEXT_FIELDS,
+        normalize_verifies,
+        OPTIONAL_CHECK_FIELDS,
+        RECOMMENDATION_PRIORITIES,
         REQUIRED_CHECK_FIELDS,
         REQUIRED_FINDING_FIELDS,
+        normalize_bounded_text,
         validate_finding_content_field,
         validate_ledger_ids,
         validate_review_content,
     )
     from review.dispatch_status import AGENT_NAME_RE
     from review.findings_ledger import (
+        DROP_REASONS_CHECK,
+        DROP_REASONS_FINDING,
         LEDGER_SCHEMA,
+        NOTE_ID_RE,
+        NOTE_OUTCOMES,
         RECONCILIATION_AGENT_LIST_FIELDS,
         RECONCILIATION_COUNT_FIELDS,
         RECONCILIATION_FIELDS,
+        SOURCE_ID_RE,
+        normalized_sources,
     )
     from review.verdict_rules import (
         LEDGER_VERDICTS,
@@ -95,10 +114,6 @@ FINDING_PATCH_FIELDS = (
 CHECK_PATCH_FIELDS = CHECK_TEXT_FIELDS
 ADD_REQUIRED_FIELDS = ("severity", "title", "file", "description",
                        "recommendation")
-# Free-text ledger fields are bounded here because the ledger is their one
-# authority; the offline metrics sanitizer applies the same ceiling.
-MAX_LEDGER_TEXT_LENGTH = 4096
-
 # Script-derived per-entry outcomes from the orchestrator's exact adjudication
 # request. The request names only positive verified/refuted claims; every
 # committed ID it omits is derived as OUTCOME_NOT_CHECKED. The outcome is
@@ -118,6 +133,11 @@ OUTCOMES = (OUTCOME_VERIFIED, OUTCOME_REFUTED, OUTCOME_NOT_CHECKED)
 # seat: on apply it BECOMES the ledger's assessment, with the invalidation
 # record left intact beside it.
 REVISED_ASSESSMENT_KEY = "revised_assessment"
+
+# Recommendations are ledger-level prose the critic cannot address directly;
+# an applying batch withdraws them and the request may supply replacements.
+REVISED_RECOMMENDATIONS_KEY = "revised_recommendations"
+INVALIDATED_RECOMMENDATIONS_KEY = "invalidated_recommendations"
 
 ADJUSTMENTS_FILENAME = artifact_path("", "critic_adjustments").name
 FINDINGS_FILENAME = artifact_path("", "review_findings_json").name
@@ -176,6 +196,7 @@ _REQUEST_KEYS = frozenset({
     "verified",
     "refuted",
     REVISED_ASSESSMENT_KEY,
+    REVISED_RECOMMENDATIONS_KEY,
 })
 _REFUTED_REQUEST_KEYS = frozenset({"adjustment_id", "rejection_reason"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -336,19 +357,34 @@ def _validate_proposal_entry(entry, label, *, require_adjustment_id):
     field_problems = _validate_fields(fields, allowed_fields, label)
     problems.extend(field_problems)
     if not field_problems:
-        if action in ("promote", "demote") and set(fields) != {"severity"}:
+        if action in ("promote", "demote") and "severity" not in fields:
             problems.append(
-                f"{label}: {action} requires exactly the severity field"
+                f"{label}: {action} requires the severity field"
             )
         elif action == "rescope" and set(fields) != {"file", "line"}:
             problems.append(
                 f"{label}: rescope requires exactly the file and line fields"
             )
+        elif action == "correct" and "severity" in fields:
+            problems.append(
+                f"{label}: correct may not change severity; use promote or "
+                "demote with the required severity field"
+            )
         elif action == "correct" and not fields:
             problems.append(
                 f"{label}: correct requires at least one field"
             )
-        elif action == "add":
+        if (
+            action in ("promote", "demote", "correct")
+            and "file" in fields
+            and "line" not in fields
+        ):
+            problems.append(
+                f"{label}: a file change requires the line field as well "
+                "(null for a file-scoped finding), so a moved finding never "
+                "keeps a stale line"
+            )
+        if action == "add":
             missing = [key for key in ADD_REQUIRED_FIELDS if key not in fields]
             if missing:
                 problems.append(
@@ -579,8 +615,14 @@ def write_critic_verdict(output_dir, verdict, proposal):
     return digest
 
 
-def read_committed_proposal(output_dir):
-    """Return (verdict, proposal) only when the marker binds the proposal."""
+def read_verdict_marker(output_dir):
+    """The validated verdict marker on its own, or a raise.
+
+    The marker is a fact even when the proposal it binds is unreadable —
+    the evidence projection reports such a verdict beside `adjustments:
+    None` — so the marker has one reader, which `read_committed_proposal`
+    calls before it goes on to bind the proposal.
+    """
     marker = _read_json_object(
         artifact_path(output_dir, "critic_verdict"),
         CRITIC_VERDICT_FILENAME,
@@ -588,6 +630,12 @@ def read_committed_proposal(output_dir):
     problems = _validate_verdict_marker(marker)
     if problems:
         raise AdjustmentValidationError(problems)
+    return marker
+
+
+def read_committed_proposal(output_dir):
+    """Return (verdict, proposal) only when the marker binds the proposal."""
+    marker = read_verdict_marker(output_dir)
     proposal = _read_json_object(
         artifact_path(output_dir, "critic_adjustments"), ADJUSTMENTS_FILENAME
     )
@@ -649,13 +697,21 @@ _LEDGER_EXTENSION_FIELDS = frozenset({
     "checks_removed_by_critic",
     REJECTED_ADJUSTMENTS_KEY,
     INVALIDATED_ASSESSMENTS_KEY,
+    INVALIDATED_RECOMMENDATIONS_KEY,
+    "dropped_findings",
+    "dropped_checks",
+    "orchestrator_notes",
 })
 _BASE_FINDING_FIELDS = REQUIRED_FINDING_FIELDS
 _OPTIONAL_FINDING_FIELDS = frozenset({
     "severity_floor", "scope", "code_snippet", "references",
     "behavior_evidence", "source_cited", "channel", "critic_adjustment",
+    "sources", "severity_note",
 })
-_CHECK_FIELDS = REQUIRED_CHECK_FIELDS | {"critic_adjustment"}
+_CHECK_FIELDS = (
+    REQUIRED_CHECK_FIELDS | OPTIONAL_CHECK_FIELDS
+    | {"critic_adjustment", "sources"}
+)
 
 
 def _require_nonnegative_integer(value, label):
@@ -694,31 +750,6 @@ def _validate_agent_names(value, label, *, nullable=False):
         )
 
 
-def _validate_bounded_text(value, label):
-    """Non-empty prose bounded for the machine readers that carry it on.
-
-    The ledger is the authority on this text, so the bound lives here: the
-    reconciliation block flows verbatim into the telemetry manifest and from
-    there into offline metrics reports, whose sanitizer drops the whole block
-    rather than one oversized or control-character-bearing string.
-    """
-    if (
-        not isinstance(value, str)
-        or not value.strip()
-        or len(value) > MAX_LEDGER_TEXT_LENGTH
-        or "\x00" in value
-        or any(
-            character not in ("\n", "\t")
-            and unicodedata.category(character) in ("Cc", "Cf")
-            for character in value
-        )
-    ):
-        raise ValueError(
-            f"{label} must be non-empty text of at most "
-            f"{MAX_LEDGER_TEXT_LENGTH} characters with no control characters"
-        )
-
-
 def _validate_reconciliation(value):
     label = f"{FINDINGS_FILENAME}: meta.reconciliation"
     if not isinstance(value, dict) or set(value) != RECONCILIATION_FIELDS:
@@ -751,7 +782,7 @@ def _validate_reconciliation(value):
             raise ValueError(f"{entry} is malformed")
         if not _is_agent_name(agent["name"]):
             raise ValueError(f"{entry}.name must be a lowercase agent name")
-        _validate_bounded_text(agent["skip_reason"], f"{entry}.skip_reason")
+        normalize_bounded_text(agent["skip_reason"], f"{entry}.skip_reason")
         names.append(agent["name"])
     if len(names) != len(set(names)):
         raise ValueError(f"{label}.not_applicable_agents contains duplicates")
@@ -806,6 +837,91 @@ def _validate_critic_provenance(value, label, *, removed):
         raise ValueError(f"{label}: critic_adjustment provenance is malformed")
 
 
+def _checks_without_sources(checks):
+    """Checks as the review-document validators know them: `sources` is a
+    ledger extension the document shape does not carry."""
+    return [
+        {key: value for key, value in check.items() if key != "sources"}
+        if isinstance(check, dict) else check
+        for check in checks
+    ]
+
+
+def _validate_sources(value, label, *, with_severity):
+    """`sources` on a ledger finding or check, in the builder's grammar.
+
+    A finding's entries may carry the source `severity` findings_save.py
+    stamps from the context; a check's never do.
+    """
+    normalized_sources(value, label, allow_severity=with_severity)
+
+
+def _validate_dropped(
+    value, label, *, reasons, evidence_optional_for, stamped_fields=frozenset()
+):
+    """`stamped_fields` are the pipeline-stamped extras this collection
+    carries: findings_save.py stamps `scope_status` on a dropped finding
+    and nothing on a dropped check."""
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    seen = set()
+    allowed = {"reviewer", "id", "reason", "evidence"} | set(stamped_fields)
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if (
+            not isinstance(entry, dict)
+            or not {"reviewer", "id", "reason"} <= set(entry)
+            or not set(entry) <= allowed
+            or not isinstance(entry["reviewer"], str)
+            or not entry["reviewer"].strip()
+            or not isinstance(entry["id"], str)
+            or SOURCE_ID_RE.fullmatch(entry["id"]) is None
+            or entry["reason"] not in reasons
+        ):
+            raise ValueError(f"{entry_label} is malformed")
+        if "evidence" in entry or entry["reason"] not in evidence_optional_for:
+            normalize_bounded_text(entry.get("evidence"), f"{entry_label}.evidence")
+        if "scope_status" in entry and (
+            not isinstance(entry["scope_status"], str)
+            or not entry["scope_status"].strip()
+        ):
+            raise ValueError(f"{entry_label}.scope_status is malformed")
+        key = (entry["reviewer"], entry["id"])
+        if key in seen:
+            raise ValueError(f"{entry_label} repeats {key[0]}:{key[1]}")
+        seen.add(key)
+
+
+def _validate_orchestrator_notes(value):
+    label = f"{FINDINGS_FILENAME}: orchestrator_notes"
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    seen = set()
+    for index, entry in enumerate(value):
+        entry_label = f"{label}[{index}]"
+        if (
+            not isinstance(entry, dict)
+            or not {"id", "outcome", "evidence"} <= set(entry)
+            or not set(entry) <= {"id", "outcome", "evidence", "note", "verifies"}
+            or not isinstance(entry["id"], str)
+            or NOTE_ID_RE.fullmatch(entry["id"]) is None
+            or entry["outcome"] not in NOTE_OUTCOMES
+        ):
+            raise ValueError(f"{entry_label} is malformed")
+        normalize_bounded_text(entry["evidence"], f"{entry_label}.evidence")
+        if "verifies" in entry:
+            # The builder's grammar: a present citation is a non-empty list
+            # of distinct canonical ids on a confirmed note, nothing else.
+            cited = normalize_verifies(entry["verifies"], entry_label)
+            if cited != entry["verifies"] or entry["outcome"] != "confirmed":
+                raise ValueError(f"{entry_label}.verifies is malformed")
+        if "note" in entry:
+            normalize_bounded_text(entry["note"], f"{entry_label}.note")
+        if entry["id"] in seen:
+            raise ValueError(f"{entry_label} repeats {entry['id']}")
+        seen.add(entry["id"])
+
+
 def _validate_ledger_finding(finding, index, *, removed=False):
     label = (
         f"{FINDINGS_FILENAME}: "
@@ -821,6 +937,10 @@ def _validate_ledger_finding(finding, index, *, removed=False):
         raise ValueError(f"{label} line scope is not canonical")
     if finding.get("channel") == "blocking":
         raise ValueError(f"{label}.channel must omit the blocking default")
+    if "sources" in finding:
+        _validate_sources(finding["sources"], label, with_severity=True)
+    if "severity_note" in finding:
+        normalize_bounded_text(finding["severity_note"], f"{label}.severity_note")
     _validate_critic_provenance(
         finding.get("critic_adjustment"), label, removed=removed
     )
@@ -833,6 +953,8 @@ def _validate_ledger_check(check, index, *, removed=False):
     )
     if not isinstance(check, dict) or not set(check) <= _CHECK_FIELDS:
         raise ValueError(f"{label} has unexpected fields")
+    if "sources" in check:
+        _validate_sources(check["sources"], label, with_severity=False)
     _validate_critic_provenance(
         check.get("critic_adjustment"), label, removed=removed
     )
@@ -850,6 +972,34 @@ def _validate_invalidated_assessments(value, applied_ids):
             }
             or not isinstance(record.get("text"), str)
             or not record["text"].strip()
+        ):
+            raise ValueError(f"{label}[{index}] is malformed")
+        ids = record["invalidated_by_critic_adjustment_ids"]
+        _validate_unique_strings(ids, f"{label}[{index}] adjustment ids")
+        if not ids or not set(ids) <= applied_ids:
+            raise ValueError(f"{label}[{index}] cites unknown adjustments")
+
+
+def _validate_invalidated_recommendations(value, applied_ids):
+    label = f"{FINDINGS_FILENAME}: {INVALIDATED_RECOMMENDATIONS_KEY}"
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty list")
+    for index, record in enumerate(value):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {
+                "recommendations", "invalidated_by_critic_adjustment_ids",
+            }
+            or not isinstance(record["recommendations"], dict)
+            or not set(record["recommendations"]) <= set(RECOMMENDATION_PRIORITIES)
+            or any(
+                not isinstance(entries, list) or any(
+                    not isinstance(entry, str) or not entry.strip()
+                    for entry in entries
+                )
+                for entries in record["recommendations"].values()
+            )
+            or not any(record["recommendations"].values())
         ):
             raise ValueError(f"{label}[{index}] is malformed")
         ids = record["invalidated_by_critic_adjustment_ids"]
@@ -880,6 +1030,9 @@ def validate_findings_document(document):
         for field in _LEDGER_EXTENSION_FIELDS
         if field in base
     }
+    checks_in = base.get("checks")
+    if isinstance(checks_in, list):
+        base["checks"] = _checks_without_sources(checks_in)
     meta = base.get("meta")
     reconciliation = None
     if isinstance(meta, dict):
@@ -904,6 +1057,18 @@ def validate_findings_document(document):
     _validate_reconciliation(reconciliation)
     if "host_context_banner" in extensions:
         _validate_host_context_banner(extensions["host_context_banner"])
+    _validate_dropped(
+        extensions.get("dropped_findings", []),
+        f"{FINDINGS_FILENAME}: dropped_findings",
+        reasons=DROP_REASONS_FINDING, evidence_optional_for={"prefiltered"},
+        stamped_fields={"scope_status"},
+    )
+    _validate_dropped(
+        extensions.get("dropped_checks", []),
+        f"{FINDINGS_FILENAME}: dropped_checks",
+        reasons=DROP_REASONS_CHECK, evidence_optional_for=set(),
+    )
+    _validate_orchestrator_notes(extensions.get("orchestrator_notes", []))
 
     live_findings = document["findings"]
     live_checks = document["checks"]
@@ -932,9 +1097,10 @@ def validate_findings_document(document):
     for index, check in enumerate(removed_checks):
         _validate_ledger_check(check, index, removed=True)
     try:
+        checks_for_ids = _checks_without_sources(live_checks + removed_checks)
         validate_ledger_ids(
             live_findings + removed_findings,
-            live_checks + removed_checks,
+            checks_for_ids,
             base["meta"]["next_finding_number"],
             base["meta"]["next_check_number"],
         )
@@ -970,6 +1136,7 @@ def validate_findings_document(document):
         or "checks_removed_by_critic" in extensions
         or VERDICT_BEFORE_ADJUSTMENTS_KEY in extensions
         or INVALIDATED_ASSESSMENTS_KEY in extensions
+        or INVALIDATED_RECOMMENDATIONS_KEY in extensions
     )
     if critic_requires_applied and not applied_by_id:
         raise ValueError(
@@ -988,6 +1155,10 @@ def validate_findings_document(document):
     if INVALIDATED_ASSESSMENTS_KEY in extensions:
         _validate_invalidated_assessments(
             extensions[INVALIDATED_ASSESSMENTS_KEY], set(applied_by_id)
+        )
+    if INVALIDATED_RECOMMENDATIONS_KEY in extensions:
+        _validate_invalidated_recommendations(
+            extensions[INVALIDATED_RECOMMENDATIONS_KEY], set(applied_by_id)
         )
     return document
 
@@ -1192,7 +1363,7 @@ def _records_by_adjustment_id(records, ledger_key):
 def _validate_adjudication_request(request, known_ids):
     """Validate the orchestrator's claims against the committed proposal."""
     if not isinstance(request, dict):
-        return ["adjudication request must be a JSON object"], {}, None
+        return ["adjudication request must be a JSON object"], {}, None, None
     problems = _extra_key_problems(
         request, _REQUEST_KEYS, "adjudication request"
     )
@@ -1209,6 +1380,35 @@ def _validate_adjudication_request(request, known_ids):
             "non-empty string"
         )
     normalized_assessment = revised.strip() if isinstance(revised, str) else None
+
+    revised_recs = request.get(REVISED_RECOMMENDATIONS_KEY)
+    normalized_recommendations = None
+    if revised_recs is not None:
+        if (
+            not isinstance(revised_recs, dict)
+            or not set(revised_recs) <= set(RECOMMENDATION_PRIORITIES)
+        ):
+            problems.append(
+                "adjudication request: 'revised_recommendations' must be null "
+                f"or an object with keys among {', '.join(RECOMMENDATION_PRIORITIES)}"
+            )
+        else:
+            normalized_recommendations = {
+                priority: [] for priority in RECOMMENDATION_PRIORITIES
+            }
+            for priority, entries in revised_recs.items():
+                if not isinstance(entries, list) or any(
+                    not isinstance(entry, str) or not entry.strip()
+                    for entry in entries
+                ):
+                    problems.append(
+                        f"adjudication request: 'revised_recommendations'.{priority} "
+                        "must be a list of non-empty strings"
+                    )
+                    continue
+                normalized_recommendations[priority] = [
+                    entry.strip() for entry in entries
+                ]
 
     verified = request.get("verified")
     decisions = {}
@@ -1265,7 +1465,7 @@ def _validate_adjudication_request(request, known_ids):
     for adjustment_id in decisions:
         if adjustment_id not in known_ids:
             problems.append(f"unknown adjustment id {adjustment_id!r}")
-    return problems, decisions, normalized_assessment
+    return problems, decisions, normalized_assessment, normalized_recommendations
 
 
 def _invalidate_assessment(review, recorded_ids):
@@ -1293,6 +1493,24 @@ def _invalidate_assessment(review, recorded_ids):
         "invalidated_by_critic_adjustment_ids": list(recorded_ids),
     })
     review[INVALIDATED_ASSESSMENTS_KEY] = invalidated
+
+
+def _invalidate_recommendations(review, recorded_ids):
+    """Withdraw recommendations only when an applying batch may contradict them."""
+    prior = review.get("recommendations")
+    review["recommendations"] = {
+        priority: [] for priority in RECOMMENDATION_PRIORITIES
+    }
+    if not isinstance(prior, dict) or not any(prior.values()):
+        return
+    invalidated = review.get(INVALIDATED_RECOMMENDATIONS_KEY)
+    if not isinstance(invalidated, list):
+        invalidated = []
+    invalidated.append({
+        "recommendations": copy.deepcopy(prior),
+        "invalidated_by_critic_adjustment_ids": list(recorded_ids),
+    })
+    review[INVALIDATED_RECOMMENDATIONS_KEY] = invalidated
 
 
 def _changed_fields(target, fields):
@@ -1326,9 +1544,10 @@ def _validate_pending_mutation(entry, target, label):
                 f"{label}: demote must decrease severity, not change "
                 f"{current!r} to {replacement!r}"
             )
+    elif action not in ("correct", "rescope"):
         return dict(fields)
-    if action not in ("correct", "rescope"):
-        return dict(fields)
+    # Companion fields on a promote/demote follow the correct/rescope path:
+    # a moved line keeps scope paired, and the change set is what differs.
     changed = _changed_fields(target, fields)
     candidate = copy.deepcopy(target)
     candidate.update(changed)
@@ -1341,7 +1560,9 @@ def _validate_pending_mutation(entry, target, label):
     return changed
 
 
-def _apply_proposal(proposal, decisions, revised_assessment, ledger):
+def _apply_proposal(
+    proposal, decisions, revised_assessment, revised_recommendations, ledger
+):
     """Apply one adjudicated proposal to one validated ledger, in memory.
 
     Refuted entries are recorded and skipped; every other entry is applied
@@ -1430,6 +1651,9 @@ def _apply_proposal(proposal, decisions, revised_assessment, ledger):
         _invalidate_assessment(ledger, batch_ids)
         if revised_assessment:
             ledger[ASSESSMENT_KEY] = revised_assessment
+        _invalidate_recommendations(ledger, batch_ids)
+        if revised_recommendations is not None:
+            ledger["recommendations"] = revised_recommendations
     if refuted_count:
         ledger[REJECTED_ADJUSTMENTS_KEY] = rejected_records
     return len(batch_ids), refuted_count
@@ -1463,8 +1687,8 @@ def adjudicate(output_dir, request):
         known_ids = {
             entry["adjustment_id"] for entry in proposal["adjustments"]
         }
-        problems, decisions, revised = _validate_adjudication_request(
-            request, known_ids
+        problems, decisions, revised, revised_recommendations = (
+            _validate_adjudication_request(request, known_ids)
         )
         if problems:
             raise AdjustmentValidationError(problems)
@@ -1477,7 +1701,7 @@ def adjudicate(output_dir, request):
         if known_ids & _recorded_ids(ledger):
             raise ValueError("critic proposal is already adjudicated")
         applied, rejected = _apply_proposal(
-            proposal, decisions, revised, ledger
+            proposal, decisions, revised, revised_recommendations, ledger
         )
         validate_findings_document(ledger)
         write_findings(output_dir, ledger)
@@ -1550,6 +1774,10 @@ def main():
     print(
         "REVISED ASSESSMENT: "
         f"{'present' if request.get(REVISED_ASSESSMENT_KEY) else 'absent'}"
+    )
+    print(
+        "REVISED RECOMMENDATIONS: "
+        f"{'present' if request.get(REVISED_RECOMMENDATIONS_KEY) is not None else 'absent'}"
     )
     print(f"APPLIED: {result['applied']} | REJECTED: {result['rejected']}")
     print(f"LEDGER VERDICT: {result['verdict']}")

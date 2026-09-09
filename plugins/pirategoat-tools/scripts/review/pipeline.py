@@ -53,6 +53,7 @@ try:
         _step_4_fetch_issues,
         _step_5_dispatch_plan,
         _step_6_dispatch_agents,
+        DISPATCH_PROMPT_LEAD,
         _step_7_save_baseline,
         _step_8_reconcile,
         _DEFAULT_OUTPUT_INSTRUCTIONS_PR,
@@ -64,7 +65,6 @@ try:
     )
     from .orchestration import (
         _preserve_initial_dispatch_plan,
-        _load_dispatch_plan,
         _run_subprocess,
         _dependency_refresh_safety_state,
         _orchestrate_step_2,
@@ -130,6 +130,7 @@ except ImportError:
         _step_4_fetch_issues,
         _step_5_dispatch_plan,
         _step_6_dispatch_agents,
+        DISPATCH_PROMPT_LEAD,
         _step_7_save_baseline,
         _step_8_reconcile,
         _DEFAULT_OUTPUT_INSTRUCTIONS_PR,
@@ -141,7 +142,6 @@ except ImportError:
     )
     from review.orchestration import (
         _preserve_initial_dispatch_plan,
-        _load_dispatch_plan,
         _run_subprocess,
         _dependency_refresh_safety_state,
         _orchestrate_step_2,
@@ -212,6 +212,8 @@ def _eval_condition(condition, mode, config, state, context):
         return config.get("interactive", True)
 
     return False
+
+from git_paths import FULL_SHA_RE  # noqa: E402 — after the fallback puts scripts/ on the path
 
 
 # ---------------------------------------------------------------------------
@@ -504,10 +506,6 @@ def _init_telemetry(output_dir, log_dir=None):
 _SEMVER_PATTERN = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
 _SEMVER_ROOT_RE = re.compile(rf"^{_SEMVER_PATTERN}$")
 _CHANGELOG_VERSION_RE = re.compile(rf"^## \[({_SEMVER_PATTERN})\]", re.MULTILINE)
-# Full SHA-1 (40 hex) or SHA-256 (64 hex) object name.
-_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
-# Abbreviated object name as `git rev-parse --short` prints it. Git widens
-# the abbreviation as a repo grows, so the length is a range, not a value.
 _SHORT_SHA_RE = re.compile(r"[0-9a-f]{4,64}")
 
 
@@ -620,7 +618,7 @@ def _resolve_git_identity(git_range, base_sha="", head_sha="", default_head="HEA
             )
             if peeled:
                 return peeled
-            if _FULL_SHA_RE.fullmatch(candidate):
+            if FULL_SHA_RE.fullmatch(candidate):
                 # Git unavailable — an already-full object id is the best
                 # obtainable identity.
                 return candidate
@@ -869,6 +867,7 @@ def main():
                                 run_id=state["run_id"],
                                 session_id=config.get("session_id", ""),
                                 plugin_version=plugin_version or "",
+                                plugin_commit=config.get("plugin_commit") or "",
                                 git_range=git_range, base_sha=base_sha,
                                 head_sha=head_sha)
             except Exception:

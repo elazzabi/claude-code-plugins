@@ -444,7 +444,7 @@ def _legacy_manifest(path: Path, *, invalid_sidecar: bool = False) -> dict[str, 
     ]
     safe_pipeline = _safe_scalar_map(
         pipeline,
-        ("session_id", "plugin_version", "mode", "repo_path", "output_dir"),
+        ("session_id", "plugin_version", "plugin_commit", "mode", "repo_path", "output_dir"),
     )
     safe_pipeline["id"] = _legacy_id(start, end, steps)
     safe_pipeline["started_at"] = (

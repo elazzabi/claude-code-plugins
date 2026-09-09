@@ -701,7 +701,22 @@ def _ext_re(*groups) -> str:
 # with '#' (the comment heuristic) — so filtering strips exactly the
 # changed text the reviewer was dispatched to see (docs-drift domain,
 # path-rescued applies_to.paths files). Prose files bypass the filter.
-_SEMANTIC_FILTER_EXEMPT_RE = re.compile(_ext_re(_DOC_LANGS), re.IGNORECASE)
+# Changelog fragments (Jetpack changelogger, adopted by WooCommerce and
+# WooPayments): any file directly under a `changelog/` directory. Names
+# carry no extension but often a version (`bump-phpstan-2.2.2`,
+# `update-woocommerce-analytics-0.16.7`), so nothing here reads a
+# suffix. Every domain is extension-anchored, so these matched nothing
+# and every WooPayments PR shipped one file no reviewer could see. Owned
+# by docs-drift (it asserts significance, type, and a note that must
+# match the diff); exempt from the semantic filter like other prose;
+# recognised by plan_dispatch's documentation-files check, which applies
+# this same pattern and no rule of its own.
+CHANGELOG_FRAGMENT_PATTERN = r"(^|/)changelog/[^/]+$"
+
+_SEMANTIC_FILTER_EXEMPT_RE = re.compile(
+    r"(?:" + _ext_re(_DOC_LANGS) + r"|" + CHANGELOG_FRAGMENT_PATTERN + r")",
+    re.IGNORECASE,
+)
 
 
 def is_template_file(path: str) -> bool:
@@ -838,7 +853,10 @@ DOMAIN_CATALOG = {
     },
     "docs-drift": {
         "description": "Code and documentation files for drift detection",
-        "include": _ext_re(_PROG_LANGS, _DOC_LANGS, _DATA_LANGS),
+        "include": (
+            r"(?:" + _ext_re(_PROG_LANGS, _DOC_LANGS, _DATA_LANGS)
+            + r"|" + CHANGELOG_FRAGMENT_PATTERN + r")"
+        ),
         "exclude": _TEST_EXCLUDE,
     },
     "toolchain": {

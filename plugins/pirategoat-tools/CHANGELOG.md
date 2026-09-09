@@ -5,6 +5,66 @@ All notable changes to the pirategoat-tools plugin will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.119.0] - UNRELEASED
+
+Makes the review pipeline's own claims checkable: the range it reviewed, the upstream code it read, the evidence behind every surviving finding, and how much of the reconciliator's verification actually happened.
+
+### Added
+
+- PR and branch reviews fetch the base branch before computing the review range, and a PR review compares its local changed-file list with GitHub's — path for path when GitHub returns the whole list, by count otherwise.
+- The step-3 briefing states the base fetch outcome, any scope mismatch, merge commits that bring in work from other branches, and whether the PR targets a branch other than the default.
+- The change purpose ends in three parsed headings — `## Verify` (the claims the verdict rests on), `## Context` (facts reviewers take as given) and `## Author's description (extracted)` — and step 5 warns before dispatch when an item breaks those rules.
+- Every reviewer's REVIEW FOCUS states the two tiers, and the review record tables each Verify item against the checks that settled it, so a claim nobody verified is a visible row.
+- A reviewer check may name the Verify items it settles (`record_check(..., verifies=["V2"])`), rendered as `Settles:` and kept as a union when the reconciliator merges checks.
+- The findings ledger carries an evidence trail: every reconciled finding and check names the source findings and checks it merged, and every source the reconciliator read but did not carry forward is recorded with a reason and evidence.
+- The ledger save is rejected when a source is unaccounted for, a merged check drops a source's method text, or a severity matches no source without a note.
+- The orchestrator's hints reach the reconciliator as claims it must answer with an outcome and evidence, and the record renders the answers under `Orchestrator Notes` beside `Dropped by the Reconciliator`. Claims registered against a run survive a step-8 rebuild, so a retry after an interrupted dispatch cannot quietly release the requirement that each be answered.
+- Step 9 measures how many repository files the reconciliator opened beside how many concerns it called verified, and the record, the critic prompt, `pipeline-result.json` and the manifest state verified, unverified or unmeasured.
+- The orchestrator records dispatch adjustments through `dispatch_adjust.py` (`--skip NAME REASON`, `--dispatch NAME REASON`, `--dry-run`) instead of editing `dispatch-plan.json` by hand, and the step-6 briefing repeats them.
+- Each skip names the changed files whose only matching reviewer it removed, and the coverage section lists them as skipped by override rather than as matching no domain.
+- Host Context resolves for monorepos: plugin headers, wp-env and compose files are read at the repository root and every directory one and two levels down, and `.pirategoat/config.json` may name deeper roots under `hosts.roots`.
+- Every resolved host carries the identity its checkout declares — version plus the containing repository's commit, never a branch name — and reviewer briefings, the step-3 briefing, the record's Run notes and the telemetry manifest all state that same identity.
+- Reviewers cite upstream reads as `<host>@<version, commit, or unknown>:<path>:<line>`, and the evidence manifest counts those citations per reviewer by host.
+- wp.org zip URLs in wp-env files (`wordpress-latest.zip`, `downloads.wordpress.org/plugin/<slug>.zip`) count as host signals, so the ecosystem cache fulfils them.
+- Telemetry carries an `evidence` section — each finding's sources with the severity every reviewer gave, drop reasons, Verify settlement counts, the critic's verdict and adjustments, and upstream citations per host — and never finding text.
+- Telemetry records whether step 3 fetched the base and the SHA it resolved to, and whether the local range matched GitHub's PR scope.
+- The dispatch planner names why it decided (`keyword`, `check`, `default`, `override`, …) beside its reason, telemetry discloses the category per agent, and the cohort report counts how many dispatches of each kind the orchestrator overrode.
+- Shared usage rows carry each agent's tool-call and repository-read counts, and the metrics report measures the synthesis agents' share and every agent's share of subagent spend per run and across runs; the report schema is 5.
+- The telemetry manifest and the metrics table carry the plugin checkout's commit beside the plugin version, so a dev-mount run is distinguishable from the release and from every other dev-mount run stamping the same version.
+- Changelog fragments under a `changelog/` directory belong to the `docs-drift` domain and count as documentation for triage, so a WooCommerce or WooPayments fragment is reviewed instead of matching no domain.
+
+### Changed
+
+- `/pr-review` with no argument reviews the current branch's PR when there is exactly one and it is open; a merged or closed PR stops with usage.
+- Keyword triage reads only the author's words: the repository's pull request template and its HTML comments are subtracted from the PR body, commit trailers such as `Co-Authored-By` are dropped, and labels no longer feed the text.
+- Triage keywords match whole words, with a trailing `*` in the registry declaring a prefix, so a reviewer is no longer planned because a template checklist mentions security or a trailer contains "auth".
+- An applying critic batch withdraws the reconciler's recommendations along with its assessment, and the adjudication request accepts `revised_recommendations` as the replacement set.
+- The decision critic's synthesis phase corrects every check whose result restates a factual claim its demotion or removal refuted, so the record no longer contradicts itself after adjudication.
+- A `correct` adjustment may no longer change severity; a promote or demote carries the severity change, and any action that moves a finding's file must give its line as well.
+- A confirmed orchestrator note may cite the Verify items its evidence settles, counted beside reviewer checks in the record's Verify table and the cohort metric, instead of leaving an item the reconciliator itself reproduced to the decision critic.
+- The critic prompt names the reviewed branch and commit, and the report-authoring briefing lists any paths the critic's prose names outside the diff.
+- The step-9 briefing points at `change-purpose.md` instead of repeating it, and says the assembled record already carries everything in the ledger.
+- Reviewer briefings point PR INTENT at the change purpose's extracted author description instead of pasting the PR body cut at 500 characters.
+- The review coverage block separates reviewable files no domain owns from files the planner excluded by design, and titles the review-claimable queue as the designed path for files outside the inline budget.
+- Every review with a target records its run directory in the branch baseline, and the next incremental review's step-3 briefing points at the previous change purpose so carried-over items are marked rather than rewritten as new.
+- The reconciliator's ledger template states what the builder derives and accepts, and the step-8 dispatch prompt names the plugin scripts directory instead of the reviewer builder file, so the agent no longer reads plugin source to find its own contract.
+- Unresolved host signals merge by name, one banner line per host with every source recorded, and a cache entry whose identity cannot be read says so instead of reporting `version: "latest"`.
+
+### Fixed
+
+- The ecosystem-integration reviewer carries the mandatory bootstrap section every other reviewer has, and Claude dispatch prompts open with the instruction to run bootstrap first.
+- The reviewer builder snippet shows `add_observation(file, note, category)` with its real signature and no longer invites `claim_files_reviewed()` when the assignment has no claimable files, removing a deterministic first-save failure.
+- A reviewer may pass `claim_files_reviewed` one list of paths instead of separate arguments, a wrong-typed path names its type, and a draft save that recorded nothing prints a stderr NOTE rather than publishing an empty approve.
+- A failed PR checkout at step 2 states gh's own reason and exit status instead of a bare "Failed to checkout", and the checkout gets the 300 s timeout the pipeline honours instead of being cut off at 30 s.
+- The reconciliation context reads the pre-change snippet for every surviving file whose diff removed or replaced lines, not only for the files that shrank.
+- The repository-read detector counts only reads the shell certainly ran, leaves incomplete transcript evidence unmeasured, and words a measured zero as no read observed.
+- `session_metrics.py` and the session-analysis skill count tokens with the pipeline's transcript parser, which counts a streamed response once; the previous per-record sums over-counted by 45–84 %.
+- Shared telemetry discloses host names, versions and commits but never paths or branch names, and a wp-env pin's `#ref` is recorded as a version only when it is version-shaped.
+- A host the repository itself provides — WooCommerce, in its own monorepo — is never resolved from the ecosystem cache, and the reviewer protocol says a mounted host proves only that the local site mounts it.
+- The published TypeScript review-output contract exposes the reconciliation evidence and recommendation-adjudication fields the Python ledger reader already accepted.
+- Reviewer `review.json` files stamp an aware UTC timestamp, like every other run artifact, instead of the naive local clock.
+- The history-insights reviewer plans as many scenarios as its review budget allows and runs parallel-branch detection as one walk, skipped above ten changed files.
+
 ## [1.118.0] - 2026-09-04
 
 ### Added

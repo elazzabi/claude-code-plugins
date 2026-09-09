@@ -1,0 +1,125 @@
+{
+  "pr_id": "66900",
+  "reviewer": "wp-architecture",
+  "timestamp": "2026-09-04T10:48:52.702885",
+  "plugin_version": "1.116.0",
+  "schema": 2,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "wpcs-violation",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/src/Internal/Caches/CouponCodeLookupInvalidator.php",
+      "line": 213,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "wp-architecture"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "wp-architecture"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 280610,
+    "confidence_score": 0.85,
+    "next_finding_number": 2,
+    "next_check_number": 3
+  },
+  "review_claimable_files": [
+    "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Services/DriverAvailabilityServiceTest.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-webhooks-controller-tests.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestControllerTest.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/customers.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-taxes-controller-tests.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-sales.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-zones.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-methods.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-top-sellers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/coupon/data-store.php",
+    "plugins/woocommerce/tests/php/src/Internal/Admin/Settings/SettingsUISchemaTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/PushNotificationsTest.php",
+    "plugins/woocommerce/tests/php/includes/shortcodes/class-wc-shortcode-checkout-test.php",
+    "packages/js/components/src/advanced-filters/attribute-filter.tsx",
+    "packages/js/components/src/advanced-filters/date-filter.tsx",
+    "packages/js/components/src/advanced-filters/index.tsx",
+    "packages/js/components/src/advanced-filters/number-filter.tsx",
+    "packages/js/components/src/advanced-filters/search-filter.tsx",
+    "packages/js/components/src/advanced-filters/select-filter.tsx",
+    "packages/js/components/src/advanced-filters/stories/advanced-filters.story.tsx",
+    "packages/js/components/src/advanced-filters/utils.ts",
+    "packages/js/components/src/advanced-filters/test/advanced-filters.test.tsx",
+    "packages/js/components/src/advanced-filters/test/search-filter.test.tsx",
+    "packages/js/components/src/advanced-filters/test/utils.tsx"
+  ],
+  "reviewed_file_claims": [
+    "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php"
+  ],
+  "unclaimed_review_files": [
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Services/DriverAvailabilityServiceTest.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-webhooks-controller-tests.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/Controllers/PushNotificationStatusRestControllerTest.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/customers.php",
+    "plugins/woocommerce/tests/php/includes/rest-api/Controllers/Version3/class-wc-rest-taxes-controller-tests.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-sales.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-zones.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/shipping-methods.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/rest-api/Tests/Version3/reports-top-sellers.php",
+    "plugins/woocommerce/tests/legacy/unit-tests/coupon/data-store.php",
+    "plugins/woocommerce/tests/php/src/Internal/Admin/Settings/SettingsUISchemaTest.php",
+    "plugins/woocommerce/tests/php/src/Internal/PushNotifications/PushNotificationsTest.php",
+    "plugins/woocommerce/tests/php/includes/shortcodes/class-wc-shortcode-checkout-test.php",
+    "packages/js/components/src/advanced-filters/attribute-filter.tsx",
+    "packages/js/components/src/advanced-filters/date-filter.tsx",
+    "packages/js/components/src/advanced-filters/index.tsx",
+    "packages/js/components/src/advanced-filters/number-filter.tsx",
+    "packages/js/components/src/advanced-filters/search-filter.tsx",
+    "packages/js/components/src/advanced-filters/select-filter.tsx",
+    "packages/js/components/src/advanced-filters/stories/advanced-filters.story.tsx",
+    "packages/js/components/src/advanced-filters/utils.ts",
+    "packages/js/components/src/advanced-filters/test/advanced-filters.test.tsx",
+    "packages/js/components/src/advanced-filters/test/search-filter.test.tsx",
+    "packages/js/components/src/advanced-filters/test/utils.tsx"
+  ],
+  "inline_diff_file_count": 26,
+  "reviewed_file_count": 27,
+  "in_scope_review_file_count": 51
+}

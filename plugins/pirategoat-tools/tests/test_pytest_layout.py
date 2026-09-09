@@ -31,6 +31,8 @@ These guards live in pirategoat-tools (the largest suite, run most often)
 because the repo has no root-level test home; the invariant is repo-wide.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent  # tests/ -> pirategoat-tools/
@@ -67,3 +69,22 @@ class TestMultiPluginCollection:
         )
         content = pytest_ini.read_text()
         assert "--import-mode=importlib" in content
+
+
+class TestFocusedCollection:
+    def test_a_module_importing_helpers_collects_on_its_own(self):
+        """`tests/` goes on `sys.path` in the root conftest, so a module
+        that imports from `helpers/` collects when it is the only file
+        named — the focused commands AGENTS.md prescribes — without a
+        per-file path insert that a fuller run would mask the absence of."""
+        targets = [PLUGIN_ROOT / "tests" / "hosts" / "test_identity.py"]
+        for target in targets:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "--collect-only", "-q",
+                 "-p", "no:cacheprovider", str(target)],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
+            )
+            assert result.returncode == 0, (
+                f"focused collection of {target.relative_to(REPO_ROOT)} failed:\n"
+                f"{result.stdout}\n{result.stderr}"
+            )

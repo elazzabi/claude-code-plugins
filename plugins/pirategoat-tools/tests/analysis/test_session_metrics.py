@@ -32,6 +32,50 @@ AGENT_INFERENCE_PATTERNS = _mod.AGENT_INFERENCE_PATTERNS
 NON_REVIEWER_AGENT_FINGERPRINTS = _mod.NON_REVIEWER_AGENT_FINGERPRINTS
 
 
+def test_subagent_tokens_come_from_the_transcript_instrument(tmp_path):
+    path = tmp_path / "agent-1.jsonl"
+
+    def record(output, mid):
+        return json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-09-06T10:00:00.000Z",
+            "message": {
+                "id": mid,
+                "model": "claude-sonnet-5",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 100,
+                    "output_tokens": output,
+                },
+            },
+        })
+
+    path.write_text("\n".join([record(3, "m1"), record(9, "m1"), record(4, "m2")]) + "\n")
+
+    metrics = _mod.extract_subagent_metrics(str(path))
+
+    assert (
+        metrics["input_tokens"], metrics["output_tokens"],
+        metrics["cache_read_tokens"], metrics["cache_creation_tokens"],
+    ) == (20, 13, 200, 10)
+
+
+def test_agent_type_comes_from_the_meta_file_first(tmp_path):
+    path = tmp_path / "agent-1.jsonl"
+    path.write_text(json.dumps({
+        "type": "user", "message": {"content": "Review for pattern consistency"},
+    }) + "\n")
+    meta_path = tmp_path / "agent-1.meta.json"
+    meta_path.write_text(json.dumps({"agentType": "pirategoat-tools:security-reviewer"}))
+
+    assert identify_agent_type(str(path)) == "security-reviewer"
+
+    meta_path.write_text(json.dumps({"agentType": "general-purpose"}))
+
+    assert identify_agent_type(str(path)) == "patterns-reviewer"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -237,3 +281,15 @@ class TestEdgeCases:
         })
         path = _write_jsonl([msg], str(tmp_path))
         assert identify_agent_type(path) == "security-reviewer"
+
+
+def test_meta_file_identity_is_exact_against_the_registry(tmp_path):
+    """`code-clarity-reviewer` must never collapse onto `code-reviewer`, and a
+    reviewer the old hand-spelled list lacked is still recognised."""
+    import json
+    from session_metrics import identify_agent_type
+    for name in ("code-clarity-reviewer", "concurrency-reviewer", "ecosystem-integration-reviewer", "review-reconciliator"):
+        path = tmp_path / f"agent-{name}.jsonl"
+        path.write_text(json.dumps({"type": "user", "message": {"content": "review the code"}}) + "\n")
+        (tmp_path / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": f"pirategoat-tools:{name}"}))
+        assert identify_agent_type(str(path)) == name

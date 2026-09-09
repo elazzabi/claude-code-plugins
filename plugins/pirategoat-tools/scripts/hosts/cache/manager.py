@@ -4,24 +4,43 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from hosts.cache.paths import pirategoat_cache_root
+from hosts.identity import git_identity, git_read, header_version, wp_core_version
 
 
 @dataclass(frozen=True)
 class EcosystemRepo:
     name: str
     url: str
+    version_file: str  # read at the slot's commit, never from the working tree
+    version_reader: Callable[[Optional[str]], Optional[str]]
 
 
 KNOWN_ECOSYSTEM_REPOS: List[EcosystemRepo] = [
-    EcosystemRepo(name="wordpress",
-                  url="https://github.com/WordPress/wordpress-develop.git"),
-    EcosystemRepo(name="woocommerce",
-                  url="https://github.com/woocommerce/woocommerce.git"),
+    EcosystemRepo(
+        name="wordpress",
+        url="https://github.com/WordPress/wordpress-develop.git",
+        version_file="src/wp-includes/version.php",
+        version_reader=wp_core_version,
+    ),
+    EcosystemRepo(
+        name="woocommerce",
+        url="https://github.com/woocommerce/woocommerce.git",
+        version_file="plugins/woocommerce/woocommerce.php",
+        version_reader=header_version,
+    ),
 ]
+
+# The one spelling of the hosts the cache can hold. The plugin-headers
+# resolver reads it to know which declared dependencies are fulfillable and
+# which plugins a repository provides itself; the cache resolver reads it to
+# filter fulfilment requests.
+KNOWN_ECOSYSTEM_NAMES = frozenset(repo.name for repo in KNOWN_ECOSYSTEM_REPOS)
+
 
 _STALE_SECONDS = 30 * 24 * 3600
 
@@ -118,6 +137,54 @@ def ensure_fresh(name: str, max_age_seconds: int = _FRESHNESS_SECONDS) -> Dict[s
     return update_host(name)
 
 
+def slot_identity(name: str) -> Dict[str, Any]:
+    """What a cache slot holds, with unknown facts represented by ``None``.
+
+    The identity records its commit, commit date, declared version and
+    refresh time. The version is read at the captured commit, so a refresh
+    landing mid-read or an uncommitted edit in the slot cannot make the
+    version and the commit disagree. A directory name such as ``latest``
+    is never a substitute for an unknown version.
+    """
+    target = cache_dir_for(name)
+    identity: Dict[str, Any] = {
+        "present": target.is_dir(),
+        "commit": None,
+        "commit_date": None,
+        "version": None,
+        "refreshed": None,
+    }
+    if not identity["present"]:
+        return identity
+
+    git = git_identity(target)
+    identity["commit"] = git["commit"]
+    identity["commit_date"] = git["commit_date"]
+
+    # The marker is the only record of a refresh; a directory mtime is not
+    # a refresh time and must not be presented as one.
+    refreshed = _read_marker(target)
+    if refreshed is not None:
+        try:
+            identity["refreshed"] = datetime.fromtimestamp(refreshed, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except (OverflowError, OSError, ValueError):
+            pass
+
+    try:
+        repo = _repo_for(name)
+    except KeyError:
+        return identity
+
+    if identity["commit"] is None:
+        return identity
+
+    text = git_read(target, "show", f"{identity['commit']}:{repo.version_file}")
+    identity["version"] = repo.version_reader(text)
+    return identity
+
+
 def list_hosts() -> List[Dict[str, Any]]:
     out = []
     for r in KNOWN_ECOSYSTEM_REPOS:
@@ -126,6 +193,7 @@ def list_hosts() -> List[Dict[str, Any]]:
         out.append({
             "name": r.name, "path": str(d), "present": present,
             "last_updated": _read_last_updated(d) if present else None,
+            "identity": slot_identity(r.name) if present else None,
         })
     return out
 
@@ -150,11 +218,24 @@ def _touch_last_updated(target: Path) -> None:
     (target / ".last_updated").write_text(str(int(time.time())))
 
 
-def _read_last_updated(target: Path):
+def _read_marker(target: Path):
+    """The refresh epoch the marker records, or None when there is none to read."""
     marker = target / ".last_updated"
-    if marker.is_file():
-        try:
-            return int(marker.read_text().strip())
-        except ValueError:
+    try:
+        return int(marker.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _read_last_updated(target: Path):
+    """Staleness input: the marker, else the marker's or directory's mtime."""
+    recorded = _read_marker(target)
+    if recorded is not None:
+        return recorded
+    marker = target / ".last_updated"
+    try:
+        if marker.is_file():
             return int(marker.stat().st_mtime)
-    return int(target.stat().st_mtime) if target.is_dir() else None
+        return int(target.stat().st_mtime) if target.is_dir() else None
+    except OSError:
+        return None

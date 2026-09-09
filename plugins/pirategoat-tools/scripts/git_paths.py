@@ -18,6 +18,12 @@ from typing import Any, List, Optional, Tuple
 
 from containment import contains_posix_lexically
 
+# A full git object name: SHA-1 (40 hex) or SHA-256 (64 hex). The one
+# grammar for "this is a durable commit identity" across the range producer
+# (`review/context.py`), telemetry, the uploader and the shared reader.
+FULL_SHA_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
+FULL_SHA_RE = re.compile(FULL_SHA_PATTERN)
+
 
 _GIT_QUOTE_ESCAPES = {
     "a": 0x07,

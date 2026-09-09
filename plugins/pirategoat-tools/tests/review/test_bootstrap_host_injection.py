@@ -46,25 +46,25 @@ def test_host_section_rendered_when_manifest_present():
     assert "runtime-host" in section
 
 
-def test_host_section_frames_entries_as_non_exhaustive_hints():
+def test_host_section_points_at_the_protocol_rule_instead_of_restating_it():
+    """The citation grammar and the do-not-hunt rule live once, in the
+    reviewer protocol's Host Context Usage; the prompt carries the data."""
     bootstrap = _import_bootstrap()
     manifest = {
         "version": 1,
-        "resolved": [
-            {"name": "wordpress", "kind": "runtime-host",
-             "path": "/x/wp", "source": "wp-env", "version": None,
-             "confidence": "high", "notes": {}},
-        ],
-        "unresolved": [],
-        "banner": None,
-        "diagnostics": {},
+        "resolved": [{
+            "name": "wordpress", "kind": "runtime-host", "path": "/x/wp",
+            "source": "sibling", "version": None, "confidence": "medium",
+            "notes": {},
+        }],
+        "unresolved": [], "banner": None, "diagnostics": {},
     }
 
     section = bootstrap.render_host_context_section(manifest)
 
-    assert "starting points" in section
-    assert "not an exhaustive inventory" in section
-    assert "explore normally" in section
+    assert "The Host Context Usage rules say how to cite a resolved host" in section
+    assert "<host>@" not in section
+    assert "do not search" not in section
 
 
 def test_host_section_serializes_repo_controlled_fields():
@@ -306,3 +306,39 @@ class TestHostContextSoftCap:
         # 20 paths shown, 2 hidden — NOT 5 (which would count raw entries).
         assert "(+2 more not shown" in section
         assert "(+5 more not shown" not in section
+
+
+def test_host_section_states_version_commit_refresh_and_declared_minimum():
+    bootstrap = _import_bootstrap()
+    manifest = {
+        "version": 1,
+        "resolved": [
+            {"name": "wordpress", "kind": "runtime-host", "path": "/x/cache/wordpress/latest",
+             "source": "ecosystem-cache", "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+             "confidence": "high", "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk",
+                                             "declared_minimum": "7.0"}},
+        ],
+        "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": "14.1"}],
+        "banner": None, "diagnostics": {},
+    }
+    section = bootstrap.render_host_context_section(manifest)
+    assert (
+        '  - name="wordpress" [runtime-host]: path="/x/cache/wordpress/latest" '
+        '(via source="ecosystem-cache", version "7.2-alpha-63166-src", commit "474555a85c05", '
+        'refreshed "2026-09-04"; the repository declares it requires "7.0")'
+    ) in section
+    assert 'name="jetpack": reason="declared_in_plugin_headers" (declared "14.1")' in section
+
+
+def test_host_section_says_unknown_when_identity_is_missing():
+    bootstrap = _import_bootstrap()
+    manifest = {
+        "version": 1,
+        "resolved": [{"name": "wordpress", "kind": "runtime-host", "path": "/x/wp", "source": "ecosystem-cache",
+                      "version": None, "version_freshness": None, "confidence": "high",
+                      "notes": {"commit": None, "branch": None}}],
+        "unresolved": [], "banner": None, "diagnostics": {},
+    }
+    section = bootstrap.render_host_context_section(manifest)
+    assert '(via source="ecosystem-cache", version unknown, commit unknown)' in section
+    assert "latest" not in section

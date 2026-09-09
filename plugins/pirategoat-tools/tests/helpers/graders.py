@@ -30,6 +30,7 @@ class GradeResult:
 # hand-picked keys against a validator that requires all 20, so five real
 # fields were ungraded.
 from review.review_document import (
+    OPTIONAL_CHECK_FIELDS,
     REQUIRED_CHECK_FIELDS,
     REQUIRED_FINDING_FIELDS,
     REVIEW_CONTENT_FIELDS,
@@ -217,8 +218,9 @@ def grade_review_json(path: str, expected_reviewer: str = None) -> GradeResult:
             if not is_object:
                 continue
             checks.append((
-                set(review_check) == REQUIRED_CHECK_FIELDS,
-                f"Check {index} must contain exactly {REQUIRED_CHECK_FIELDS}",
+                set(review_check) - OPTIONAL_CHECK_FIELDS == REQUIRED_CHECK_FIELDS,
+                f"Check {index} must contain exactly {REQUIRED_CHECK_FIELDS} "
+                f"(plus the optional {sorted(OPTIONAL_CHECK_FIELDS)})",
             ))
             for field_name in ("question", "method", "result"):
                 value = review_check.get(field_name)
@@ -772,7 +774,7 @@ def grade_detection(review: dict, key: dict, repo_root=None) -> GradeResult:
                 check
                 for check in review_checks
                 if isinstance(check, dict)
-                and set(check) == REQUIRED_CHECK_FIELDS
+                and set(check) - OPTIONAL_CHECK_FIELDS == REQUIRED_CHECK_FIELDS
                 and all(
                     isinstance(check.get(field_name), str)
                     and bool(check[field_name].strip())

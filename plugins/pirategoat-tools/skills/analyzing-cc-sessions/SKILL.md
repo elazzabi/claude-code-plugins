@@ -233,6 +233,8 @@ def is_task_agent(filename: str) -> bool:
 
 ### Identifying Agent Type
 
+The host writes the dispatched type beside each transcript in `agent-<id>.meta.json` as `agentType`; `session_metrics.py` reads a plugin-qualified value such as `pirategoat-tools:security-reviewer` first. Non-plugin-qualified values still fall back to prompt inference.
+
 The dispatch prompt (first user message) usually contains the agent type:
 
 ```python
@@ -313,36 +315,22 @@ def categorize_bash(command: str) -> str:
 
 **IMPORTANT:** `input_tokens` alone is misleading — it only counts non-cached input. Real input cost = `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens`. The `output_tokens` field includes both visible text and hidden thinking tokens (see Gotchas).
 
+One assistant response streamed as several records shares a `message.id`; only the last record carries the response's real usage, so summing every record over-counts (45–84 % in the run-1 audit). The pipeline's parser deduplicates; use it.
+
 ```python
-def extract_token_usage(filepath: str) -> dict:
-    """Sum token usage across all assistant turns, including cache tokens."""
-    total_input = 0
-    total_output = 0
-    total_cache_create = 0
-    total_cache_read = 0
-    with open(filepath) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            msg = entry.get("message", {})
-            if isinstance(msg, dict):
-                usage = msg.get("usage", {})
-                total_input += usage.get("input_tokens", 0)
-                total_output += usage.get("output_tokens", 0)
-                total_cache_create += usage.get("cache_creation_input_tokens", 0)
-                total_cache_read += usage.get("cache_read_input_tokens", 0)
-    return {
-        "input_tokens": total_input,
-        "output_tokens": total_output,
-        "cache_creation_input_tokens": total_cache_create,
-        "cache_read_input_tokens": total_cache_read,
-        "effective_input": total_input + total_cache_create + total_cache_read,
-    }
+from pathlib import Path
+import sys
+
+# Replace both placeholders with your actual paths.
+SKILL_DIR = Path("<absolute path to the directory containing this SKILL.md>")
+path = Path("<absolute path to an agent-<id>.jsonl transcript>")
+PLUGIN_ROOT = SKILL_DIR.parent.parent
+
+sys.path.insert(0, f"{PLUGIN_ROOT}/scripts")
+from analysis.review_transcript import usage_summary_for_transcript
+
+summary = usage_summary_for_transcript(path)   # {"usage": {...}, "usage_by_model": {...}, "usage_valid", "usage_observed", "parse_gap"}
+print(summary)
 ```
 
 ## Existing Analysis Scripts

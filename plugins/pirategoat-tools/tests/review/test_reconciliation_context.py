@@ -26,6 +26,7 @@ sys.path.insert(0, str(TESTS_DIR))
 from review.verdict_rules import derive_review_state  # noqa: E402
 from review.reviewer_lifecycle import review_paths  # noqa: E402
 from review.run_paths import artifact_path  # noqa: E402
+from review.reconciliation_notes import add_note  # noqa: E402
 
 
 def _load_module():
@@ -1063,7 +1064,9 @@ class TestParseDiffHunks:
         assert "src/auth.py" in hunks
         # Separate: old=(10,12), new=(10,14) → two entries
         assert hunks["src/auth.py"] == [(10, 12), (10, 14)]
-        assert deletions == set()  # new_count > old_count → no deletion
+        # Three old-side lines were replaced by five: the old code is gone
+        # and a finding about it needs the pre-change snippet.
+        assert deletions == {"src/auth.py"}
 
     def test_parses_multiple_hunks(self, mod, monkeypatch):
         """Parses multiple hunks in one file."""
@@ -1130,7 +1133,7 @@ class TestParseDiffHunks:
         )
         hunks, deletions = mod._parse_diff_hunks("abc..HEAD")
         assert hunks["src/a.py"] == [(5, 5)]
-        assert deletions == set()
+        assert deletions == {"src/a.py"}  # the one old line was replaced
 
     def test_pure_deletion_covers_old_side_range(self, mod, monkeypatch):
         """A pure deletion hunk covers the full old-side range.
@@ -1177,6 +1180,32 @@ class TestParseDiffHunks:
         # Separate: old=(10,29), new=(10,12)
         assert hunks["src/auth.py"] == [(10, 29), (10, 12)]
         assert "src/auth.py" in deletions
+
+    def test_one_for_one_replacement_marks_the_file_for_old_side_reads(self, mod, monkeypatch):
+        """A hunk that replaces a line with another (`-5 +5`) contains a
+        deleted line even though the net size is unchanged. A finding
+        about the replaced code needs the pre-change snippet, so the file
+        is marked; a pure insertion (`-9,0 +10,2`) is not."""
+        diff_output = (
+            "diff --git a/src/auth.py b/src/auth.py\n"
+            "--- a/src/auth.py\n"
+            "+++ b/src/auth.py\n"
+            "@@ -5 +5 @@\n"
+            "-old\n+new\n"
+            "diff --git a/src/new.py b/src/new.py\n"
+            "--- a/src/new.py\n"
+            "+++ b/src/new.py\n"
+            "@@ -9,0 +10,2 @@\n"
+            "+a\n+b\n"
+        )
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **kw: type("R", (), {
+                "returncode": 0, "stdout": diff_output, "stderr": ""
+            })()
+        )
+        _hunks, deletions = mod._parse_diff_hunks("abc..HEAD")
+        assert deletions == {"src/auth.py"}
 
     def test_git_failure_returns_empty(self, mod, monkeypatch):
         """Non-zero exit code returns empty tuple."""
@@ -1264,7 +1293,7 @@ class TestFullScript:
         Every key here has a reader in `agents/review-reconciliator.md`
         or `scripts/review/findings_save.py`. `git_range`, `output_dir`,
         and `output_builder_path` had none: the agent is handed the
-        directory and the builder path by the step-8 briefing, and it
+        output and plugin scripts directories by the step-8 briefing, and it
         never mentions the range at all. A key nobody reads is a key that
         can go stale without anything noticing.
         """
@@ -1280,9 +1309,6 @@ class TestFullScript:
             "--changed-files", "src/auth.py,src/db.py",
             "--change-purpose", "Fix auth bug",
             "--pr-id", "42",
-            "--host-banner-json", json.dumps(
-                {"degraded": True, "message": "no upstream source"}
-            ),
             cwd=tmp_path,
         )
 
@@ -1297,30 +1323,75 @@ class TestFullScript:
             "scope_annotations",
             "changed_files",
             "change_purpose",
+            "verify_items",
+            "context_items",
+            "change_purpose_problems",
             "pr_id",
             "host_context_banner",
             "missing_agents",
             "prefiltered_out_of_scope",
+            "orchestrator_notes",
         }
-        assert ctx["schema"] == 3
+        assert ctx["schema"] == 4
         assert "security-review" in ctx["reviews_by_agent"]
         assert ctx["changed_files"] == ["src/auth.py", "src/db.py"]
         assert ctx["change_purpose"] == "Fix auth bug"
         assert ctx["pr_id"] == "42"
-        assert ctx["host_context_banner"] == {
-            "degraded": True, "message": "no upstream source",
-        }
+        assert ctx["host_context_banner"] is None
 
-    def test_the_banner_comes_from_the_caller_not_a_second_file_read(
+    def test_verify_items_carry_the_checks_that_cite_them(self, tmp_path):
+        review = _make_review_json(
+            reviewer="security",
+            findings=[_make_finding(file="src/auth.py", line=10)],
+        )
+        review["checks"] = [{
+            "id": "c1", "question": "q", "method": "m", "result": "0 hits",
+            "source_reviewers": ["security-reviewer"], "verifies": ["V1"],
+        }]
+        review["meta"]["next_check_number"] = 2
+        _write_review_json(tmp_path, "security", review)
+        purpose = (
+            "## Verify\nV1. Nothing else calls the helper — source: PR description\n"
+            "V2. Blocks is unaffected — source: inferred from the diff\n"
+            "## Context\nC1. Ships in 10.9 — source: version constant\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc123..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", purpose,
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        ctx = _read_reconciliation_context(tmp_path)
+        assert ctx["schema"] == 4
+        assert ctx["verify_items"] == [
+            {"id": "V1", "text": "Nothing else calls the helper", "source": "PR description",
+             "carried_over": False,
+             "checks": [{"reviewer": "security-review", "id": "c1", "result": "0 hits"}]},
+            {"id": "V2", "text": "Blocks is unaffected", "source": "inferred from the diff",
+             "carried_over": False, "checks": []},
+        ]
+        assert ctx["context_items"] == [
+            {"id": "C1", "text": "Ships in 10.9", "source": "version constant", "carried_over": False},
+        ]
+        assert ctx["change_purpose_problems"] == []
+
+    def test_an_unstructured_purpose_yields_empty_tiers(self, tmp_path):
+        _write_review_json(tmp_path, "security", _make_review_json(reviewer="security", findings=[]))
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc123..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", "Fix auth bug",
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        ctx = _read_reconciliation_context(tmp_path)
+        assert ctx["verify_items"] == [] and ctx["context_items"] == []
+        assert ctx["change_purpose_problems"] == []
+
+    def test_the_banner_comes_from_the_same_local_host_snapshot(
         self, tmp_path
     ):
-        """The orchestrator already holds the banner it passes.
-
-        `review-context.json` is the orchestrator's own artifact and it
-        is in memory at step 8. Re-reading it here gave the pipeline two
-        readers of one field, and the second one silently reported `null`
-        for any run whose context file was written elsewhere.
-        """
+        """The banner can be as large as the local map and must stay on disk."""
         (tmp_path / "review-context.json").write_text(json.dumps(
             {"host_context": {"banner": {"degraded": True, "message": "x"}}}
         ))
@@ -1333,7 +1404,105 @@ class TestFullScript:
 
         assert result.returncode == 0, f"stderr: {result.stderr}"
         ctx = _read_reconciliation_context(tmp_path)
-        assert ctx["host_context_banner"] is None
+        assert ctx["host_context_banner"] == {"degraded": True, "message": "x"}
+        assert ctx["host_context_banner"] == ctx["host_context"]["banner"]
+
+    def test_full_host_context_is_carried_for_local_citation_reconciliation(
+        self, tmp_path
+    ):
+        host_context = {
+            "version": 1,
+            "resolved": [{
+                "name": "wordpress",
+                "kind": "runtime-host",
+                "path": "/repo/wordpress",
+                "source": "ecosystem-cache",
+                "version": None,
+                "notes": {"commit": None},
+            }],
+            "unresolved": [],
+            "banner": None,
+        }
+
+        (tmp_path / "review-context.json").write_text(
+            json.dumps({"host_context": host_context})
+        )
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert _read_reconciliation_context(tmp_path)["host_context"] == host_context
+
+    def test_absent_host_context_is_omitted_defensively(self, tmp_path):
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "host_context" not in _read_reconciliation_context(tmp_path)
+
+    @pytest.mark.parametrize("contents", [
+        pytest.param(b"{", id="malformed-json"),
+        pytest.param(b'{"host_context": "nope"}', id="non-object-host"),
+        pytest.param(b"[]", id="non-object-context"),
+        pytest.param(b"\x80", id="undecodable-utf8"),
+        pytest.param(b'{"unrelated": ' + b"1" * 4301 + b'}', id="oversized-integer"),
+    ])
+    def test_malformed_or_non_object_host_context_is_omitted_defensively(
+        self, tmp_path, contents
+    ):
+        (tmp_path / "review-context.json").write_bytes(contents)
+        _write_review_json(tmp_path, "security", _make_review_json(reviewer="security", findings=[]))
+
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            "--changed-files", "src/auth.py", "--change-purpose", "Fix auth bug", "--pr-id", "42",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        context = _read_reconciliation_context(tmp_path)
+        assert "host_context" not in context
+        assert context["host_context_banner"] is None
+        assert context["changed_files"] == ["src/auth.py"]
+        assert context["change_purpose"] == "Fix auth bug"
+        assert context["pr_id"] == "42"
+        assert list(context["reviews_by_agent"]) == ["security-review"]
+
+    def test_oversized_host_context_is_read_from_disk_without_argv_transport(
+        self, tmp_path
+    ):
+        host_context = {
+            "version": 1,
+            "resolved": [
+                {
+                    "name": f"wordpress-{index}",
+                    "kind": "runtime-host",
+                    "path": f"/repo/wordpress-{index}",
+                    "source": "ecosystem-cache",
+                    "version": None,
+                    "notes": {},
+                }
+                for index in range(9000)
+            ],
+            "unresolved": [],
+            "banner": None,
+        }
+        review_context = tmp_path / "review-context.json"
+        review_context.write_text(json.dumps({"host_context": host_context}))
+        assert review_context.stat().st_size > 1_000_000
+
+        result = self._run(
+            "--output-dir", str(tmp_path), "--git-range", "abc..HEAD",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        context = _read_reconciliation_context(tmp_path)
+        assert len(context["host_context"]["resolved"]) == 9000
 
     def test_empty_output_dir(self, tmp_path):
         """Runs successfully with no review files."""
@@ -1752,3 +1921,66 @@ class TestReviewStem:
             dispatched_agents=["repo-api-reviewer-v2-reviewer"],
         )
         assert "repo-api-reviewer-v2-review" in findings
+
+
+class TestRegisteredNotesSurviveARebuild:
+    """Step 8 rebuilds the context every time it is entered — a same-run
+    retry after an interrupted reconciliator dispatch included — and the
+    orchestrator registers its claims between the build and that dispatch.
+    A rebuild that reset them would release the save gate's requirement
+    that each be answered and hand the next claim an id already spent.
+    """
+
+    def _build(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--output-dir", str(tmp_path),
+             "--git-range", "abc123..HEAD", "--changed-files", "",
+             "--dispatched-agents", ""],
+            capture_output=True, text=True, cwd=tmp_path,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        return result
+
+    def _context(self, tmp_path):
+        return json.loads(
+            artifact_path(str(tmp_path), "reconciliation_context").read_text()
+        )
+
+    def test_a_rebuild_keeps_the_claims_and_the_next_id(self, tmp_path):
+        self._build(tmp_path)
+        first = add_note(str(tmp_path), "Findings f1 and f3 describe one concern.")
+        assert first["id"] == "n1"
+
+        self._build(tmp_path)
+
+        assert self._context(tmp_path)["orchestrator_notes"] == [first]
+        assert add_note(str(tmp_path), "A second, different claim.")["id"] == "n2"
+
+    def test_a_first_build_registers_none(self, tmp_path):
+        self._build(tmp_path)
+
+        assert self._context(tmp_path)["orchestrator_notes"] == []
+
+    def test_a_malformed_collection_fails_the_rebuild_rather_than_dropping(
+        self, tmp_path
+    ):
+        """Only the validating CLI writes notes, so a collection failing
+        that grammar is state no writer can produce. Carrying it forward
+        silently is the loss this preservation exists to prevent."""
+        self._build(tmp_path)
+        add_note(str(tmp_path), "A claim worth keeping.")
+        path = artifact_path(str(tmp_path), "reconciliation_context")
+        context = json.loads(path.read_text())
+        context["orchestrator_notes"][0]["id"] = "n7"
+        path.write_text(json.dumps(context))
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--output-dir", str(tmp_path),
+             "--git-range", "abc123..HEAD", "--changed-files", "",
+             "--dispatched-agents", ""],
+            capture_output=True, text=True, cwd=tmp_path,
+        )
+
+        assert result.returncode != 0
+        assert "orchestrator_notes[0].id must be n1" in result.stderr
+        assert json.loads(path.read_text())["orchestrator_notes"][0]["id"] == "n7"

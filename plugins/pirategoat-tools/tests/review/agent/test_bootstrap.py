@@ -731,12 +731,43 @@ class TestLoadPrIntent:
         intent = load_pr_intent(str(tmp_path))
         assert "WOOPLUG-123" in intent
 
-    def test_truncates_long_body(self, tmp_path):
+    def test_the_body_is_never_cut(self, tmp_path):
         ctx = {"pr": {"title": "Fix thing", "body": "x" * 1000}}
         (tmp_path / "review-context.json").write_text(json.dumps(ctx))
         intent = load_pr_intent(str(tmp_path))
-        assert len(intent) < 700  # 500 char truncation + title + overhead
-        assert "..." in intent
+        assert "x" * 1000 in intent
+        assert "..." not in intent
+
+    def test_html_comments_are_stripped_from_the_fallback_body(self, tmp_path):
+        ctx = {"pr": {"title": "Fix thing", "body": "Real <!-- template: passwords --> prose"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        intent = load_pr_intent(str(tmp_path))
+        assert "PR Description: Real  prose" in intent
+        assert "password" not in intent
+
+    def test_an_extracted_description_replaces_the_body_with_a_pointer(self, tmp_path):
+        ctx = {"pr": {"title": "Fix thing", "body": "Raw body with checklist"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        purpose = (
+            "## Verify\nNone.\n## Context\nNone.\n"
+            "## Author's description (extracted)\n> The substantive part.\n"
+        )
+        intent = load_pr_intent(str(tmp_path), change_purpose=purpose)
+        assert "Raw body with checklist" not in intent
+        assert 'PR Description: extracted by the orchestrator, by judgement, under REVIEW FOCUS → "Author\'s description (extracted)"' in intent
+
+    def test_a_none_author_section_keeps_the_body(self, tmp_path):
+        ctx = {"pr": {"title": "Fix thing", "body": "Raw body"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        purpose = "## Verify\nNone.\n## Context\nNone.\n## Author's description (extracted)\nNone.\n"
+        intent = load_pr_intent(str(tmp_path), change_purpose=purpose)
+        assert "PR Description: Raw body" in intent
+
+    def test_an_unstructured_purpose_keeps_the_body(self, tmp_path):
+        ctx = {"pr": {"title": "Fix thing", "body": "Raw body"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        intent = load_pr_intent(str(tmp_path), change_purpose="Free prose, no headings.")
+        assert "PR Description: Raw body" in intent
 
     def test_handles_malformed_json(self, tmp_path):
         (tmp_path / "review-context.json").write_text("not json")
@@ -822,6 +853,51 @@ class TestChangePurposeInjection:
         )
         assert "=== REVIEW FOCUS (pipeline synthesis) ===" in output
         assert "retry logic" in output
+
+    def test_a_structured_purpose_states_the_two_tiers(self):
+        purpose = (
+            "## Verify\nV1. claim — source: PR description\n## Context\nNone.\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        output = build_output(
+            agent_name="security-reviewer", plugin_root="/fake", status="OK",
+            review_rules="Rules here", domain_rules=None, scope_output="scope",
+            exploration_scope=None, output_dir="/tmp/test", pr_number="1",
+            reviewer_name="security", review_claimable_count=0, has_php=False,
+            change_purpose=purpose,
+        )
+        assert 'record_check(..., verifies=["V2"])' in output
+        assert "`## Context` items are facts to take as given" in output
+        assert "record a finding as you would for any defect and name the item" in output
+        assert "record an observation" not in output
+        assert 'verifies=["V1"])  # the Verify item(s) this check settles' in output
+        assert output.index("=== REVIEW FOCUS (pipeline synthesis) ===") < output.index("## Verify")
+
+    def test_a_purpose_with_no_verify_items_asks_for_no_citation(self):
+        purpose = (
+            "## Verify\nNone.\n## Context\nC1. fact — source: commit abc\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        output = build_output(
+            agent_name="security-reviewer", plugin_root="/fake", status="OK",
+            review_rules="Rules here", domain_rules=None, scope_output="scope",
+            exploration_scope=None, output_dir="/tmp/test", pr_number="1",
+            reviewer_name="security", review_claimable_count=0, has_php=False,
+            change_purpose=purpose,
+        )
+        assert "verifies=" not in output
+        assert "`## Verify` declares nothing load-bearing for this change." in output
+        assert "`## Context` items are facts to take as given" in output
+
+    def test_an_unstructured_purpose_gets_no_tier_sentence(self):
+        output = build_output(
+            agent_name="security-reviewer", plugin_root="/fake", status="OK",
+            review_rules="Rules here", domain_rules=None, scope_output="scope",
+            exploration_scope=None, output_dir="/tmp/test", pr_number="1",
+            reviewer_name="security", review_claimable_count=0, has_php=False,
+            change_purpose="Adds retry logic to the payment gateway.",
+        )
+        assert "verifies=" not in output
 
 class TestResolveOverallStatus:
     """Defense-in-depth: primary NO_DOMAIN_FILES + secondary content → scoped OK."""

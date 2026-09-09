@@ -13,7 +13,7 @@ tools:
   - Write
 ---
 
-## MANDATORY SETUP — Run Bootstrap Before Mutating
+## MANDATORY SETUP — Run Bootstrap Before Reviewing
 
 Do NOT start mutation testing until this step is done:
 

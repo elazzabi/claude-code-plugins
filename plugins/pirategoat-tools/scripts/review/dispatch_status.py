@@ -1,5 +1,7 @@
 """Canonical dispatch-plan status vocabulary shared by producers and consumers."""
 
+import json
+import os
 import re
 
 # Producer agent-name grammar: lowercase ASCII kebab-case. Agent names become
@@ -15,6 +17,19 @@ SKIPPED_OVERRIDE = "SKIPPED_OVERRIDE"
 SKIPPED_QUICK_MODE = "SKIPPED_QUICK_MODE"
 SKIPPED_TRIAGE = "SKIPPED_TRIAGE"
 
+# The orchestrator's reason beside an override status, written by
+# dispatch_adjust.py and read by orchestration and the manifest builders.
+OVERRIDE_REASON_KEY = "override_reason"
+# The status the planner gave an agent before the orchestrator overrode it;
+# stamped once beside the override reason so the step-6 briefing and the
+# manifest can name the transition without re-reading the initial plan.
+PLANNER_STATUS_KEY = "planner_status"
+# The changed files an override skip left with no reviewer, measured by
+# dispatch_adjust.py on every call and read by orchestration and the step-6
+# briefing; the lead is the one spelling both renderers use.
+ORPHANED_FILES_KEY = "orphaned_files"
+ORPHANED_FILES_LEAD = "leaves reviewed by no one: "
+
 DISPATCHED_STATUSES = frozenset({DISPATCH, DISPATCH_OVERRIDE})
 SKIPPED_STATUSES = frozenset({
     SKIPPED,
@@ -23,6 +38,36 @@ SKIPPED_STATUSES = frozenset({
     SKIPPED_TRIAGE,
 })
 SUPPORTED_DISPATCH_STATUSES = DISPATCHED_STATUSES | SKIPPED_STATUSES
+
+# Why the planner decided, as one enumeration emitted from the code path
+# that decided. Telemetry discloses and counts these; the prose `reason`
+# beside each stays undisclosed. Nothing derives a signal from a reason.
+SIGNAL_NO_DOMAIN_FILES = "no_domain_files"
+SIGNAL_ALWAYS = "always"
+SIGNAL_TEST_ONLY = "test_only"
+SIGNAL_MIN_ADDED_LINES = "min_added_lines"
+SIGNAL_SOURCE_GATE = "source_gate"
+SIGNAL_KEYWORD = "keyword"
+SIGNAL_REPOSITORY_KEYWORD = "repository_keyword"
+SIGNAL_CHECK = "check"
+SIGNAL_DIFF_UNAVAILABLE = "diff_unavailable"
+SIGNAL_EVIDENCE_GATE = "evidence_gate"
+SIGNAL_DEFAULT = "default"
+SIGNAL_UNTRIAGED = "untriaged"
+SIGNAL_QUICK_MODE = "quick_mode"
+SIGNAL_REPO_REVIEWER = "repo_reviewer"
+SIGNAL_OVERRIDE = "override"
+DISPATCH_SIGNALS = frozenset({
+    SIGNAL_NO_DOMAIN_FILES, SIGNAL_ALWAYS, SIGNAL_TEST_ONLY,
+    SIGNAL_MIN_ADDED_LINES, SIGNAL_SOURCE_GATE, SIGNAL_KEYWORD,
+    SIGNAL_REPOSITORY_KEYWORD, SIGNAL_CHECK, SIGNAL_DIFF_UNAVAILABLE,
+    SIGNAL_EVIDENCE_GATE, SIGNAL_DEFAULT, SIGNAL_UNTRIAGED,
+    SIGNAL_QUICK_MODE, SIGNAL_REPO_REVIEWER, SIGNAL_OVERRIDE,
+})
+# Dispatches resting on no positive evidence; quick mode may skip these.
+LOW_SIGNAL_DISPATCH_SIGNALS = frozenset({
+    SIGNAL_ALWAYS, SIGNAL_DEFAULT, SIGNAL_UNTRIAGED,
+})
 
 
 def validate_dispatch_plan_agents(agents: object) -> list[dict]:
@@ -61,6 +106,27 @@ def validate_dispatch_plan_agents(agents: object) -> list[dict]:
     return validated_agents
 
 
+def load_dispatch_plan(path) -> dict:
+    """The dispatch plan at ``path`` with its agents validated.
+
+    Raises FileNotFoundError when there is no plan and ValueError naming the
+    file when it is not JSON, not an object, or its agents are malformed —
+    every reader of a plan goes through here, so a plan-shape change is one
+    edit.
+    """
+    path = os.fspath(path)
+    name = os.path.basename(path)
+    with open(path, "r", encoding="utf-8") as handle:
+        try:
+            plan = json.load(handle)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"{name} is not valid JSON: {err}") from None
+    if not isinstance(plan, dict):
+        raise ValueError(f"{name} must be a JSON object, got {type(plan).__name__}")
+    validate_dispatch_plan_agents(plan.get("agents"))
+    return plan
+
+
 __all__ = [
     "AGENT_NAME_RE",
     "DISPATCH",
@@ -69,8 +135,28 @@ __all__ = [
     "SKIPPED_OVERRIDE",
     "SKIPPED_QUICK_MODE",
     "SKIPPED_TRIAGE",
+    "OVERRIDE_REASON_KEY",
+    "PLANNER_STATUS_KEY",
     "DISPATCHED_STATUSES",
     "SKIPPED_STATUSES",
     "SUPPORTED_DISPATCH_STATUSES",
+    "SIGNAL_NO_DOMAIN_FILES",
+    "SIGNAL_ALWAYS",
+    "SIGNAL_TEST_ONLY",
+    "SIGNAL_MIN_ADDED_LINES",
+    "SIGNAL_SOURCE_GATE",
+    "SIGNAL_KEYWORD",
+    "SIGNAL_REPOSITORY_KEYWORD",
+    "SIGNAL_CHECK",
+    "SIGNAL_DIFF_UNAVAILABLE",
+    "SIGNAL_EVIDENCE_GATE",
+    "SIGNAL_DEFAULT",
+    "SIGNAL_UNTRIAGED",
+    "SIGNAL_QUICK_MODE",
+    "SIGNAL_REPO_REVIEWER",
+    "SIGNAL_OVERRIDE",
+    "DISPATCH_SIGNALS",
+    "LOW_SIGNAL_DISPATCH_SIGNALS",
+    "load_dispatch_plan",
     "validate_dispatch_plan_agents",
 ]

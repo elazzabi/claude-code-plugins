@@ -1,0 +1,80 @@
+{
+  "schema": 2,
+  "adjustments": [
+    {
+      "action": "remove",
+      "target": {
+        "kind": "finding",
+        "id": "f8"
+      },
+      "rationale": "<redacted>",
+      "fields": {},
+      "adjustment_id": "5a91fbc09bda4c81bd5f470011407c1c"
+    },
+    {
+      "action": "correct",
+      "target": {
+        "kind": "check",
+        "id": "c13"
+      },
+      "fields": {
+        "result": "<redacted>",
+        "method": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "3bb20c7ae62c499e91e8732a23d86d3f"
+    },
+    {
+      "action": "demote",
+      "target": {
+        "kind": "finding",
+        "id": "f1"
+      },
+      "fields": {
+        "severity": "medium",
+        "title": "<redacted>",
+        "description": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "b247d99aef6e42ae95744db3385ea81c"
+    },
+    {
+      "action": "demote",
+      "target": {
+        "kind": "finding",
+        "id": "f4"
+      },
+      "fields": {
+        "severity": "medium",
+        "description": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "265fa76e3a2b425fbcf0acc809023659"
+    },
+    {
+      "action": "correct",
+      "target": {
+        "kind": "finding",
+        "id": "f3"
+      },
+      "fields": {
+        "recommendation": "<redacted>"
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "123e17d238a7485e95b0b2b92b79549a"
+    },
+    {
+      "action": "rescope",
+      "target": {
+        "kind": "finding",
+        "id": "f7"
+      },
+      "fields": {
+        "file": "client/express-checkout/shortcode-buttons-express/button-ui.js",
+        "line": 30
+      },
+      "rationale": "<redacted>",
+      "adjustment_id": "2c006941ec874a03bae65152e6723b3e"
+    }
+  ]
+}

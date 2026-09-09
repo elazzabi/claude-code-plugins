@@ -1,0 +1,101 @@
+{
+  "pr_id": "12089",
+  "reviewer": "a11y",
+  "timestamp": "2026-09-04T23:12:37.892098",
+  "plugin_version": "1.118.0",
+  "schema": 2,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 2,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 1,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "screen-reader",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 325,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f2",
+      "category": "color-contrast",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 765,
+      "recommendation": "<redacted>",
+      "confidence": 0.7
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "a11y"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 339274,
+    "confidence_score": 0.85,
+    "next_finding_number": 3,
+    "next_check_number": 5
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 4,
+  "reviewed_file_count": 4,
+  "in_scope_review_file_count": 4
+}

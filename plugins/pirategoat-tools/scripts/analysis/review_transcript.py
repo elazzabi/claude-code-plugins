@@ -1282,6 +1282,25 @@ def _usage_summary(
     return total, dict(sorted(by_model.items())), usage_valid, usage_observed
 
 
+def usage_summary_for_transcript(path: str | Path) -> dict[str, Any]:
+    """Token usage of one transcript, the way the pipeline measures it: one
+    assistant response split across records is counted once (last record
+    per `message.id`), and a damaged line is a reported gap, not a crash.
+    `session_metrics.py` and the session-analysis skill call this instead of
+    summing `usage` blocks themselves — that second parser over-counted a
+    reviewer by 45–84 % in the run-1 audit.
+    """
+    entries, parse_gap = _read_jsonl(path)
+    total, by_model, usage_valid, usage_observed = _usage_summary(entries)
+    return {
+        "usage": total,
+        "usage_by_model": by_model,
+        "usage_valid": usage_valid,
+        "usage_observed": usage_observed,
+        "parse_gap": parse_gap,
+    }
+
+
 def _opaque_target(value: object) -> str:
     if not isinstance(value, str) or not value:
         return "none"
@@ -1386,6 +1405,9 @@ def _normalize_repo_path(path: object, repo_root: Path) -> str | None:
     except (OSError, ValueError):
         return None
     if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+        return None
+    if resolved.is_dir():
+        # A directory is never a file read: `rg pattern src/` walks it.
         return None
     return relative.as_posix()
 
@@ -1506,9 +1528,381 @@ def _file_operands(tokens: list[str], command_name: str) -> list[str]:
     return _literal_path_tokens(operands)
 
 
-def _simple_bash_read_paths(command: object) -> list[str]:
-    tokens = _shell_tokens(command)
-    if tokens is None:
+# Simple commands whose operands are read, beyond the original allowlist,
+# because they are the read idioms the harness itself hands agents ("read
+# files with cat, head, or sed -n, search with grep") — run 4's reconciliator
+# read every source file through `sed -n` and `grep -n` inside `cd <repo>
+# && …` compounds and measured zero repository reads.
+_SED_VALUE_OPTIONS = {"-e", "-f", "-l", "--expression", "--file", "--line-length"}
+_SED_WRITE_OPTIONS = {"-i", "--in-place"}
+_GREP_COMMANDS = {"grep", "egrep", "fgrep"}
+_GREP_VALUE_OPTIONS = {
+    "-e", "-f", "-A", "-B", "-C", "-m", "-d", "-D",
+    "--regexp", "--file", "--after-context", "--before-context", "--context",
+    "--max-count", "--include", "--exclude", "--exclude-dir", "--color",
+    "--colour", "--directories", "--devices", "--label",
+}
+# ripgrep is recursive by default and has no recursion flag: its `-r` is
+# `--replace REPLACEMENT`, so it must not be read as grep's `-r`.
+_RG_VALUE_OPTIONS = {
+    "-e", "-f", "-A", "-B", "-C", "-m", "-d", "-E", "-g", "-j", "-M", "-r",
+    "-t", "-T",
+    "--regexp", "--file", "--after-context", "--before-context", "--context",
+    "--max-count", "--max-depth", "--encoding", "--glob", "--iglob",
+    "--threads", "--max-columns", "--replace", "--type", "--type-not",
+    "--type-add", "--color", "--colour", "--pre", "--pre-glob", "--sort",
+    "--sortr", "--ignore-file", "--max-filesize", "--path-separator",
+    "--context-separator", "--engine",
+}
+_GREP_RECURSIVE_OPTIONS = {"-r", "-R", "--recursive", "--dereference-recursive"}
+_NL_VALUE_OPTIONS = {
+    "-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w",
+    "--body-numbering", "--section-delimiter", "--footer-numbering",
+    "--header-numbering", "--line-increment", "--join-blank-lines",
+    "--number-format", "--number-separator", "--starting-line-number",
+    "--number-width",
+}
+_REDIRECT_OPERATORS = {"<", ">", ">>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>", ">|"}
+_HEREDOC_OPERATORS = {"<<", "<<-"}
+_AND_OR_OPERATORS = {"&&", "||"}
+_LIST_TERMINATORS = {";", "&"}
+# Options that carry the pattern/script themselves, so every operand after
+# them is a file (`grep -f patterns.txt target.php`, `sed -e p foo.php`).
+_PATTERN_SUPPLYING_OPTIONS = {"-e", "-f", "--regexp", "--expression", "--file"}
+
+
+def _pattern_then_files(
+    tokens: list[str], value_options: set[str], pattern_given: bool = False,
+) -> list[str]:
+    """Operands of a pattern-taking reader: options first, the pattern once,
+    then files. `-e PATTERN` supplies the pattern, so every operand is a file."""
+    operands: list[str] = []
+    options_done = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if options_done:
+            # `--` ends the options, not the pattern: `grep -- pat file`
+            # still names its pattern first.
+            if pattern_given:
+                operands.append(token)
+            pattern_given = True
+            index += 1
+            continue
+        if token == "--":
+            options_done = True
+            index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            if token.split("=", 1)[0] in _PATTERN_SUPPLYING_OPTIONS:
+                pattern_given = True
+            index += 1
+            continue
+        if token in value_options:
+            if token in _PATTERN_SUPPLYING_OPTIONS:
+                pattern_given = True
+            index += 2
+            continue
+        if token.startswith("-") and len(token) > 1:
+            # A clustered short option ending in a value-taking flag, such as
+            # `-A3` or `-ne`, carries its value inline; `-e` inside a
+            # cluster (`-ne`) marks the pattern as given.
+            if token[1] != "-" and any(f"-{ch}" in value_options for ch in token[1:]):
+                for ch in token[1:]:
+                    if f"-{ch}" in value_options:
+                        if f"-{ch}" in _PATTERN_SUPPLYING_OPTIONS:
+                            pattern_given = True
+                        if token.endswith(ch):
+                            index += 1  # value is the next token
+                        break
+            index += 1
+            continue
+        if not pattern_given:
+            pattern_given = True
+            index += 1
+            continue
+        operands.append(token)
+        index += 1
+    return operands
+
+
+def _simple_command_read_paths(tokens: list[str]) -> list[str]:
+    """Paths one simple command (no operators) reads, or []."""
+    if not tokens or _UNRESOLVED_PATH.search(tokens[0]):
+        return []
+    command_name = tokens[0]
+    if command_name == "sed":
+        if any(
+            token in _SED_WRITE_OPTIONS or token.startswith("-i")
+            for token in tokens[1:]
+        ):
+            return []
+        return _literal_path_tokens(_pattern_then_files(tokens, _SED_VALUE_OPTIONS))
+    if command_name == "rg":
+        # Recursive by default; a directory operand is dropped where the
+        # path is normalised, since a directory is never a file read.
+        return _literal_path_tokens(_pattern_then_files(tokens, _RG_VALUE_OPTIONS))
+    if command_name in _GREP_COMMANDS:
+        # `-r` may sit inside a cluster (`-rn`); a recursive search names
+        # directories, which are not file reads.
+        if any(
+            token in _GREP_RECURSIVE_OPTIONS
+            or (token.startswith("-") and not token.startswith("--") and set("rR") & set(token[1:]))
+            for token in tokens[1:]
+        ):
+            return []
+        return _literal_path_tokens(_pattern_then_files(tokens, _GREP_VALUE_OPTIONS))
+    if command_name == "nl":
+        # No pattern: every operand after the options is a file.
+        return _literal_path_tokens(_pattern_then_files(tokens, _NL_VALUE_OPTIONS, pattern_given=True))
+    return _simple_bash_read_paths(tokens)
+
+
+# A word that unquotes to something operator-shaped (`'&&'`, `";"`) is an
+# argument, not a separator; it is replaced by a token that is never a
+# path (`$` fails the literal-path check) and never a command name.
+_QUOTED_OPERATOR = "$quoted-operator"
+_OPERATOR_CHARS = frozenset(";&|<>")
+
+
+def _quoted_words(text: str) -> Optional[list[str]]:
+    """The text's words with their quotes kept, operators as their own
+    words; None when a quote is left open."""
+    try:
+        lexer = shlex.shlex(text, posix=False, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _quote_aware_tokens(raw_tokens: list[str]) -> Optional[list[str]]:
+    """The tokens of one lexed line with operators told apart from quoted
+    text.
+
+    Lexed with quotes kept, so an unquoted `&&` and a quoted `'&&'` are
+    different words; each word is then unquoted on its own. None when a
+    word does not unquote to one word.
+    """
+    tokens: list[str] = []
+    for token in raw_tokens:
+        if token and set(token) <= _OPERATOR_CHARS:
+            tokens.append(token)
+            continue
+        try:
+            words = shlex.split(token, posix=True)
+        except ValueError:
+            return None
+        if len(words) != 1:
+            return None
+        word = words[0]
+        tokens.append(_QUOTED_OPERATOR if word and set(word) <= _OPERATOR_CHARS else word)
+    return tokens
+
+
+def _and_or_lists(command: str) -> list[tuple[list[list[str]], list[str], bool]]:
+    """The command's and-or lists in order, as the shell would run them.
+
+    Each list is `(commands, operators, backgrounded)`: its simple commands
+    (token lists), the `&&`/`||` operator before each command after the
+    first, and whether `&` sent it to the background. Lines, `;` and `&`
+    end a list; a line ending in `&&` or `||` continues on the next one. A
+    heredoc body is opaque up to its own terminator word, and a quoted
+    word spans lines until its closing quote — a quote the command never
+    closes leaves everything from it on unknown, and nothing there counts.
+    """
+    lists: list[tuple[list[list[str]], list[str], bool]] = []
+    commands: list[list[str]] = []
+    operators: list[str] = []
+    simple: list[str] = []
+    terminator: str | None = None
+    open_quote = ""  # the lines an unclosed quote has joined so far
+
+    def close(backgrounded: bool) -> None:
+        nonlocal commands, operators, simple
+        commands.append(simple)
+        if any(commands):
+            lists.append((commands, operators, backgrounded))
+        commands, operators, simple = [], [], []
+
+    for line in command.replace("\r", "\n").split("\n"):
+        if terminator is not None:
+            # A body line naming a reader is text, not a command.
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        if open_quote:
+            line = open_quote + "\n" + line
+        words = _quoted_words(line)
+        if words is None:
+            open_quote = line
+            continue
+        open_quote = ""
+        tokens = _quote_aware_tokens(words)
+        if tokens is None:
+            continue
+        for index, token in enumerate(tokens):
+            if token in _HEREDOC_OPERATORS and index + 1 < len(tokens):
+                terminator = tokens[index + 1].lstrip("-")
+                break
+        for token in tokens:
+            if token in _AND_OR_OPERATORS:
+                commands.append(simple)
+                operators.append(token)
+                simple = []
+            elif token in _LIST_TERMINATORS:
+                close(token == "&")
+            else:
+                simple.append(token)
+        # A line ending in `&&`/`||` continues its list on the next line.
+        if not (tokens and tokens[-1] in _AND_OR_OPERATORS):
+            close(False)
+    close(False)
+    return lists
+
+
+def _pipeline_reader(simple: list[str]) -> tuple[list[str], list[str], bool]:
+    """The reading stage of one simple command, its `<` input, and whether
+    it is piped into a further stage.
+
+    The reader is the first pipeline stage; a redirect ends the operands and
+    a bare fd number before it (`2>&1`) is not one. An input redirect's
+    target (`sed -n 1p < foo.php`) is read. A piped reader's exit status
+    is masked by the last stage's (no pipefail), so the caller treats it as
+    uncertain.
+    """
+    cut = len(simple)
+    redirected_input: list[str] = []
+    piped = False
+    for index, token in enumerate(simple):
+        if token.startswith("|") or token in _REDIRECT_OPERATORS:
+            if cut == len(simple):
+                cut = index
+                if cut and simple[cut - 1].isdigit():
+                    cut -= 1
+            if token == "<" and index + 1 < len(simple):
+                redirected_input = _literal_path_tokens([simple[index + 1]])
+            if token.startswith("|"):
+                piped = True
+                break
+    return simple[:cut], redirected_input, piped
+
+
+def _may_end_shell_successfully(simple: list[str]) -> bool:
+    """Whether one simple command can end the shell with status 0 before
+    anything after it runs: `exec`, or an `exit`/`return` whose status is
+    absent (the last command's) or a literal zero. `exit 1` ends the shell
+    too, but a call that did so did not succeed, and the caller only asks
+    about calls that did."""
+    if not simple:
+        return False
+    if simple[0] == "exec":
+        return True
+    if simple[0] in ("exit", "return"):
+        status = simple[1] if len(simple) > 1 else "0"
+        return not (status.isdigit() and int(status) != 0)
+    return False
+
+
+def _bash_read_paths(command: object, repo_root: Path) -> list[str]:
+    """Every repository-relative or absolute path a Bash command reads.
+
+    Compounds are walked as the shell would run them: lines and `;`, `&&`,
+    `||`, `&` separate simple commands; the first segment of a pipeline is
+    the reader, but a piped reader is not counted, because a pipeline's
+    exit status is its last stage's and a reader that failed before
+    opening its file (`sed -n '[' a.php | head` exits 0) is masked; a
+    redirection ends the operand list (an output target is
+    written, an input target `< file` is read); `cd <dir>` moves the working
+    directory for the relative operands that follow it, and a `cd` to an
+    unresolvable directory (a variable, `~`, `-`) or to one that is not a
+    directory under `repo_root` (the shell would have stayed put, and a
+    fabricated location would count reads that never happened) leaves them
+    uncounted until the next literal `cd`. A heredoc body is opaque up to its own
+    terminator word; a `<<<` here-string has no body. Every operand still has to
+    be a literal path.
+
+    The caller counts reads only from calls that succeeded, and a success
+    certifies exactly one thing: the last foreground and-or list ended in
+    success, so every `&&`-joined command in it ran and succeeded — unless
+    an `exit`, `exec` or `return` in an earlier list may have ended the
+    shell before it, when the success is that command's and certifies
+    nothing. A read is counted only there. Everywhere else — an earlier list, a
+    backgrounded one, or any list with `||` — a reader may not have run,
+    or ran and failed before opening its file (`sed -n '[' a.php; true`
+    exits 0), so nothing is counted. The first command of an earlier
+    foreground list is still known to have run, which is enough for a `cd`
+    there to move the detector (its own success is checked against the
+    disk); a `cd` after it leaves the working directory unknown, and a
+    backgrounded list is a subshell whose `cd` moves nothing. Not exhaustive by
+    construction: a read through any other tool is invisible, which is why
+    the measurement is reported as "no read observed", never "read nothing".
+    """
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        return []
+    reads: list[str] = []
+    cwd: str | None = ""  # "" is the repository root; None is unknown
+    lists = _and_or_lists(command)
+    # An `exit`, `exec` or `return` may have ended the shell with status 0
+    # before anything after it ran (`test -f x || exit 0; cat y`, or
+    # `true && exit 0 && cat y`, exit 0 with y unread), so nothing after
+    # one is certified, in the same list or a later one.
+    may_have_exited = False
+    for position, (commands, operators, backgrounded) in enumerate(lists):
+        # `&` runs the list in a subshell: its `cd` moves nothing in the
+        # foreground and its `exit` ends nothing here, so the list is
+        # opaque (`cd src & cat a.py` reads the root's a.py).
+        if backgrounded:
+            continue
+        every_command_ran = position == len(lists) - 1 and "||" not in operators
+        for index, simple in enumerate(commands):
+            ran = index == 0 or every_command_ran
+            if may_have_exited:
+                continue
+            if _may_end_shell_successfully(simple):
+                may_have_exited = True
+                continue
+            simple, redirected_input, piped = _pipeline_reader(simple)
+            # A pipeline runs its stages in subshells: a piped `cd` moves
+            # nothing, and a piped reader's success is unknown.
+            if not simple or piped:
+                continue
+            if simple[0] == "cd":
+                target = simple[1] if len(simple) > 1 else None
+                if (
+                    not ran or target is None or target == "-"
+                    or _UNRESOLVED_PATH.search(target) or target.startswith("~")
+                ):
+                    cwd = None
+                    continue
+                if os.path.isabs(target):
+                    moved = target
+                elif cwd is None:
+                    continue
+                else:
+                    moved = os.path.normpath(os.path.join(cwd, target)) if cwd else target
+                # A `cd` to something that is not a directory fails and the
+                # shell stays where it was; rather than guess which, the
+                # location is unknown until the next `cd` that resolves.
+                on_disk = moved if os.path.isabs(moved) else os.path.join(str(repo_root), moved)
+                cwd = moved if os.path.isdir(on_disk) else None
+                continue
+            # Ran is not succeeded: only the certified list counts reads.
+            if not every_command_ran:
+                continue
+            for operand in _simple_command_read_paths(simple) + redirected_input:
+                if os.path.isabs(operand) or operand.startswith("~"):
+                    reads.append(operand)
+                elif cwd is not None:
+                    reads.append(os.path.join(cwd, operand) if cwd else operand)
+    return reads
+
+
+def _simple_bash_read_paths(tokens: list[str]) -> list[str]:
+    """Paths the simple commands the detector knew first read: `git diff --`,
+    `git show <rev>:<path>`, and the cat/head/tail/wc family."""
+    if not tokens:
         return []
 
     if len(tokens) >= 2 and tokens[:2] == ["git", "diff"]:
@@ -1655,7 +2049,7 @@ def _analyze_entries(
         if call["name"] == "Read":
             candidates = [call["input"].get("file_path")]
         elif call["name"] == "Bash":
-            candidates = _simple_bash_read_paths(call["input"].get("command"))
+            candidates = _bash_read_paths(call["input"].get("command"), repo)
         for candidate in candidates:
             normalized = _normalize_repo_path(candidate, repo)
             if normalized is not None:
@@ -2035,6 +2429,7 @@ def enrich_run_transcript(
                     "usage": None,
                     "usage_by_model": None,
                     "tool_calls": None,
+                    "repository_reads": None,
                 }
             )
             continue
@@ -2121,6 +2516,8 @@ def enrich_run_transcript(
                 "usage": analysis["usage"],
                 "usage_by_model": analysis["usage_by_model"],
                 "tool_calls": analysis["tool_calls"],
+                # Count distinct repository files in normalized read evidence.
+                "repository_reads": len(analysis["observed_reads"]["all"]),
             }
         )
         failures.extend(
@@ -2153,6 +2550,11 @@ def enrich_run_transcript(
         | agent_transcript_parse_gaps
         | unresolved_evidence
     )
+    # A partial actor transcript cannot establish an exact read count, even
+    # zero. Preserve its usable token usage and other actors' complete counts.
+    for row in agent_usage:
+        if row["agent"] in incomplete_read_agents:
+            row["repository_reads"] = None
     # Two independent completeness axes: whether every expected transcript
     # was observed and classified (per actor family), and — for the reads
     # partition only — whether an authoritative scope mapping backed the

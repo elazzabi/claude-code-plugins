@@ -29,7 +29,7 @@ Top-level keys:
 
 1. **`pr_id`, `changed_files`, `dispatched_agents`, `missing_agents`** — the run's metadata.
 2. **`change_purpose`** — what the change *claims* to accomplish (author-stated, distilled from the PR description, commits, and linked issues). Use to calibrate severity — a finding about missing validation is higher severity on a payment endpoint than on a debug utility. But treat it as claims to verify, not context to adopt: a discriminator or assumption asserted here (e.g. "condition X identifies population Y") is exactly the kind of claim findings exist to test, and a finding is not wrong for contradicting it. May be empty for non-PR reviews.
-3. **`reviews_by_agent`** — an object keyed by agent stem (`security-review`, `code-review`, …), each carrying that agent's `verdict`, `findings` (severity, optional `severity_floor`, `file`, `line`, `description`, `recommendation`, `category`, `confidence`), `checks` (question, method, result, and structured `source_reviewers`), `positive_observations`, and optionally prioritized `recommendations`.
+3. **`reviews_by_agent`** — an object keyed by agent stem (`security-review`, `code-review`, …), each carrying that agent's `verdict`, `findings` (severity, optional `severity_floor`, `file`, `line`, `description`, `recommendation`, `category`, `confidence`), `checks` (question, method, result, structured `source_reviewers`, and optionally `verifies` — the change purpose's Verify item ids the check settles), `positive_observations`, and optionally prioritized `recommendations`.
 4. **`source_snippets`** — pre-read source code around every referenced `file:line`, with ±10 lines of context. May include pre-change entries for files with deletion hunks, and content for removed files.
 5. **`scope_annotations`** — an object mapping `file:line` to a scope status:
    - `IN_SCOPE:in_hunk` — line inside a changed hunk
@@ -38,6 +38,9 @@ Top-level keys:
    - `OUT_OF_SCOPE:file_not_in_diff` and `OUT_OF_SCOPE:metadata_only` — structurally certain: the file is not in the diff at all, or its only change is a rename/chmod. The pipeline has already adjudicated these — see `prefiltered` below.
 6. **`prefiltered_out_of_scope`** — `{"count": N, "by_agent": {...}}`. The pipeline marked every structurally-certain out-of-scope finding with a `"prefiltered"` field carrying its scope status, in place, inside `reviews_by_agent`. **Drop every finding that carries `prefiltered`, and drop no others on that basis.** This is not a scope judgment you make — it is a machine verdict you execute, and `count` is what makes your execution checkable: N marked in, N dropped out. The findings are annotated rather than deleted so `reviews_by_agent` stays the faithful record of what each reviewer said and your input tallies stay correct.
 7. **`host_context_banner`** — the degraded-host banner, if one applies. Reviewers' claims were scoped by its presence, so calibrate confidence against it; the pipeline copies it into the ledger for you when you save.
+8. **`host_context`** — the full local-only `review_context.host_context` manifest when available, including resolved host paths, identities, sources, and unresolved entries. Use it only to verify host-qualified `source_cited` values against the same resolved copy; it is absent when the caller could not provide the manifest, and it is never uploaded or shared telemetry.
+9. **`orchestrator_notes`** — `[{"id": "n1", "note": "..."}]`, possibly empty. Claims the orchestrator registered before dispatching you, stated as claims. You answer every one of them in the ledger with `builder.resolve_note(id, outcome=..., evidence=...)` — `confirmed`, `refuted`, or `not_checked` with the reason you could not check — and the save refuses a ledger that leaves one unanswered. A `confirmed` note whose evidence settles a Verify item cites it with `verifies=["V2"]`; the record's Verify table then credits you for it. A note is an input to test, exactly like `change_purpose`; it is never a conclusion to adopt.
+10. **`verify_items`**, **`context_items`**, **`change_purpose_problems`** — the change purpose's tiers, parsed. Each Verify item is `{"id": "V1", "text", "source", "carried_over", "checks": [{"reviewer", "id", "result"}]}` — the reviewer checks that cite it. Empty lists when the purpose declared no tiers. A Verify item with no citing check is a claim nobody settled: say so in your assessment, and do not settle it yourself unless you read the code. A Context item a finding contradicts is evidence the orchestrator mis-tiered it; keep the finding and name the item. `change_purpose_problems` are the pipeline's parse facts about the purpose (a missing heading, an item without a source, an id under the wrong tier, a body it could not read): do not repair the purpose, and when a check cites an item one of them names, say so in that check's conclusion.
 
 **Key fields:**
 - **`dispatched_agents`** and **`missing_agents`** — who was dispatched, and who was dispatched but produced no output. Both are measured by the pipeline and stamped onto the ledger at save; you never author them. An entry that appears in both `missing_agents` and `reviews_by_agent` is a contradiction worth reporting.
@@ -64,6 +67,8 @@ Read `synthesis/reconciliation-context.json`. Every agent's findings are under `
 
 ## Phase 2: Scope & Verify
 
+When a finding carries a host-qualified `source_cited` value, use the local `host_context` map to resolve its host and identity, then verify the cited upstream-relative path against that resolved host's path. If the map is absent or the host identity does not match, disclose the limitation and do not silently substitute another copy.
+
 For each concern group:
 
 1. **Scope check — file and line in diff:**
@@ -86,7 +91,7 @@ For each concern group:
    - **FALSE POSITIVE** — claim is factually wrong (code doesn't do what the finding says)
    - **OUT OF SCOPE** — not in the diff, or references pre-existing code
 
-4. **Drop** false positives and out-of-scope concerns entirely. They do not appear in output.
+4. **Drop** false positives and out-of-scope concerns from the findings — and record every dropped source finding with `builder.drop_finding(reviewer, id, reason=..., evidence=...)`, one call per source finding, where `reviewer` is the `reviews_by_agent` key (`security-review`) and `id` the finding's own `fN` from the context. `reason` is `false_positive` or `out_of_scope` with the file:line evidence that settled it, or `prefiltered` (no evidence needed) for every finding carrying the `prefiltered` field. Nothing you read may go missing: the save rejects a ledger in which a source finding is neither merged into one of your findings nor dropped.
 
 ## Severity Floors and Verified Mitigations (regression-class findings)
 
@@ -120,7 +125,7 @@ How a claim was verified determines how much it weighs. These rules apply to eve
 1. **Correlated signals are one signal.** Findings, approvals, or checks that share a verification method — the same search string, the same snippet window, the same untested assumption — are **one probe** regardless of how many agents repeated it. Convergence raises confidence only across *distinct* methods. The raw signal "3 agents cleared it, 1 flagged it" is worthless when the 3 shared one search: that is one (possibly wrong) probe vs. one read of the artifact.
 2. **Never decide on counts alone.** No verdict, severity, or drop moves because N agents agree and M disagree. Movement requires evidence verified by reading code or running a directed tool. When agents conflict, resolve by verifying the underlying claim yourself — the side with a file:line citation from reading the artifact outweighs any number of pattern-search negatives.
 3. **A negative search proves only that the searched pattern is absent.** It can fail to refute a finding; it can never clear one, and it can never ground dismissing or downgrading a concern that positive evidence supports. Absence of the dependency must be established from the dependent side: enumerate what could depend on the changed code and search each dependent artifact in its own vocabulary (a removed element's CSS dependencies live in selectors that may name the element or its ancestors, not the class string the diff shows).
-4. **Judge EVERY check by its method — conflict or no conflict.** A check is an absence claim ("nothing depends on the removed X") plus the `Method` that supposedly established it. For each one, ask a question that has nothing to do with whether any finding disagrees: *could that method have found the thing the claim denies?* A method that searched the wrong string, the wrong artifact, or the wrong side of the change could not, so the check is **void** — it proves nothing and is never recorded, even when no finding contradicts it. Checks that share one method are **one probe**, not N, however many agents ran it. Every check that survives this judgment is RECORDED in the ledger via `record_check()` (Phase 3); a method-correlated group is recorded once, with every agent named in its evidence. Recording is the default for a survivor, not a reward for having been contested.
+4. **Judge EVERY check by its method — conflict or no conflict.** A check is an absence claim ("nothing depends on the removed X") plus the `Method` that supposedly established it. For each one, ask a question that has nothing to do with whether any finding disagrees: *could that method have found the thing the claim denies?* A method that searched the wrong string, the wrong artifact, or the wrong side of the change could not, so the check is **void** — it proves nothing and is never recorded, even when no finding contradicts it. Checks that share one method are **one probe**, not N, however many agents ran it. Every check that survives this judgment is RECORDED in the ledger via `record_check()` (Phase 3); a method-correlated group is recorded once, with every agent named in its evidence. Recording is the default for a survivor, not a reward for having been contested. A check you judge VOID is recorded as a drop — `builder.drop_check(reviewer, id, reason="void", evidence="why the method could not have found what the claim denies")` — so the trail shows what was rejected and why; it is never simply omitted.
 5. **A check that contradicts a finding is a conflict to verify, never a vote.** This is the special case on top of rule 4, not a replacement for it. When any agent's finding asserts a dependency or impact that a check denies, do not let the check (or several) neutralize the finding — a void check neutralizes nothing, and a surviving one is still just one probe against a file:line citation. Resolve the conflict by verifying the finding's claim yourself against the source, then apply rule 4 to the check as usual.
 6. **Verify pattern dependencies against the whole artifact.** When a concern hinges on what else in a large file references a pattern (selectors, hook names, symbols), first enumerate **every occurrence** of the dependency's tokens across the entire artifact (`grep -n` the whole file), then read each site. A windowed read around one known occurrence is how a 5,900-line stylesheet hides its third `th label` rule. Never conclude "these are all the dependent rules" from a window you didn't bound by enumeration.
 
@@ -148,12 +153,12 @@ For each verified concern:
 ```python
 import sys, os, json
 
-# Use the output directory and builder path from the dispatch prompt
+# Use the output directory and plugin scripts directory from the dispatch prompt
 output_dir = "OUTPUT_DIR_FROM_PROMPT"
-builder_path = "OUTPUT_BUILDER_PATH_FROM_PROMPT"
+scripts_dir = "PLUGIN_SCRIPTS_DIRECTORY_FROM_PROMPT"
 
-# Import FindingsLedgerBuilder
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(builder_path))))
+# Import FindingsLedgerBuilder from that directory; nothing in it needs reading
+sys.path.insert(0, scripts_dir)
 from review.findings_ledger import FindingsLedgerBuilder
 
 builder = FindingsLedgerBuilder(pr_id="PR_ID_FROM_CONTEXT", output_dir=output_dir)
@@ -161,6 +166,15 @@ builder = FindingsLedgerBuilder(pr_id="PR_ID_FROM_CONTEXT", output_dir=output_di
 # The reconciliator owns this new artifact's stable identities. Never copy a
 # source review's fN/cN id or assign an id yourself: add_finding() and
 # record_check() allocate the ledger's monotonic ids.
+#
+# Everything the builder accepts is in this section, so do not read plugin source
+# to discover the API. The verdict is derived from the findings' severities
+# when the ledger is saved — there is no `set_verdict()`.
+# Severities are `critical`, `high`, `medium`, `low`, `info`. A finding's
+# or observation's `category` is free text (default `general`). The
+# vocabularies below are closed: drop_finding reasons `false_positive`,
+# `out_of_scope`, `prefiltered`; drop_check reason `void`; resolve_note
+# outcomes `confirmed`, `refuted`, `not_checked`.
 
 # For each verified concern:
 builder.add_finding(
@@ -173,8 +187,21 @@ builder.add_finding(
     category="relevant-category",
     severity_floor="medium",  # Omit only when no verified floor applies.
     confidence=0.95,
+    # Every source finding this concern merges, by context key and the
+    # source's own id. The save stamps each source's severity beside yours.
+    sources=[{"reviewer": "security-review", "id": "f3"},
+             {"reviewer": "code-review", "id": "f1"}],
+    # Required when your severity matches none of the sources' severities:
+    # say what the evidence showed that the reviewers did not weigh.
+    severity_note="Reachable from an unauthenticated GET; both reviewers rated it as if it needed a nonce.",
     # channel="advisory",  # only for findings marked "Channel: advisory" in the context; keeps them non-gating (see channel-preservation rule above)
 )
+
+# Every source finding you did NOT merge: one call each, with the reason
+# and the evidence that settled it. `prefiltered` needs no evidence.
+builder.drop_finding("code-review", "f2", reason="false_positive",
+                     evidence="src/a.php:9 escapes the value before the sink")
+builder.drop_finding("code-review", "f4", reason="prefiltered")
 
 # The overall-state prose. Two or three sentences answering "what is the
 # overall state of this code?" — the one judgment a list of findings cannot
@@ -232,10 +259,32 @@ builder.add_observation(
 # this verified work is absent rather than reconstructed from memory.
 builder.record_check(
     question="THE_MATERIAL_QUESTION_THE_REVIEWERS_CHECKED",
+    # YOUR OWN probe text only. The builder reads every merged source from
+    # the reconciliation context and appends its method verbatim as a
+    # `[<stem>:<id>] …` line, which is what the save gate requires.
     method="THE_EXACT_PROBE_THAT_ESTABLISHED_IT",
     result="WHAT_THE_PROBE_SHOWED",
     source_reviewers=["security-reviewer", "concurrency-reviewer"],
+    verifies=["V2"],  # only ids YOU add; the sources' verifies are unioned in for you
+    sources=[{"reviewer": "security-review", "id": "c1"},
+             {"reviewer": "concurrency-review", "id": "c2"}],
 )
+
+# Every source check you judged void: one call each.
+builder.drop_check("code-review", "c3", reason="void",
+                   evidence="searched the class name; the hook is registered by string")
+
+# Every orchestrator note in the context, answered. When you confirmed a
+# note by reproducing its evidence yourself and that evidence settles a
+# Verify item, cite the item: a check needs reviewer sources, so this is
+# the only way your own verification reaches the record's Verify table
+# (credited to you) instead of leaving the item reading "unverified" for
+# the decision critic to redo.
+builder.resolve_note("n1", outcome="refuted",
+                     evidence="security f3 is the sink at a.php:4; code f1 is the source at b.php:9 — two concerns")
+builder.resolve_note("n2", outcome="confirmed",
+                     evidence="deleted pnpm-lock.yaml and regenerated it: all three sections retained",
+                     verifies=["V2", "V3"])
 
 # Your four judgments. The pipeline stamps input counts, agent lists,
 # not-applicable agents with their reasons, dispatched/missing agents, and
@@ -266,12 +315,16 @@ python3 $PLUGIN_ROOT/scripts/review/findings_save.py \
   --findings "$TMPDIR/review-findings.json"
 ```
 
-The command validates everything before writing anything, and it holds you to the four things only you can get wrong:
+The command validates everything before writing anything, and it holds you to the things only you can get wrong:
 
 1. `verified_concern_count` must equal the number of findings you recorded.
-2. Your classification counts must partition `grouped_concern_count` — verified plus false-positive plus out-of-scope, exactly.
+2. Your classification counts must partition `grouped_concern_count` — verified plus false-positive plus out-of-scope, exactly — and agree with your drops: `false_positive_concern_count` cannot exceed the findings you dropped as false positives and cannot be 0 when you dropped any; the same for out-of-scope against `out_of_scope` plus `prefiltered` drops.
 3. `grouped_concern_count` must not exceed `input_finding_count`: you cannot group more concerns than the run read findings.
-4. The pipeline-owned fields must not be authored by you at all — the six reconciliation ones (`input_finding_count`, `contributing_agent_count`, `reviewing_agents`, `not_applicable_agents`, `dispatched_agents`, `missing_agents`) and the top-level `host_context_banner`. The script reads every one of them out of `synthesis/reconciliation-context.json` itself.
+4. Every source finding and every source check in `reviews_by_agent` is accounted for exactly once: merged into one of your findings or checks through `sources`, or dropped through `drop_finding` / `drop_check`. The rejection names the source (`security-review:f2 is neither merged into a finding nor dropped`).
+5. A merged check carries every source's `method` text verbatim inside its own `method`, and every Verify item id any source cited in its own `verifies`. `record_check(..., sources=[...])` does this for you from the reconciliation context — it appends any source method your `method` does not already contain as a `[<stem>:<id>] …` line and unions their `verifies` — so write your own method text and never paste theirs by hand.
+6. A finding whose severity matches none of its sources' carries a `severity_note`.
+7. Every `orchestrator_notes` entry in the context has an outcome and evidence.
+8. The pipeline-owned fields must not be authored by you at all — the six reconciliation ones (`input_finding_count`, `contributing_agent_count`, `reviewing_agents`, `not_applicable_agents`, `dispatched_agents`, `missing_agents`), the top-level `host_context_banner`, each source's `severity` inside `sources`, and the `note` text of an orchestrator note. The script reads every one of them out of `synthesis/reconciliation-context.json` itself.
 
 The whole document is validated on top of that: a non-object top level, a `verdict` outside `block`/`request_changes`/`comment`/`approve`, a finding missing a required field (`id`, `category`, `severity`, `title`, `description`, `file`, `recommendation`, `confidence`) or carrying an out-of-vocabulary severity, or a `summary` whose counts don't match the `findings` it claims to describe. Any problem exits non-zero with nothing written to the output directory, printing what it found as `REJECTED: ...` lines — fix everything those lines name and run the same command again. They are not a guaranteed-complete list: the document checks stop at the first shape error, so a clean re-run can surface a problem the previous one had not reached yet. A clean run prints:
 
@@ -279,6 +332,7 @@ The whole document is validated on top of that: a non-object top level, a `verdi
 RECORDED VERDICT: request_changes
 RECORDED FINDINGS: 9 (critical 0, high 1, medium 7, low 1)
 CHECKS: 12 | ASSESSMENT: present
+ACCOUNTED: findings 31/31 (14 merged, 17 dropped) | checks 45/45 (12 merged, 33 dropped) | notes 2/2
 ```
 
 and writes `review-findings.json` atomically through
@@ -308,6 +362,8 @@ of the renderer:
 | Recommendations (prioritized) | `add_recommendation(...)` → `## Recommendations` |
 | Tradeoffs Identified | `add_observation(..., category="tradeoff")` → `## Observations` |
 | "What we checked that held" | `record_check(...)` → `## Verified Checks` |
+| What was dropped and why | `drop_finding(...)` / `drop_check(...)` → `## Dropped by the Reconciliator` |
+| The orchestrator's claims, answered | `resolve_note(...)` → `## Orchestrator Notes` |
 | Host context banner | `host_context_banner` key → leading blockquote |
 
 ### Tradeoffs

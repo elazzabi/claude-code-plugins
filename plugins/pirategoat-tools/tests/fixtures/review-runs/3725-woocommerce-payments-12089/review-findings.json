@@ -1,0 +1,384 @@
+{
+  "pr_id": "12089",
+  "timestamp": "2026-09-04T23:28:50.577639",
+  "plugin_version": "1.118.0",
+  "schema": 3,
+  "verdict": "request_changes",
+  "summary": {
+    "total_findings": 8,
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 6,
+      "low": 1,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "reliability",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 787,
+      "recommendation": "<redacted>",
+      "confidence": 0.87,
+      "critic_adjustment": {
+        "action": "demote",
+        "rationale": "<redacted>",
+        "prior": {
+          "severity": "high",
+          "title": "<redacted>",
+          "description": "<redacted>"
+        }
+      }
+    },
+    {
+      "id": "f2",
+      "category": "bug",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 774,
+      "recommendation": "<redacted>",
+      "confidence": 0.83
+    },
+    {
+      "id": "f3",
+      "category": "doc-code-contradiction",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 782,
+      "recommendation": "<redacted>",
+      "confidence": 0.88,
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "recommendation": "<redacted>"
+        }
+      }
+    },
+    {
+      "id": "f4",
+      "category": "async-race",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 514,
+      "recommendation": "<redacted>",
+      "confidence": 0.8,
+      "critic_adjustment": {
+        "action": "demote",
+        "rationale": "<redacted>",
+        "prior": {
+          "severity": "high",
+          "description": "<redacted>"
+        }
+      }
+    },
+    {
+      "id": "f5",
+      "category": "missing-pattern",
+      "severity": "high",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 322,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f6",
+      "category": "screen-reader",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/index.js",
+      "line": 325,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    },
+    {
+      "id": "f7",
+      "category": "color-contrast",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/button-ui.js",
+      "line": 30,
+      "recommendation": "<redacted>",
+      "confidence": 0.7,
+      "critic_adjustment": {
+        "action": "rescope",
+        "rationale": "<redacted>",
+        "prior": {
+          "file": "client/express-checkout/shortcode-buttons-express/index.js",
+          "line": 765
+        }
+      }
+    },
+    {
+      "id": "f9",
+      "category": "over-mocking",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+      "line": 43,
+      "recommendation": "<redacted>",
+      "confidence": 0.7
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate-review",
+        "reliability-review",
+        "a11y-review"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate-review",
+        "code-clarity-review",
+        "code-review"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate-review",
+        "a11y-review"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "concurrency-review",
+        "simplification-review"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "concurrency-review"
+      ]
+    },
+    {
+      "id": "c6",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate-review"
+      ]
+    },
+    {
+      "id": "c7",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "devils-advocate-review",
+        "simplification-review"
+      ]
+    },
+    {
+      "id": "c8",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "patterns-review"
+      ]
+    },
+    {
+      "id": "c9",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "api-contract-review"
+      ]
+    },
+    {
+      "id": "c10",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code-review",
+        "history-insights-review"
+      ]
+    },
+    {
+      "id": "c11",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code-clarity-review"
+      ]
+    },
+    {
+      "id": "c12",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights-review"
+      ]
+    },
+    {
+      "id": "c13",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "js-tests-review"
+      ],
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "result": "<redacted>",
+          "method": "<redacted>"
+        }
+      }
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 767252,
+    "confidence_score": 0.95,
+    "next_finding_number": 10,
+    "next_check_number": 14,
+    "reconciliation": {
+      "grouped_concern_count": 10,
+      "verified_concern_count": 9,
+      "false_positive_concern_count": 0,
+      "out_of_scope_concern_count": 1,
+      "input_finding_count": 18,
+      "contributing_agent_count": 10,
+      "reviewing_agents": [
+        "a11y-review",
+        "api-contract-review",
+        "architecture-review",
+        "code-clarity-review",
+        "code-review",
+        "concurrency-review",
+        "devils-advocate-review",
+        "history-insights-review",
+        "js-tests-review",
+        "patterns-review",
+        "reliability-review",
+        "simplification-review"
+      ],
+      "not_applicable_agents": [],
+      "dispatched_agents": [
+        "a11y-review",
+        "api-contract-review",
+        "architecture-review",
+        "code-clarity-review",
+        "code-review",
+        "concurrency-review",
+        "devils-advocate-review",
+        "history-insights-review",
+        "js-tests-review",
+        "patterns-review",
+        "reliability-review",
+        "simplification-review"
+      ],
+      "missing_agents": []
+    }
+  },
+  "findings_removed_by_critic": [
+    {
+      "id": "f8",
+      "category": "assertion-quality",
+      "severity": "high",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "client/express-checkout/shortcode-buttons-express/__tests__/tokenized-express-checkout--shortcode-checkout-page.test.js",
+      "line": 539,
+      "recommendation": "<redacted>",
+      "confidence": 0.85,
+      "critic_adjustment": {
+        "action": "remove",
+        "rationale": "<redacted>"
+      }
+    }
+  ],
+  "verdict_before_adjustments": "block",
+  "applied_critic_adjustments": [
+    {
+      "adjustment_id": "5a91fbc09bda4c81bd5f470011407c1c",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "3bb20c7ae62c499e91e8732a23d86d3f",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "b247d99aef6e42ae95744db3385ea81c",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "265fa76e3a2b425fbcf0acc809023659",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "123e17d238a7485e95b0b2b92b79549a",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "2c006941ec874a03bae65152e6723b3e",
+      "outcome": "verified"
+    }
+  ],
+  "invalidated_assessments": [
+    {
+      "text": "<redacted>",
+      "invalidated_by_critic_adjustment_ids": [
+        "5a91fbc09bda4c81bd5f470011407c1c",
+        "3bb20c7ae62c499e91e8732a23d86d3f",
+        "b247d99aef6e42ae95744db3385ea81c",
+        "265fa76e3a2b425fbcf0acc809023659",
+        "123e17d238a7485e95b0b2b92b79549a",
+        "2c006941ec874a03bae65152e6723b3e"
+      ]
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from typing import Any, Dict
 
@@ -101,12 +102,43 @@ REQUIRED_FINDING_FIELDS = frozenset({
 REQUIRED_CHECK_FIELDS = frozenset({
     "id", "question", "method", "result", "source_reviewers",
 })
+# Optional on a check: the Verify item ids from the change purpose the
+# check settles. Additive, absent when the reviewer cited nothing —
+# `REVIEW_OUTPUT_SCHEMA` stays 2 (an absent key reads as "cites nothing",
+# the released telemetry schema-3 precedent for additive keys).
+OPTIONAL_CHECK_FIELDS = frozenset({"verifies"})
 _REQUIRED_META_FIELDS = frozenset({
     "review_duration_ms",
     "confidence_score",
     "next_finding_number",
     "next_check_number",
 })
+
+
+MAX_LEDGER_TEXT_LENGTH = 4096
+
+
+def normalize_bounded_text(value, label):
+    """Validate and trim one bounded prose field: a ledger's evidence or
+    note, an orchestrator note, a dispatch-adjustment reason. Non-empty,
+    at most `MAX_LEDGER_TEXT_LENGTH` characters, no control characters
+    but newline and tab."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > MAX_LEDGER_TEXT_LENGTH
+        or "\x00" in value
+        or any(
+            character not in ("\n", "\t")
+            and unicodedata.category(character) in ("Cc", "Cf")
+            for character in value
+        )
+    ):
+        raise ValueError(
+            f"{label} must be non-empty text of at most "
+            f"{MAX_LEDGER_TEXT_LENGTH} characters with no control characters"
+        )
+    return value.strip()
 
 
 def coerce_text(value: Any, single_line: bool = False) -> str:
@@ -151,6 +183,24 @@ def _is_string_list(value):
     return isinstance(value, list) and all(
         isinstance(item, str) for item in value
     )
+
+
+# A Verify item id from the change purpose (`scripts/review/change_purpose.py`)
+# — the value a check's optional `verifies` list carries. Owned here, beside
+# the fN/cN grammar, because this module is the check's shape authority.
+VERIFY_ITEM_ID_RE = re.compile(r"V[1-9][0-9]*")
+# A citation of a resolved host in the protocol's form, `<host>@<version,
+# commit or unknown>:<upstream-relative path>:<line>`. A finding carries one
+# in `source_cited`; a check writes them into its method and result prose.
+# Only the host name is captured.
+HOST_CITATION_RE = re.compile(r"(?<![\w/.-])([A-Za-z0-9_./-]+)@[^\s:`]+:[^\s:`]+:\d+")
+
+
+def cited_hosts(text) -> set:
+    """The distinct host names `text` cites in the protocol's form."""
+    if not isinstance(text, str):
+        return set()
+    return {match.group(1) for match in HOST_CITATION_RE.finditer(text)}
 
 
 def _canonical_id_number(value, prefix, label):
@@ -250,10 +300,23 @@ def validate_finding_shape(finding, index):
         )
 
 
+def normalize_verifies(value, label):
+    """A check's `verifies` list: unique Verify item ids in first-seen order."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label}.verifies must be a non-empty list of Verify item ids such as 'V2'")
+    normalized = []
+    for item in value:
+        if not isinstance(item, str) or not VERIFY_ITEM_ID_RE.fullmatch(item.strip()):
+            raise ValueError(f"{label}.verifies must be a non-empty list of Verify item ids such as 'V2'")
+        if item.strip() not in normalized:
+            normalized.append(item.strip())
+    return normalized
+
+
 def validate_check_shape(check, index):
     """Validate one canonical check without inferring materiality."""
     required = REQUIRED_CHECK_FIELDS
-    allowed = required | {"critic_adjustment"}
+    allowed = required | {"critic_adjustment"} | OPTIONAL_CHECK_FIELDS
     if not isinstance(check, dict):
         raise ValueError(f"review check {index} must be an object")
     if not required <= set(check) or not set(check) <= allowed:
@@ -287,6 +350,12 @@ def validate_check_shape(check, index):
             f"review check {index}.source_reviewers must be unique "
             "non-empty strings"
         )
+    if "verifies" in check:
+        normalized = normalize_verifies(check["verifies"], f"review check {index}")
+        if normalized != check["verifies"]:
+            raise ValueError(
+                f"review check {index}.verifies must be unique Verify item ids such as 'V2'"
+            )
 
 
 def validate_ledger_ids(

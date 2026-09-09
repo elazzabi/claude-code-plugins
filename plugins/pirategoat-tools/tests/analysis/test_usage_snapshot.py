@@ -15,6 +15,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -178,7 +179,9 @@ def _seed_run(tmp_path: Path, manifest: dict, *, session_id_in_config=None,
     return Run(out, tmp_path / "sessions", manifest_path)
 
 
-def _seed_two_agent_run(tmp_path: Path, **manifest_kwargs) -> Run:
+def _seed_two_agent_run(
+    tmp_path: Path, *, second_agent="code-reviewer", **manifest_kwargs
+) -> Run:
     """A session that dispatched two closed reviewers on two models."""
     out = tmp_path / "run"
     out.mkdir(exist_ok=True)
@@ -194,8 +197,8 @@ def _seed_two_agent_run(tmp_path: Path, **manifest_kwargs) -> Run:
         _at(_result("d-1", agent_id="agent-aaa", model="claude-sonnet-5"), 11),
         _at(_assistant(
             _call("d-2", "Agent",
-                  prompt=_bootstrap_prompt(out, "code-reviewer"),
-                  subagent_type="code-reviewer"),
+                  prompt=_bootstrap_prompt(out, second_agent),
+                  subagent_type=second_agent),
             usage=_usage(5, 7),
         ), 12),
         _at(_result("d-2", agent_id="agent-bbb",
@@ -213,7 +216,7 @@ def _seed_two_agent_run(tmp_path: Path, **manifest_kwargs) -> Run:
     )
     manifest = _manifest(
         session_id, out, tmp_path,
-        started=["security-reviewer", "code-reviewer"],
+        started=["security-reviewer", second_agent],
         **manifest_kwargs,
     )
     return _seed_run(tmp_path, manifest)
@@ -230,6 +233,70 @@ def _run_cli(run: Run, *extra: str) -> int:
 # ---------------------------------------------------------------------------
 # Availability labels — the feature's whole point.
 # ---------------------------------------------------------------------------
+
+class TestRowsCarryEvidenceCounts:
+    def _snapshot(self, rows):
+        return _mod._build_snapshot(
+            {"transcript": {
+                "available": True, "agent_usage": rows,
+                "correlation": {"expected_count": len(rows)},
+                "warnings": [], "orchestrator_usage_by_step": {},
+                "completeness": {"orchestrator_data": True},
+            }},
+            "2026-09-05T00:00:00+00:00",
+            {"started_at": None, "ended_at": None, "closed": False},
+        )
+
+    def test_tool_calls_and_repository_reads_ride_on_each_row(self):
+        snapshot = self._snapshot([
+            {"agent": "review-reconciliator", "model": "m", "available": True,
+             "usage": _usage(1, 2), "tool_calls": 7, "repository_reads": 0},
+            {"agent": "security-reviewer", "model": "m", "available": True,
+             "usage": _usage(1, 2), "tool_calls": 12, "repository_reads": 4},
+        ])
+        rows = {row["agent"]: row for row in snapshot["subagent_usage"]}
+        assert rows["review-reconciliator"]["tool_calls"] == 7
+        assert rows["review-reconciliator"]["repository_reads"] == 0
+        assert rows["security-reviewer"]["repository_reads"] == 4
+
+    @pytest.mark.parametrize("value", [None, True, -1, "2", 1.5])
+    def test_invalid_counts_report_none_not_zero(self, value):
+        [row] = self._snapshot([
+            {"agent": "security-reviewer", "available": True,
+             "usage": _usage(1, 2), "tool_calls": value,
+             "repository_reads": value},
+        ])["subagent_usage"]
+        assert row["tool_calls"] is None
+        assert row["repository_reads"] is None
+
+
+class TestStdoutMode:
+    def test_stdout_prints_the_snapshot_and_writes_nothing(self, tmp_path, capsys):
+        run = _seed_two_agent_run(tmp_path)
+        manifest_before = run.manifest_path.read_bytes()
+        assert _run_cli(run, "--stdout") == 0
+        snapshot = json.loads(capsys.readouterr().out)
+        assert snapshot["schema"] == 1
+        assert all(row["repository_reads"] == 0 for row in snapshot["subagent_usage"])
+        assert not run_paths.artifact_path(run.out, "usage_snapshot").exists()
+        assert run.manifest_path.read_bytes() == manifest_before
+
+    def test_stdout_returns_candidate_without_comparing_existing_snapshot(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        run = _seed_two_agent_run(tmp_path)
+        assert _run_cli(run) == 0
+        capsys.readouterr()
+        snapshot_path = run_paths.artifact_path(run.out, "usage_snapshot")
+        before = snapshot_path.read_bytes()
+        manifest_before = run.manifest_path.read_bytes()
+        candidate = {"schema": 1, "subagent_usage": [], "reason": "fresh measurement"}
+        monkeypatch.setattr(_mod, "_capture", lambda *args, **kwargs: candidate)
+        assert _run_cli(run, "--stdout") == 0
+        assert json.loads(capsys.readouterr().out) == candidate
+        assert snapshot_path.read_bytes() == before
+        assert run.manifest_path.read_bytes() == manifest_before
+
 
 class TestAvailabilityLabels:
     """Two halves, measured and labelled independently."""
@@ -335,17 +402,35 @@ class TestAvailabilityLabels:
         # The orchestrator half is independent and was observed.
         assert snapshot["availability"]["orchestrator"] == "partial"
 
-    def test_damaged_subagent_transcript_downgrades_subagents(self, tmp_path):
+    @pytest.mark.parametrize(
+        "transcript_name,damaged_agent,complete_agent",
+        [("agent-aaa.jsonl", "security-reviewer", "review-reconciliator"),
+         ("agent-bbb.jsonl", "review-reconciliator", "security-reviewer")],
+    )
+    def test_damaged_subagent_transcript_downgrades_subagents(
+        self, tmp_path, capsys, transcript_name, damaged_agent, complete_agent
+    ):
         """A parse gap in one reviewer's transcript is damaged evidence."""
-        run = _seed_two_agent_run(tmp_path)
+        run = _seed_two_agent_run(tmp_path, second_agent="review-reconciliator")
         transcript = (
-            run.sessions / "session-1" / "subagents" / "agent-aaa.jsonl"
+            run.sessions / "session-1" / "subagents" / transcript_name
         )
         transcript.write_text(
             transcript.read_text() + "{not json\n", encoding="utf-8"
         )
 
-        _run_cli(run)
+        manifest_before = run.manifest_path.read_bytes()
+        assert _run_cli(run, "--stdout") == 0
+        snapshot = json.loads(capsys.readouterr().out)
+        rows = {row["agent"]: row for row in snapshot["subagent_usage"]}
+        assert rows[damaged_agent]["repository_reads"] is None
+        assert rows[complete_agent]["repository_reads"] == 0
+        assert rows["security-reviewer"]["usage"]["output_tokens"] == 3
+        assert rows["review-reconciliator"]["usage"]["output_tokens"] == 9
+        assert not run_paths.artifact_path(run.out, "usage_snapshot").exists()
+        assert run.manifest_path.read_bytes() == manifest_before
+
+        assert _run_cli(run) == 0
 
         assert run.snapshot()["availability"]["subagents"] == "partial"
 

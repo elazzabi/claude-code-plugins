@@ -835,6 +835,18 @@ class TestGradeDetection:
         assert not r.passed
         assert r.detail["finding_count"] == 1
 
+    def test_a_check_citing_a_verify_item_is_a_structured_check(self):
+        """A reviewer who follows the REVIEW FOCUS instruction must not be
+        graded as having recorded no structured check."""
+        key = {"verdict_in": ["approve"], "min_check_count": 1}
+        review = self._review("approve", checks=[{
+            "id": "c1", "question": "Does anything call X?",
+            "method": "grep -rn X src/", "result": "0 hits",
+            "source_reviewers": ["security-reviewer"], "verifies": ["V1"],
+        }])
+        r = grade_detection(review, key)
+        assert r.detail["gates"]["min_check_count"] is True
+
     def test_material_negative_requires_a_structured_check_outcome(self):
         key = {"verdict_in": ["approve"], "min_check_count": 1}
         missing = grade_detection(self._review("approve"), key)

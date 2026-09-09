@@ -1,0 +1,72 @@
+{
+  "pr_id": "68258",
+  "reviewer": "history-insights",
+  "timestamp": "2026-09-04T09:48:39.557661",
+  "plugin_version": "1.116.0",
+  "schema": 2,
+  "verdict": "approve",
+  "summary": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 1
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "other",
+      "severity": "info",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/client/admin/client/core-profiler/components/multiple-selector/multiple-selector.tsx",
+      "line": 44,
+      "recommendation": "<redacted>",
+      "confidence": 0.85
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 194200,
+    "confidence_score": 0.8,
+    "next_finding_number": 2,
+    "next_check_number": 3
+  },
+  "review_claimable_files": [],
+  "reviewed_file_claims": [],
+  "unclaimed_review_files": [],
+  "inline_diff_file_count": 2,
+  "reviewed_file_count": 2,
+  "in_scope_review_file_count": 2
+}

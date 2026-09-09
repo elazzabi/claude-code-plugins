@@ -48,10 +48,7 @@ from review.run_paths import artifact_path
 from review.verdict_rules import derive_review_state
 
 
-def _artifact(output_dir, key):
-    path = artifact_path(output_dir, key)
-    path.parent.mkdir(exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 def _write_findings(output_dir, findings, **extra):
@@ -149,9 +146,9 @@ def _publish_raw_proposal(output_dir, document, verdict="REVISE"):
     )
 
 
-def _request(ids, *, verified=(), refuted=(), assessment=None):
+def _request(ids, *, verified=(), refuted=(), assessment=None, recommendations=None):
     """An adjudication request addressed by proposal index, for readability."""
-    return {
+    request = {
         "schema": 2,
         "verified": [ids[index] for index in verified],
         "refuted": [
@@ -160,22 +157,30 @@ def _request(ids, *, verified=(), refuted=(), assessment=None):
         ],
         "revised_assessment": assessment,
     }
+    if recommendations is not None:
+        request["revised_recommendations"] = recommendations
+    return request
 
 
-def _adjudicate(output_dir, ids, *, verified=(), refuted=(), assessment=None):
+def _adjudicate(
+    output_dir, ids, *, verified=(), refuted=(), assessment=None, recommendations=None
+):
     return adjudicate(str(output_dir), _request(
-        ids, verified=verified, refuted=refuted, assessment=assessment
+        ids, verified=verified, refuted=refuted, assessment=assessment,
+        recommendations=recommendations,
     ))
 
 
 def _publish_and_adjudicate(
-    output_dir, adjustments, *, verified=(), refuted=(), assessment=None
+    output_dir, adjustments, *, verified=(), refuted=(), assessment=None,
+    recommendations=None,
 ):
     """Run one whole critic round: publish the proposal, then adjudicate it."""
     ids = _publish_revise(output_dir, adjustments)
     result = _adjudicate(
         output_dir, ids,
         verified=verified, refuted=refuted, assessment=assessment,
+        recommendations=recommendations,
     )
     return ids, result
 
@@ -515,6 +520,49 @@ class TestAdjudicateWritesTheLedgerOnce:
 
 
 class TestApplyAdjustments:
+    @pytest.mark.parametrize(
+        "action,before,after,verdict",
+        [("promote", "low", "high", "request_changes"),
+         ("demote", "high", "low", "approve")],
+    )
+    def test_severity_and_content_corrections_apply_atomically(
+        self, tmp_path, action, before, after, verdict
+    ):
+        _write_findings(tmp_path, [_finding("f1", before)])
+        ids, result = _publish_and_adjudicate(tmp_path, [{
+            "action": action,
+            "target": {"kind": "finding", "id": "f1"},
+            "fields": {
+                "severity": after, "title": "Corrected title",
+                "description": "Corrected reachability.",
+                "recommendation": "Check the caller.", "file": "caller.go",
+                "line": None, "category": "general", "confidence": 0.95,
+            },
+            "rationale": "The caller changes the impact and location.",
+        }], verified=(0,))
+
+        assert result["applied"] == 1
+        ledger = _ledger(tmp_path)
+        finding = ledger["findings"][0]
+        assert finding["severity"] == after
+        assert finding["title"] == "Corrected title"
+        assert finding["file"] == "caller.go"
+        assert finding["line"] is None
+        assert finding["scope"] == "file"
+        assert finding["critic_adjustment"] == {
+            "action": action,
+            "rationale": "The caller changes the impact and location.",
+            "prior": {
+                "severity": before, "title": "t", "description": "d",
+                "recommendation": "r", "file": "f.go", "line": 10,
+                "confidence": 0.9,
+            },
+        }
+        assert ledger[APPLIED_IDS_KEY] == [
+            {"adjustment_id": ids[0], "outcome": "verified"}
+        ]
+        assert ledger["verdict"] == verdict
+
     def test_promote_patches_severity_with_provenance(self, tmp_path):
         _write_findings(tmp_path, [_finding("f1", "low")])
         _, result = _publish_and_adjudicate(tmp_path, [{
@@ -870,6 +918,26 @@ class TestValidateProposalInput:
             }],
         }) == []
 
+    def test_correct_may_not_carry_a_severity(self):
+        problems = validate_proposal_input({"schema": 2, "adjustments": [{
+            "action": "correct",
+            "target": {"kind": "finding", "id": "f1"},
+            "fields": {"severity": "low", "title": "Better title"},
+            "rationale": "r",
+        }]})
+        assert any(
+            "correct may not change severity; use promote or demote" in p
+            for p in problems
+        )
+
+    def test_correct_without_a_severity_still_validates(self):
+        assert validate_proposal_input({"schema": 2, "adjustments": [{
+            "action": "correct",
+            "target": {"kind": "finding", "id": "f1"},
+            "fields": {"title": "Better title"},
+            "rationale": "r",
+        }]}) == []
+
     def test_non_object_payload_is_a_problem(self):
         assert validate_proposal_input([1, 2, 3]) == [
             "decision-critic-adjustments.json must be a JSON object"
@@ -978,14 +1046,14 @@ class TestValidateProposalInput:
     @pytest.mark.parametrize(
         "action,fields,problem",
         [
-            ("promote", {}, "promote requires exactly the severity field"),
+            ("promote", {}, "promote requires the severity field"),
             (
                 "promote",
-                {"severity": "high", "title": "also change the title"},
-                "promote requires exactly the severity field",
+                {"title": "not a severity"},
+                "promote requires the severity field",
             ),
             ("demote", {"title": "not a severity"},
-             "demote requires exactly the severity field"),
+             "demote requires the severity field"),
             ("rescope", {}, "rescope requires exactly the file and line fields"),
             (
                 "rescope",
@@ -2021,6 +2089,104 @@ class TestStepElevenRerendersFindingsMarkdown:
         assert result["report_path"] == str(tmp_path / "review-report.md")
 
 
+class TestRecommendationsInvalidation:
+    """An applying batch must withdraw advice that its revisions may contradict."""
+
+    _RECS = {
+        "immediate": ["Escape the payment notice before merge."],
+        "important": [],
+        "suggestions": ["Consider a nonce on the form."],
+    }
+
+    def _seed(self, tmp_path):
+        _write_findings(
+            tmp_path, [_finding("f1", "critical")], recommendations=self._RECS,
+        )
+        return _publish_revise(tmp_path, [{
+            "action": "demote", "target": {"kind": "finding", "id": "f1"},
+            "fields": {"severity": "low"}, "rationale": "guarded upstream",
+        }])
+
+    def test_an_applying_batch_withdraws_the_recommendations(self, tmp_path):
+        ids = self._seed(tmp_path)
+        result = _adjudicate(tmp_path, ids, verified=(0,))
+        assert result["applied"] == 1
+        data = _ledger(tmp_path)
+        assert data["recommendations"] == {
+            "immediate": [], "important": [], "suggestions": [],
+        }
+        assert data["invalidated_recommendations"] == [{
+            "recommendations": self._RECS,
+            "invalidated_by_critic_adjustment_ids": _applied_ids(data),
+        }]
+        validate_findings_document(data)
+
+    @pytest.mark.parametrize("replacement,expected", [
+        pytest.param({"suggestions": ["  Add a nonce when convenient.  "]},
+                     ["Add a nonce when convenient."], id="normalized-subset"),
+        pytest.param({}, [], id="empty-replacement"),
+    ])
+    def test_revised_recommendations_are_installed(self, tmp_path, replacement, expected):
+        ids = self._seed(tmp_path)
+        _adjudicate(tmp_path, ids, verified=(0,), recommendations=replacement)
+        data = _ledger(tmp_path)
+        assert data["recommendations"] == {
+            "immediate": [], "important": [], "suggestions": expected,
+        }
+        assert len(data["invalidated_recommendations"]) == 1
+
+    def test_a_wholly_refuted_batch_leaves_them_alone(self, tmp_path):
+        ids = self._seed(tmp_path)
+        _adjudicate(
+            tmp_path, ids, refuted=((0, "the probe refuted it"),),
+            recommendations={"suggestions": ["Replacement must not install."]},
+        )
+        data = _ledger(tmp_path)
+        assert data["recommendations"] == self._RECS
+        assert "invalidated_recommendations" not in data
+
+    def test_empty_recommendations_record_no_invalidation(self, tmp_path):
+        _write_findings(tmp_path, [_finding("f1", "critical")])
+        _publish_and_adjudicate(tmp_path, [{
+            "action": "demote", "target": {"kind": "finding", "id": "f1"},
+            "fields": {"severity": "low"}, "rationale": "guarded upstream",
+        }], verified=(0,))
+        assert "invalidated_recommendations" not in _ledger(tmp_path)
+
+    @pytest.mark.parametrize("bad", [
+        pytest.param("not a dict", id="not-object"),
+        pytest.param({"urgent": ["x"]}, id="unknown-priority"),
+        pytest.param({"immediate": "x"}, id="not-list"),
+        pytest.param({"immediate": [""]}, id="empty-text"),
+        pytest.param({"immediate": [" \n "]}, id="blank-text"),
+        pytest.param({"immediate": [1]}, id="not-string"),
+    ])
+    def test_malformed_revised_recommendations_are_refused(self, tmp_path, bad):
+        ids = self._seed(tmp_path)
+        before = (tmp_path / "review-findings.json").read_bytes()
+        with pytest.raises(critic_adjustments_module.AdjustmentValidationError) as excinfo:
+            _adjudicate(tmp_path, ids, verified=(0,), recommendations=bad)
+        assert any("revised_recommendations" in p for p in excinfo.value.problems)
+        assert (tmp_path / "review-findings.json").read_bytes() == before
+
+    @pytest.mark.parametrize("bad", [
+        pytest.param("not a list", id="not-list"),
+        pytest.param([""], id="empty-string"),
+        pytest.param(["  "], id="blank-string"),
+        pytest.param([1], id="not-string"),
+    ])
+    def test_reader_rejects_malformed_withdrawn_priority(self, tmp_path, bad):
+        ids = self._seed(tmp_path)
+        _adjudicate(tmp_path, ids, verified=(0,))
+        data = _ledger(tmp_path)
+        data["invalidated_recommendations"] = [{
+            "recommendations": {"immediate": ["Valid advice."], "important": bad},
+            "invalidated_by_critic_adjustment_ids": ids,
+        }]
+        with pytest.raises(ValueError, match="invalidated_recommendations.*malformed"):
+            validate_findings_document(data)
+
+
 class TestAssessmentInvalidation:
     """Prose that summarizes a mutable ledger cannot be corrected, only
     invalidated.
@@ -2820,7 +2986,36 @@ class TestSchemaTwoTargetUnion:
             validate_proposal_input(payload)
         )
 
-    @pytest.mark.parametrize("action", ["add", "correct"])
+    @pytest.mark.parametrize("action", ["promote", "demote"])
+    def test_severity_actions_accept_related_finding_corrections(self, action):
+        payload = {"schema": 2, "adjustments": [self._entry(
+            action,
+            fields={
+                "severity": "medium", "title": "Corrected title",
+                "description": "Corrected description.",
+                "recommendation": "Correct the caller.", "file": "caller.py",
+                "line": None, "category": "security", "confidence": 0.95,
+            },
+        )]}
+
+        assert validate_proposal_input(payload) == []
+
+    @pytest.mark.parametrize("action", ["promote", "demote", "correct"])
+    def test_a_file_change_requires_its_line(self, action):
+        fields = {"file": "caller.py"}
+        if action != "correct":
+            fields["severity"] = "medium"
+        payload = {"schema": 2, "adjustments": [self._entry(action, fields=fields)]}
+
+        problems = validate_proposal_input(payload)
+
+        assert problems == [
+            "adjustment[0]: a file change requires the line field as well "
+            "(null for a file-scoped finding), so a moved finding never keeps "
+            "a stale line"
+        ]
+
+    @pytest.mark.parametrize("action", ["add", "correct", "promote", "demote"])
     @pytest.mark.parametrize(
         ("field", "value"),
         [
@@ -3677,19 +3872,19 @@ class TestAdjudicationRequest:
         "action,current,fields,problem",
         [
             (
-                "promote", "high", {"severity": "medium"},
+                "promote", "high", {"severity": "medium", "title": "Updated"},
                 "promote must increase severity",
             ),
             (
-                "promote", "high", {"severity": "high"},
+                "promote", "high", {"severity": "high", "title": "Updated"},
                 "promote would not change severity",
             ),
             (
-                "demote", "low", {"severity": "medium"},
+                "demote", "low", {"severity": "medium", "title": "Updated"},
                 "demote must decrease severity",
             ),
             (
-                "demote", "low", {"severity": "low"},
+                "demote", "low", {"severity": "low", "title": "Updated"},
                 "demote would not change severity",
             ),
             (
@@ -3847,6 +4042,7 @@ class TestAdjudicationCLI:
             capture_output=True,
             text=True,
             timeout=10,
+            cwd=tmp_path,
         )
 
     def test_it_echoes_the_derived_counts_and_the_ledger_verdict(
@@ -3872,6 +4068,19 @@ class TestAdjudicationCLI:
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert "REVISED ASSESSMENT: absent" in result.stdout
+        assert "REVISED RECOMMENDATIONS: absent" in result.stdout
+
+    @pytest.mark.parametrize("recommendations", [
+        pytest.param({"suggestions": ["Add a nonce."]}, id="nonempty"),
+        pytest.param({}, id="explicit-empty"),
+    ])
+    def test_revised_recommendations_are_reported_present(self, tmp_path, recommendations):
+        ids = self._seed(tmp_path)
+        result = self._run(tmp_path, _request(
+            ids, verified=(0,), recommendations=recommendations,
+        ))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "REVISED RECOMMENDATIONS: present" in result.stdout
 
     def test_a_second_adjudication_is_refused_on_stdout(self, tmp_path):
         ids = self._seed(tmp_path)
@@ -3928,3 +4137,114 @@ class TestAdjudicationCLI:
         )
 
         assert result.returncode != 0
+
+
+class TestProvenanceAtTheReaderBoundary:
+    """The ledger reader accepts the reconciliator's provenance and refuses
+    a malformed copy of it; absence stays valid for prior-run ledgers."""
+
+    def _with(self, **extra):
+        doc = canonical_findings_ledger(("high",), checks=[_check("c1")])
+        doc.update(extra)
+        return doc
+
+    def test_absence_is_still_a_valid_ledger(self):
+        validate_findings_document(self._with())
+
+    def test_accepts_a_confirmed_note_citing_verify_items(self):
+        doc = self._with(orchestrator_notes=[{
+            "id": "n1", "note": "the lockfile regenerates cleanly",
+            "outcome": "confirmed", "evidence": "deleted and regenerated it",
+            "verifies": ["V2", "V3"],
+        }])
+        validate_findings_document(doc)
+
+    def test_accepts_sources_notes_and_drops(self):
+        doc = self._with(
+            dropped_findings=[{"reviewer": "code-review", "id": "f2",
+                               "reason": "out_of_scope", "evidence": "not in diff"}],
+            dropped_checks=[{"reviewer": "code-review", "id": "c9",
+                             "reason": "void", "evidence": "wrong artifact"}],
+            orchestrator_notes=[{"id": "n1", "note": "f1 and f2 are one",
+                                 "outcome": "confirmed", "evidence": "same sink"}],
+        )
+        doc["findings"][0]["sources"] = [
+            {"reviewer": "security-review", "id": "f1", "severity": "high"}
+        ]
+        doc["findings"][0]["severity_note"] = "kept at high: reachable."
+        doc["checks"][0]["sources"] = [{"reviewer": "security-review", "id": "c1"}]
+        validate_findings_document(doc)
+
+    @pytest.mark.parametrize("mutate", [
+        lambda d: d["findings"][0].__setitem__("sources", []),
+        lambda d: d["findings"][0].__setitem__(
+            "sources", [{"reviewer": "security-review", "id": "F1"}]),
+        lambda d: d["findings"][0].__setitem__(
+            "sources", [{"reviewer": "security-review", "id": "f1", "extra": 1}]),
+        lambda d: d["checks"][0].__setitem__(
+            "sources", [{"reviewer": "security-review", "id": "c1", "severity": "high"}]),
+        lambda d: d.__setitem__("dropped_findings", [
+            {"reviewer": "x-review", "id": "f2", "reason": "false_positive"}]),
+        lambda d: d.__setitem__("dropped_findings", [
+            {"reviewer": "x-review", "id": "f2", "reason": "merged", "evidence": "e"}]),
+        lambda d: d.__setitem__("dropped_checks", [
+            {"reviewer": "x-review", "id": "c2", "reason": "void"}]),
+        lambda d: d.__setitem__("dropped_checks", [
+            {"reviewer": "x-review", "id": "c2", "reason": "void",
+             "evidence": "e", "scope_status": "in_scope"}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "1", "outcome": "confirmed", "evidence": "e"}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "n1", "outcome": "confirmed", "evidence": "e"},
+            {"id": "n1", "outcome": "refuted", "evidence": "e"}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "n1", "outcome": "refuted", "evidence": "e", "verifies": ["V2"]}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "n1", "outcome": "confirmed", "evidence": "e", "verifies": []}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "n1", "outcome": "confirmed", "evidence": "e", "verifies": ["v2"]}]),
+        lambda d: d.__setitem__("orchestrator_notes", [
+            {"id": "n1", "outcome": "confirmed", "evidence": "e", "verifies": "V2"}]),
+    ])
+    def test_malformed_provenance_is_refused(self, mutate):
+        doc = self._with()
+        mutate(doc)
+        with pytest.raises(ValueError):
+            validate_findings_document(doc)
+
+
+class TestCriticCannotTouchVerifies:
+    def test_a_check_correction_keeps_its_citations(self, tmp_path):
+        ledger = canonical_findings_ledger(("high",), checks=[{
+            "id": "c1", "question": "q", "method": "m", "result": "r",
+            "source_reviewers": ["security-reviewer"], "verifies": ["V1"],
+        }])
+        critic_adjustments_module.write_findings(str(tmp_path), ledger)
+        proposal = critic_adjustments_module.prepare_proposal({
+            "schema": 2,
+            "adjustments": [{
+                "action": "correct", "target": {"kind": "check", "id": "c1"},
+                "fields": {"result": "r, re-read"}, "rationale": "Wording.",
+            }],
+        })
+        critic_adjustments_module.write_critic_verdict(str(tmp_path), "REVISE", proposal)
+        critic_adjustments_module.adjudicate(str(tmp_path), {
+            "schema": 2,
+            "verified": [proposal["adjustments"][0]["adjustment_id"]],
+            "refuted": [],
+        })
+        settled = critic_adjustments_module.read_findings_file(
+            tmp_path / "review-findings.json"
+        ).findings
+        assert settled["checks"][0]["result"] == "r, re-read"
+        assert settled["checks"][0]["verifies"] == ["V1"]
+
+    def test_a_proposal_naming_verifies_is_rejected(self):
+        with pytest.raises(ValueError, match="verifies"):
+            critic_adjustments_module.prepare_proposal({
+                "schema": 2,
+                "adjustments": [{
+                    "action": "correct", "target": {"kind": "check", "id": "c1"},
+                    "fields": {"verifies": ["V2"]}, "rationale": "No.",
+                }],
+            })

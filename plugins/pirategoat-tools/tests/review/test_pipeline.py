@@ -1,5 +1,6 @@
 """Tests for review/briefings.py through the pipeline.py compatibility facade."""
 
+import copy
 import json
 import os
 import pathlib
@@ -22,10 +23,7 @@ from conftest import PIPELINE_SCRIPT_PATH as SCRIPT_PATH
 from review import run_paths
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -269,6 +267,24 @@ class TestStep2RepoSetup:
         assert "git status" in text
         assert "checkout" in text.lower()
 
+    def test_failure_states_the_cause_and_forbids_a_hard_reset(self, mod):
+        """WooCommerce PR #68063: the helper's reason now reaches the
+        briefing, and the orchestrator is told what it may not do with it."""
+        config = {"mode": "pr", "pr_number": "42", "interactive": True}
+        state = {
+            "completed_steps": [1],
+            "workspace": {"original_branch": None, "stash_ref": None},
+            "workspace_setup_result": {
+                "error": "Failed to checkout PR #42: fatal: not possible to fast-forward, aborting. (exit 128)",
+                "checkout_ok": False,
+            },
+        }
+        g = mod.get_step_guidance(2, "pr", state, {"git": {}}, config=config)
+        situation = "\n".join(g["situation"])
+        actions = "\n".join(g["actions"])
+        assert "fatal: not possible to fast-forward, aborting. (exit 128)" in situation
+        assert "Never `git reset --hard`" in actions
+
     def test_no_result_falls_back_to_manual(self, mod, tmp_path):
         """No workspace_setup_result at all: fall back to manual."""
         config = {"mode": "pr", "pr_number": "42", "interactive": True}
@@ -288,6 +304,38 @@ class TestStep3GatherContext:
     def _make_context(self):
         """Return a rich review-context.json content."""
         return COMPLETE_CONTEXT
+
+    def test_step_3_lists_each_resolved_host_with_its_identity(self, mod):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = dict(self._make_context())
+        ctx["host_context"] = {
+            "resolved": [
+                {"name": "wordpress", "kind": "runtime-host", "path": "/x/cache/wordpress/latest", "source": "ecosystem-cache",
+                 "version": "7.2-alpha-63166-src", "version_freshness": "2026-09-04T00:04:08Z",
+                 "notes": {"commit": "474555a85c052de90ddd22d4abdf163e678b88ac", "branch": "trunk", "declared_minimum": "7.0"}},
+                {"name": "vendor", "kind": "library-dep", "path": "/x/repo/vendor", "source": "vendor-inspection", "notes": {}},
+            ],
+            "unresolved": [{"name": "jetpack", "reason": "declared_in_plugin_headers", "version": "14.1"}],
+            "banner": {"degraded": True, "reason": "partial_unresolved", "message": "m"},
+            "diagnostics": {"self_provided": ["woocommerce"], "scan_roots": 4, "config_errors": ["hosts.roots: 'x' is not a directory"]},
+        }
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx)["situation"])
+        assert "**Host context:** ⚠ degraded (partial_unresolved) — 1 runtime-host(s), 1 dependency root(s) resolved." in text
+        assert "- `wordpress` via ecosystem-cache: `/x/cache/wordpress/latest` — version 7.2-alpha-63166-src, commit 474555a85c05, refreshed 2026-09-04; the repository declares it requires 7.0" in text
+        assert "- `jetpack` unresolved: declared_in_plugin_headers (declared 14.1)" in text
+        assert "- `woocommerce` is provided by this repository and was not resolved as an upstream host." in text
+        assert "⚠️  Host config: hosts.roots: 'x' is not a directory" in text
+
+    def test_step_3_says_unknown_for_a_host_without_identity(self, mod):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = dict(self._make_context())
+        ctx["host_context"] = {
+            "resolved": [{"name": "wordpress", "kind": "runtime-host", "path": "/x/wp", "source": "ecosystem-cache",
+                          "version": None, "version_freshness": None, "notes": {"commit": None}}],
+            "unresolved": [], "banner": None, "diagnostics": {},
+        }
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx)["situation"])
+        assert "- `wordpress` via ecosystem-cache: `/x/wp` — version unknown, commit unknown" in text
 
     def test_presents_git_range(self, mod, tmp_path):
         state = {"completed_steps": [1, 2]}
@@ -330,6 +378,39 @@ class TestStep3GatherContext:
         assert g["handoff"] is not None
         text = "\n".join(g["handoff"])
         assert "change-purpose.md" in text
+
+    def test_handoff_requires_the_three_parsed_headings(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "pr", state, ctx, output_dir=str(tmp_path))["handoff"])
+        assert "## Verify" in text
+        assert "## Context" in text
+        assert "## Author's description (extracted)" in text
+        assert "V1. <claim> — where: <file:line> — settled by: <what evidence settles it> — source: <provenance>" in text
+        assert "inferred from the diff` may never be Context" in text
+        assert "Attribute intent to its source" in text
+        assert "(carried over)" not in text
+
+    def test_incremental_handoff_states_the_carried_over_rule(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "incremental", state, ctx, output_dir=str(tmp_path))["handoff"])
+        assert "ends with `(carried over)`" in text
+
+    def test_incremental_situation_points_at_the_previous_purpose(self, mod, tmp_path):
+        previous = str(tmp_path / "prev" / "pipeline" / "change-purpose.md")
+        state = {"resolved_params": {"has_unfetched_issues": False}, "completed_steps": [1],
+                 "previous_change_purpose": previous}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        text = "\n".join(mod.get_step_guidance(3, "incremental", state, ctx, output_dir=str(tmp_path))["situation"])
+        assert f"**Previous review's change purpose:** `{previous}`" in text
+        assert "carry an item forward only with `(carried over)`" in text
 
     def test_no_handoff_when_linear_issues(self, mod, tmp_path):
         """When Linear issues detected, step 3 defers handoff to step 4."""
@@ -377,6 +458,310 @@ class TestStep3GatherContext:
         assert "<GIT_RANGE>" not in all_text
         assert "<OUTPUT_DIR>" not in all_text
 
+    def test_presents_base_fetch_outcome(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32}},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base:** `origin/trunk` fetched at `56e4e8c2`" in text
+
+    def test_presents_failed_base_fetch_as_a_warning(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "base_fetch": {"ref": "origin/trunk", "status": "failed",
+                                      "sha": "c725aac2" + "0" * 32}},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetch of `origin/trunk` FAILED" in text
+        assert "may be behind the remote" in text
+
+    def test_fetched_base_on_a_shallow_clone_names_the_remedy(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32, "shallow": True}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetched at `56e4e8c2` but merge-base failed, so there is no range." in text
+        assert "The clone is shallow, which is the usual cause" in text
+        assert "git fetch --unshallow origin" in text
+        assert "If merge-base still fails" in text
+
+    def test_fetched_base_with_no_merge_base_on_a_full_clone(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "fetched",
+                                      "sha": "56e4e8c2" + "0" * 32, "shallow": False}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "but merge-base failed, so there is no range" in text
+        assert "shallow" not in text
+
+    def test_failed_fetch_does_not_claim_a_merge_base_that_failed_too(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/trunk", "status": "failed",
+                                      "sha": "c725aac2" + "0" * 32}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "merge-base against the local ref at `c725aac2` also failed" in text
+        assert "merge-base was computed" not in text
+
+    def test_presents_failed_fetch_with_no_local_ref(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"changed_files": [], "commit_count": 0,
+                       "base_fetch": {"ref": "origin/feat/parent-pr",
+                                      "status": "failed", "sha": None}},
+               "pr_size": {"files": 0, "lines": 0, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "fetch of `origin/feat/parent-pr` FAILED and the ref does not exist locally" in text
+        assert "no merge-base could be computed" in text
+
+    def test_presents_scope_mismatch_against_github(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 91, "head_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** GitHub reports 8 changed files; the local range has 91." in text
+        assert "The local range is inflated" in text
+        assert "treat GitHub's file list as the PR's scope" in text
+
+    def test_local_range_short_of_the_pr_is_not_called_inflated(self, mod, tmp_path):
+        """GitHub having more files than the local range means the checkout
+        is behind the PR, the opposite diagnosis from inflation."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 9,
+                                     "local_changed_files": 6, "head_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** GitHub reports 9 changed files; the local range has 6." in text
+        assert "The local range is short of the PR" in text
+        assert "restart the run from workspace setup" in text
+        assert "bring the checkout" not in text
+        assert "inflated" not in text
+        assert "files the PR did not touch" not in text
+        assert "does not match GitHub's headRefOid" in text
+
+    def test_moved_head_with_equal_counts_is_not_called_inflated(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** The reviewed head does not match GitHub's headRefOid" in text
+        assert "inflated" not in text
+        assert "GitHub reports 8 changed files" not in text
+
+    def test_lists_extra_and_missing_files_when_sets_differ(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 3, "local_changed_files": 3,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": ["x.php"], "missing_local_files": ["y.php"],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "the local range has 3, and the file sets differ." in text
+        assert "Local files not in the PR (1): `x.php`. The local range is inflated" in text
+        assert "PR files missing locally (1): `y.php`. The local range is short of the PR: files the PR touches will reach no reviewer" in text
+
+    def test_renders_author_controlled_paths_as_safe_code_spans(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 1, "local_changed_files": 2,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": ["we`ird.php", "multi\nline.php"], "missing_local_files": [],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "``we`ird.php``" in text
+        assert "`multi line.php`" in text
+        assert "multi\nline" not in text
+
+    def test_caps_long_path_lists(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {
+            "status": "mismatch", "github_changed_files": 1, "local_changed_files": 13,
+            "head_matches": True, "base_matches": True,
+            "extra_local_files": [f"f{i:02d}.php" for i in range(12)], "missing_local_files": [],
+        }
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "`f09.php` (+2 more)" in text
+        assert "f10.php" not in text
+
+    def test_count_only_is_not_called_a_match(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "count_only", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": None,
+                                     "base_matches": None}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** file counts agree (8)" in text
+        assert "not proof of matching scope" in text
+        assert "matches GitHub" not in text
+
+    def test_head_mismatch_without_counts_still_renders(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": None, "head_matches": False,
+                                     "base_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** The reviewed head does not match GitHub's headRefOid" in text
+        assert "GitHub reports" not in text
+
+    def test_names_a_base_that_is_not_githubs(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True,
+                                     "base_matches": False}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert text.count("**Scope check:**") == 1
+        assert "merge base" in text
+        assert "inflated" not in text
+
+    def test_a_base_mismatch_with_agreeing_file_sets_names_the_hunks(self, mod, tmp_path):
+        """Equal file sets do not make the range the PR's: a range from an
+        older base carries the base's own hunks to the same files."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "mismatch", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True,
+                                     "base_matches": False, "extra_local_files": [],
+                                     "missing_local_files": []}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert text.count("**Scope check:**") == 1
+        assert "hunks" in text
+        assert "matches GitHub" not in text
+
+    def test_presents_scope_match_briefly(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "match", "github_changed_files": 8,
+                                     "local_changed_files": 8, "head_matches": True}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Scope check:** local range matches GitHub (8 files)." in text
+
+    def test_scope_check_unavailable_is_silent(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["scope_check"] = {"status": "unavailable", "github_changed_files": None,
+                                     "local_changed_files": 8, "head_matches": None}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Scope check" not in "\n".join(g["situation"])
+
+    def test_names_a_non_default_base_without_calling_it_stacked(self, mod, tmp_path):
+        """A release line and a stacked PR both have a non-default base; the
+        script states the fact and leaves the reading to the orchestrator."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "release/9.5"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/release/9.5", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = []
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base branch:** `release/9.5` is not the default branch (`trunk`)." in text
+        assert "No merge commit brings other branches' work into the range" in text
+        assert "own work" not in text
+
+    def test_non_default_base_with_no_merge_scan_is_not_certified(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "release/9.5"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/release/9.5", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = None
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "The merge scan could not run" in text
+        assert "holds only this branch's own work" not in text
+        assert "a stacked PR" in text and "release line" in text
+        assert "not yet merged" not in text
+        assert "Stacked on" not in text
+
+    def test_non_default_base_with_foreign_merges_does_not_claim_own_work_only(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/feat/parent-pr", "status": "fetched",
+                                    "sha": "f" * 40}
+        ctx["git"]["foreign_merges"] = [{"sha": "m1" + "0" * 38, "second_parent": "s" * 40}]
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "The range also holds work merged in from other branches" in text
+        assert "holds only this branch's own work" not in text
+        assert "**Merged-in work:** 1 merge commit (`m1000000`)" in text
+
+    def test_non_default_base_after_failed_fetch_does_not_certify_the_range(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"]["default_branch"] = "trunk"
+        ctx["git"]["base_fetch"] = {"ref": "origin/feat/parent-pr", "status": "failed",
+                                    "sha": "s" * 40}
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Base branch:** `feat/parent-pr` is not the default branch (`trunk`)." in text
+        assert "may also hold newer commits of the base itself" in text
+        assert "holds only this branch's own work" not in text
+
+    def test_default_branch_base_gets_no_base_line(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "trunk"
+        ctx["git"]["default_branch"] = "trunk"
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Base branch" not in "\n".join(g["situation"])
+
+    def test_presents_foreign_merges(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2]}
+        ctx = {"git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                       "changed_files": ["a.py"], "commit_count": 3,
+                       "foreign_merges": [{"sha": "m1" + "0" * 38,
+                                           "second_parent": "sib" + "0" * 37}]},
+               "pr_size": {"files": 1, "lines": 20, "category": "tiny"}}
+        g = mod.get_step_guidance(3, "full", state, ctx)
+        text = "\n".join(g["situation"])
+        assert "**Merged-in work:** 1 merge commit (`m1000000`)" in text
+        assert "not on the base branch" in text
+
+    def test_unknown_default_branch_is_silent(self, mod, tmp_path):
+        """An unknown default branch is not evidence of a non-default base."""
+        state = {"completed_steps": [1, 2]}
+        ctx = copy.deepcopy(self._make_context())
+        ctx["git"]["base_ref"] = "feat/parent-pr"
+        ctx["git"].pop("default_branch", None)
+        g = mod.get_step_guidance(3, "pr", state, ctx)
+        assert "Base branch" not in "\n".join(g["situation"])
+
 
 # ===================================================================
 # Steps 4-6 Tests
@@ -401,6 +786,12 @@ class TestStep4FetchLinearIssues:
         assert g["handoff"] is not None
         text = "\n".join(g["handoff"])
         assert "change-purpose.md" in text
+
+    def test_step_4_handoff_carries_the_same_headings(self, mod, tmp_path):
+        state = {"resolved_params": {"has_unfetched_issues": True}, "completed_steps": [1, 2, 3]}
+        g = mod.get_step_guidance(4, "pr", state, COMPLETE_CONTEXT, output_dir=str(tmp_path))
+        text = "\n".join(g["handoff"])
+        assert "## Verify" in text and "## Author's description (extracted)" in text
 
     def test_change_purpose_handoff_requires_attribution(self, mod, tmp_path):
         """Both change-purpose handoffs must instruct attributing intent to its
@@ -487,7 +878,6 @@ class TestStep5DispatchPlan:
         assert "human override" not in lowered
         assert "DISPATCH_OVERRIDE" in text
         assert "SKIPPED_OVERRIDE" in text
-        assert "override_reason" in text
 
     def test_override_writes_to_dispatch_plan(self, mod, tmp_path):
         state = self._make_state_with_plan()
@@ -497,6 +887,86 @@ class TestStep5DispatchPlan:
         assert "dispatch-plan.json" in text
         assert "DISPATCH_OVERRIDE" in text
         assert "SKIPPED_OVERRIDE" in text
+
+    def test_adjustments_go_through_the_entry_point_not_a_hand_edit(self, mod, tmp_path):
+        """Run 4's orchestrator wrote its own throwaway script to flip four
+        statuses with a non-atomic json.dump and printed nothing; the
+        briefing now hands it one validating, echoing command."""
+        state = self._make_state_with_plan()
+        ctx = {"git": {"git_range": "abc..HEAD"}}
+        g = mod.get_step_guidance(5, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert f'dispatch_adjust.py --output-dir "{tmp_path}" --skip <agent>' in text
+        assert "--dispatch <agent>" in text
+        assert "never edit the plan file by hand or with a script of your own" in text
+        assert "--dry-run" in text
+        assert "Force-skip" not in text and "set status to" not in text
+
+    def test_step6_repeats_the_recorded_adjustments(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4, 5],
+            "dispatched_agents": [{"name": "code-reviewer", "domain": "code"}],
+            "dispatch_adjustments": [
+                {"name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE",
+                 "override_reason": "no markup in the diff", "planner_status": "DISPATCH"},
+                {"name": "php-tests-reviewer", "status": "DISPATCH_OVERRIDE",
+                 "override_reason": "the fixtures are PHP", "planner_status": "SKIPPED"},
+            ],
+        }
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "**Adjustments recorded at step 5:**" in text
+        assert "- SKIPPED_OVERRIDE a11y-reviewer — no markup in the diff (planner: DISPATCH)" in text
+        assert "- DISPATCH_OVERRIDE php-tests-reviewer — the fixtures are PHP (planner: SKIPPED)" in text
+
+    def test_step6_repeats_the_files_a_skip_left_unreviewed(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4, 5],
+            "dispatched_agents": [{"name": "code-reviewer", "domain": "code"}],
+            "dispatch_adjustments": [
+                {"name": "docs-drift-reviewer", "status": "SKIPPED_OVERRIDE",
+                 "override_reason": "no docs mention the cache", "planner_status": "DISPATCH",
+                 "orphaned_files": ["changelog/x"]},
+            ],
+        }
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "`changelog/x`" in text.split("docs-drift-reviewer", 1)[1]
+
+    def test_step6_says_when_the_plan_stands_as_computed(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2, 3, 4, 5], "dispatched_agents": [], "dispatch_adjustments": []}
+        g = mod.get_step_guidance(6, "pr", state, {"git": {"git_range": "abc..HEAD"}}, output_dir=str(tmp_path))
+        assert "No adjustments: the planner's plan is dispatched as computed." in "\n".join(g["situation"])
+
+    def test_change_purpose_problems_are_warnings_before_dispatch(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4],
+            "dispatch_plan_summary": {"dispatched": 3, "skipped": 1, "conditional": 1},
+            "dispatch_plan_agents": [],
+            "change_purpose_items": {
+                "verify": [{"id": "V1"}], "context": [], "structured": True,
+                "problems": ["V1 names no source", "C2 is inferred from the diff and may not be Context"],
+            },
+        }
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "⚠️  Change purpose: V1 names no source." in text
+        assert "⚠️  Change purpose: C2 is inferred from the diff and may not be Context." in text
+        assert "change-purpose.md" in text and "before dispatch" in text
+        assert "Change purpose: 1 Verify item(s), 0 Context item(s)." in text
+
+    def test_an_unstructured_change_purpose_is_one_warning(self, mod, tmp_path):
+        state = {
+            "completed_steps": [1, 2, 3, 4],
+            "dispatch_plan_summary": {}, "dispatch_plan_agents": [],
+            "change_purpose_items": {"verify": [], "context": [], "problems": [], "structured": False},
+        }
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "⚠️  Change purpose: no `## Verify`" in text
+
+    def test_no_parsed_purpose_renders_no_purpose_lines(self, mod, tmp_path):
+        state = {"completed_steps": [1, 2, 3, 4], "dispatch_plan_summary": {}, "dispatch_plan_agents": []}
+        text = "\n".join(mod.get_step_guidance(5, "pr", state, {}, output_dir=str(tmp_path))["situation"])
+        assert "Change purpose:" not in text
 
 
 class TestStep5QuickMode:
@@ -616,6 +1086,18 @@ class TestStep6DispatchAgents:
         assert "security-reviewer" in text
         assert "abc..HEAD" in text  # concrete range, not template
 
+    def test_claude_dispatch_block_opens_with_an_imperative(self, mod, tmp_path):
+        """The orchestrator copies the fenced block as the subagent prompt, so the
+        instruction to run bootstrap first must live inside the block."""
+        state = self._make_state_with_agents()
+        ctx = {"git": {"git_range": "abc..HEAD"}}
+        g = mod.get_step_guidance(6, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        block = text.split("**code-reviewer:**", 1)[1].split("```", 2)[1]
+        lines = [l for l in block.strip().splitlines() if l.strip()]
+        assert lines[0] == mod.DISPATCH_PROMPT_LEAD
+        assert lines[1].startswith("python3 ") and "bootstrap.py --agent code-reviewer" in lines[1]
+
     def test_codex_dispatch_uses_spawn_agent_and_canonical_reviewer(self, mod, tmp_path):
         """Codex dispatch reads the canonical reviewer instead of copying it."""
         state = self._make_state_with_agents()
@@ -716,6 +1198,9 @@ class TestStep6DispatchAgents:
             line for line in g["actions"]
             if "bootstrap.py" in line and "--repo-agent-ref" in line
         )
+        # The adapter's fenced block opens with the same imperative as a
+        # native reviewer's; the orchestrator pastes either as the prompt.
+        assert g["actions"][g["actions"].index(cmd_line) - 1] == mod.DISPATCH_PROMPT_LEAD
         tok = shlex.split(cmd_line)
         assert tok[tok.index("--agent") + 1] == "repo-reviewer-adapter"
         assert tok[tok.index("--instance-name") + 1] == "repo-renewals-reviewer"
@@ -934,6 +1419,30 @@ class TestStep6DispatchAgents:
         summary = state["dispatch_plan_summary"]
         assert summary["dispatched"] == 2  # code-reviewer + security-reviewer
         assert summary["skipped"] == 2  # SKIPPED + SKIPPED_OVERRIDE
+        # The overrides are recorded for the step-6 briefing; a hand-edited
+        # plan carries no stamped planner status.
+        assert state["dispatch_adjustments"] == [{
+            "name": "concurrency-reviewer", "status": "SKIPPED_OVERRIDE",
+            "override_reason": "test", "planner_status": None, "orphaned_files": None,
+        }]
+
+    def test_step6_names_the_planner_status_the_adjustment_stamped(self, mod, tmp_path):
+        """`dispatch_adjust.py` stamps `planner_status` beside the override
+        reason, so the step-6 listing reads the transition from the final
+        plan alone."""
+        import json
+        final = {"agents": [
+            {"name": "code-reviewer", "status": "DISPATCH", "reason": "always"},
+            {"name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE", "reason": "conditional",
+             "override_reason": "no markup", "planner_status": "DISPATCH"},
+        ]}
+        _artifact(tmp_path, "dispatch_plan").write_text(json.dumps(final))
+        state = {"resolved_params": {"git_range": "abc..HEAD"}, "completed_steps": [1, 2, 3, 5]}
+        mod._orchestrate_step(6, "pr", {"mode": "pr", "interactive": True}, state, {"git": {"git_range": "abc..HEAD"}}, str(tmp_path))
+        assert state["dispatch_adjustments"] == [{
+            "name": "a11y-reviewer", "status": "SKIPPED_OVERRIDE",
+            "override_reason": "no markup", "planner_status": "DISPATCH", "orphaned_files": None,
+        }]
 
     @pytest.mark.parametrize("step", [5, 6])
     def test_dispatch_summaries_use_the_canonical_dispatched_set(
@@ -1179,6 +1688,55 @@ class TestStep8Reconcile:
         assert "reconciliation-context.md" not in text
         # Individual review files are no longer listed — they're inside the context file
         assert "code-review.json" not in text
+
+    def test_dispatch_prompt_is_a_fenced_block_of_the_three_inputs(self, mod, tmp_path):
+        """The orchestrator pastes the fence as the prompt; nothing else
+        rides in it. Every hint goes through the notes channel."""
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        block = text.split("**2. Dispatch `review-reconciliator`**", 1)[1].split("```", 2)[1]
+        lines = [l for l in block.strip().splitlines() if l.strip()]
+        assert lines[0].startswith("Reconciliation context: ")
+        assert lines[0].endswith("reconciliation-context.json")
+        # The scripts directory, not a file: a file path labelled "builder"
+        # is read, and the reconciliator only ever needs the directory.
+        assert lines[1].startswith("Plugin scripts directory: ") and lines[1].endswith("/scripts")
+        assert "output.py" not in block
+        assert lines[2] == f"Output directory: {tmp_path}"
+        assert lines[3] == (
+            "Orchestrator notes: read orchestrator_notes in the context and "
+            "answer each with an outcome and evidence."
+        )
+        assert len(lines) == 4
+        assert "retry logic" not in block
+
+    def test_hints_are_routed_through_the_notes_command(self, mod, tmp_path):
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert "reconciliation_notes.py" in text
+        assert f'--output-dir "{tmp_path}" --note' in text
+        assert "stated as a claim" in text
+        assert "BEFORE dispatch" in text
+
+    def test_change_purpose_is_not_repeated_in_the_prompt(self, mod, tmp_path):
+        """It is in the context already (`change_purpose`); the situation
+        line frames it, the prompt does not carry a second copy."""
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        assert "retry logic" in "\n".join(g["situation"])
+        assert "retry logic" not in "\n".join(g["actions"])
+
+    def test_change_purpose_is_rendered_exactly_once_in_step_8(self, mod, tmp_path):
+        state = self._make_state_with_agents(change_purpose_exists=True)
+        ctx = {"git": {"git_range": "abc..HEAD", "changed_files_csv": "a.py"}}
+        g = mod.get_step_guidance(8, "pr", state, ctx, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"] + g["actions"] + (g.get("handoff") or []))
+        assert text.count("Adds retry logic to the payment gateway.") == 1
 
 
 class TestStep8FindingsArtifactOwnership:
@@ -1494,7 +2052,10 @@ class TestReviewCoverageSection:
     """
 
     @staticmethod
-    def _render(mod, gaps=None, claims=None, unscoped=None, inline=None):
+    def _render(
+        mod, gaps=None, claims=None, unscoped=None, inline=None, noise=None,
+        orphans=None,
+    ):
         # Straight at briefings.py: the renderer is shared by the record
         # assembler and step 11, so the facade is not the seam under test.
         from review.briefings import _render_file_review_section
@@ -1504,7 +2065,17 @@ class TestReviewCoverageSection:
             "agents_with_unclaimed_review_by_file": gaps,
             "agents_claiming_review_by_file": claims,
             "unscoped_files": unscoped,
+            "noise_filtered_files": noise,
+            "override_orphaned_files": orphans,
         })
+
+    def test_a_file_orphaned_by_an_override_names_the_skipped_reviewer(self, mod):
+        """Run 4dfe: the changelog fragment matched docs-drift, the
+        orchestrator skipped docs-drift, and the section said the file
+        matched no reviewer's domain. Its own sentence, its own cause."""
+        text = self._render(mod, unscoped=["changelog/x", "Gemfile"], noise=[], orphans={"changelog/x": ["docs-drift-reviewer"]})
+        assert "- `changelog/x` (skipped by override: `docs-drift-reviewer`)" in text
+        assert "- `Gemfile`" in text
 
     def test_all_three_populations_get_their_own_honest_sentence(self, mod):
         """The field failure this pins: a briefing that DESCRIBED a hedged
@@ -1535,11 +2106,66 @@ class TestReviewCoverageSection:
         assert "- `package-lock.json`" in text
         assert "- `.editorconfig`" in text
 
-        assert (
-            "### Reviewed-file claims — claims, not proof of "
-            "read" in text
-        )
+        assert "### Claimed from the review-claimable queue" in text
+        assert "The pipeline records the claim, not the read:" in text
         assert "- `src/big.py` (claimed by: `security-reviewer`)" in text
+
+    def test_excluded_by_design_files_are_accounted_not_reported_as_a_gap(
+        self, mod
+    ):
+        text = self._render(
+            mod,
+            unscoped=["Gemfile", "package-lock.json", "assets/logo.png"],
+            noise=["package-lock.json", "assets/logo.png"],
+        )
+        assert (
+            "1 changed file(s) matched no reviewer's domain and were "
+            "reviewed by no one" in text
+        )
+        assert "- `Gemfile`" in text
+        assert "2 changed file(s) were excluded from review by design" in text
+        assert "listed for accounting, not as a gap:" in text
+        assert "- `package-lock.json`" in text and "- `assets/logo.png`" in text
+        # The parenthetical about run-level metrics only applies when the
+        # split is unmeasured.
+        assert "run-level metrics count reviewable files only" not in text
+
+    def test_unmeasured_noise_keeps_the_single_unscoped_sentence(self, mod):
+        text = self._render(mod, unscoped=["package-lock.json"], noise=None)
+        assert "1 changed file(s) matched no reviewer's domain" in text
+        assert "run-level metrics count reviewable files only" in text
+        assert "excluded from review by design" not in text
+
+    def test_only_excluded_files_still_render_the_section_without_a_gap(
+        self, mod
+    ):
+        from review.briefings import _has_file_review_gap
+
+        file_review = {
+            "agents_receiving_inline_diff_by_file": {},
+            "agents_with_unclaimed_review_by_file": {},
+            "agents_claiming_review_by_file": {},
+            "unscoped_files": ["package-lock.json"],
+            "noise_filtered_files": ["package-lock.json"],
+        }
+        assert "## Review coverage" in self._render(
+            mod,
+            unscoped=["package-lock.json"],
+            noise=["package-lock.json"],
+        )
+        assert _has_file_review_gap(file_review) is False
+
+    def test_an_orphaned_file_is_a_gap(self):
+        from review.briefings import _has_file_review_gap
+
+        assert _has_file_review_gap({
+            "agents_receiving_inline_diff_by_file": {},
+            "agents_with_unclaimed_review_by_file": {},
+            "agents_claiming_review_by_file": {},
+            "unscoped_files": ["changelog/x"],
+            "noise_filtered_files": [],
+            "override_orphaned_files": {"changelog/x": ["docs-drift-reviewer"]},
+        })
 
     def test_unscoped_line_explains_why_it_can_exceed_the_metrics_figure(
         self, mod
@@ -1611,6 +2237,16 @@ class TestReviewCoverageSection:
         assert "matched no reviewer's domain" not in text
 
 
+# The sentence `manifest_sections.describe_reconciliation_verification`
+# words for a measured reconciliation; the record, step 9 and the critic
+# prompt all carry it verbatim.
+VERIFICATION_SENTENCES = [
+    (0, "unverified", "3 verified concern(s), 0 repository read(s) observed for the reconciliator — UNVERIFIED (no read observed; the read detector is not exhaustive)."),
+    (4, "verified", "3 verified concern(s), 4 repository read(s) observed for the reconciliator — verified."),
+    (None, "unmeasured", "3 verified concern(s), repository reads unmeasured (no transcript)."),
+]
+
+
 class TestStep9ReviewRecord:
     """Step 9 is a READING step now — the record is already assembled.
 
@@ -1620,6 +2256,31 @@ class TestStep9ReviewRecord:
     after it, and the REVISE edit-the-report dance is exactly what this
     step's rewrite deleted.
     """
+
+    @pytest.mark.parametrize("reads, status, expected", VERIFICATION_SENTENCES)
+    def test_states_the_reconciliation_verification(self, mod, tmp_path, reads, status, expected):
+        """The one sentence `describe_reconciliation_verification` words;
+        step 9 adds what the orchestrator should make of an UNVERIFIED one."""
+        state = {"completed_steps": [], "reconciliation_verification": {
+            "verified_concern_count": 3, "repository_reads": reads, "status": status,
+        }}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert f"**Reconciliation:** {expected}" in text
+        assert ("the decision critic will be told" in text) == (status == "unverified")
+        assert "verified nothing" not in text
+
+    def test_the_record_is_complete_so_no_ledger_dump_is_needed(self, mod, tmp_path):
+        """Run 4's orchestrator read the record and then dumped the ledger
+        three times through ad-hoc scripts; the briefing says the record
+        carries everything."""
+        state = {"completed_steps": [], "review_record": {
+            "ran": True, "written": 1, "expected": 1, "status": "complete",
+        }}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["actions"])
+        assert "nothing in the ledger is missing from it" in text
+        assert "not `review-findings.json` through a script of your own" in text
 
     def test_points_at_the_assembled_record(self, mod, tmp_path):
         state = {"completed_steps": [], "review_record": {
@@ -1744,13 +2405,28 @@ class TestStep9ReviewRecord:
             g = mod.get_step_guidance(9, "pr", state, {})
             assert "source of truth" in "\n".join(g["situation"])
 
-    def test_reinjects_change_purpose(self, mod, tmp_path):
-        state = {
-            "completed_steps": [],
-            "change_purpose": "Adds retry logic to the payment gateway.",
-        }
+    def test_points_at_the_change_purpose_instead_of_repeating_it(self, mod, tmp_path):
+        """Run 3's orchestrator read its own 8.1 KB change purpose three
+        times after writing it; step 9 is the copy that carries nothing
+        the orchestrator does not already hold."""
+        purpose = "Adds retry logic to the payment gateway so a stale click cannot double-charge."
+        state = {"completed_steps": [], "change_purpose": purpose}
         g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
-        assert "retry logic" in "\n".join(g["situation"] + g["actions"]).lower()
+        text = "\n".join(g["situation"])
+        assert "**Change purpose:** written by you at step 4 to `" in text
+        assert "change-purpose.md" in text
+        assert "carried in the reconciliation context" in text
+        assert "the reconciled findings, not that framing, are the source of truth" in text
+        assert "retry logic" not in text
+
+    def test_commit_subject_fallback_stays_when_no_purpose_was_written(self, mod, tmp_path):
+        state = {"completed_steps": [], "change_purpose": None,
+                 "commit_messages": ["feat: add retry", "test: cover retry", "docs: note", "chore: x"]}
+        g = mod.get_step_guidance(9, "pr", state, {}, output_dir=str(tmp_path))
+        text = "\n".join(g["situation"])
+        assert "**Change purpose (from commits" in text
+        assert "feat: add retry; test: cover retry; docs: note" in text
+        assert "chore: x" not in text
 
     def test_reinjects_commit_messages_when_no_change_purpose(
         self, mod, tmp_path
@@ -1770,6 +2446,19 @@ class TestStep9ReviewRecord:
 
 
 class TestStep10DecisionCritic:
+    def test_revise_template_offers_revised_recommendations(self, mod):
+        revise = self._revise_section(
+            mod.get_step_guidance(10, "pr", {"completed_steps": []}, {})
+        )
+        assert '"revised_recommendations": {"immediate": [], "important": [], "suggestions": []}' in revise
+        assert "REVISED RECOMMENDATIONS: present|absent" in revise
+        assert "invalidates the reconciler's prior assessment and recommendations" in revise
+
+    @staticmethod
+    def _prompt_block(guidance):
+        text = "\n".join(guidance["actions"])
+        return text.split("Use this dispatch prompt:", 1)[1].split("```", 2)[1]
+
     @staticmethod
     def _revise_section(guidance):
         """The REVISE block: from the `**REVISE**` line up to `**ESCALATE**`."""
@@ -1786,6 +2475,33 @@ class TestStep10DecisionCritic:
                 collected.append(line)
         assert collected, "no REVISE block found in the step-10 briefing"
         return "\n".join(collected)
+
+    def test_prompt_names_the_checkout(self, mod, tmp_path):
+        ctx = {"git": {"head_ref": "fix/topic", "head_sha": "a534276d" + "0" * 32}}
+        g = mod.get_step_guidance(10, "pr", {"completed_steps": [], "ledger_status": "ok"}, ctx, output_dir=str(tmp_path))
+        assert "Checkout: fix/topic @ a534276d0000" in self._prompt_block(g)
+
+    def test_prompt_says_when_the_checkout_is_unknown(self, mod, tmp_path):
+        g = mod.get_step_guidance(10, "pr", {"completed_steps": [], "ledger_status": "ok"}, {}, output_dir=str(tmp_path))
+        assert "Checkout: unknown — verify `git rev-parse --abbrev-ref HEAD` and `git rev-parse HEAD` yourself" in self._prompt_block(g)
+
+    @pytest.mark.parametrize("reads, status, expected", VERIFICATION_SENTENCES + [
+        (None, None, "not measured."),
+    ])
+    def test_prompt_carries_the_reconciliation_verification(self, mod, tmp_path, reads, status, expected):
+        """The critic reads the same sentence the record and step 9 carry,
+        and is told to verify every finding itself when nothing evidences
+        the reconciliator's reads — an UNVERIFIED measurement or none."""
+        state = {"completed_steps": [], "ledger_status": "ok"}
+        if status is not None:
+            state["reconciliation_verification"] = {
+                "verified_concern_count": 3, "repository_reads": reads, "status": status,
+            }
+        g = mod.get_step_guidance(10, "pr", state, {}, output_dir=str(tmp_path))
+        block = self._prompt_block(g)
+        assert f"Reconciliation verification: {expected}" in block
+        advised = "Verify every finding against the source yourself" in block
+        assert advised == (status in (None, "unverified"))
 
     def test_dispatches_decision_reviewer(self, mod, tmp_path):
         state = {"completed_steps": []}
@@ -2403,6 +3119,21 @@ class TestStep11ReportAuthoring:
         assert "Review coverage" in text
         assert "verdict must acknowledge" not in text
 
+    def test_excluded_by_design_files_do_not_force_the_verdict_clause(
+        self, mod
+    ):
+        state = {
+            "file_review": {
+                "agents_with_unclaimed_review_by_file": {},
+                "agents_claiming_review_by_file": {},
+                "unscoped_files": ["package-lock.json"],
+                "noise_filtered_files": ["package-lock.json"],
+            },
+        }
+        text = "\n".join(self._guidance(mod, state=state)["actions"])
+        assert "Review coverage" in text
+        assert "verdict must acknowledge" not in text
+
     def test_inline_receipt_prevents_an_unclaimed_reviewer_from_forcing_the_verdict_clause(
         self, mod
     ):
@@ -2444,7 +3175,57 @@ class TestStep11ReportAuthoring:
 
     def test_no_coverage_mention_without_a_measurement(self, mod):
         text = "\n".join(self._guidance(mod)["actions"])
-        assert "Review coverage" not in text
+        assert "**⚠ Review coverage.**" not in text
+
+    def test_coverage_facts_are_confined_to_the_record(self, mod, tmp_path):
+        text = "\n".join(
+            self._guidance(mod, output_dir=str(tmp_path))["actions"]
+        )
+        assert "**Coverage and scope facts come only from the record.**" in text
+        assert "`## Review coverage`" in text and "run notes" in text
+        assert "must not enter the report" in text
+
+    def test_names_the_paths_the_critic_prose_reaches_outside_the_diff(
+        self, mod, tmp_path
+    ):
+        state = {"critic_prose_paths_outside_diff": [
+            "includes/class-wc-cart.php", "wp-includes/formatting.php",
+        ]}
+        text = "\n".join(
+            self._guidance(
+                mod, state=state, output_dir=str(tmp_path)
+            )["actions"]
+        )
+        assert "The critic's findings name 2 path(s) not in this diff: `includes/class-wc-cart.php`, `wp-includes/formatting.php`." in text
+        assert "not a fact about this review's reach" in text
+
+    def test_caps_the_named_paths(self, mod, tmp_path):
+        state = {
+            "critic_prose_paths_outside_diff": [
+                f"lib/f{i:02d}.py" for i in range(15)
+            ]
+        }
+        text = "\n".join(
+            self._guidance(
+                mod, state=state, output_dir=str(tmp_path)
+            )["actions"]
+        )
+        assert "`lib/f09.py` (+5 more)" in text
+        assert "lib/f10.py" not in text
+
+    def test_silent_when_nothing_was_measured_or_found(self, mod, tmp_path):
+        for state in (
+            {},
+            {"critic_prose_paths_outside_diff": None},
+            {"critic_prose_paths_outside_diff": []},
+        ):
+            text = "\n".join(
+                self._guidance(
+                    mod, state=state, output_dir=str(tmp_path)
+                )["actions"]
+            )
+            assert "The critic's findings name" not in text
+            assert "**Coverage and scope facts come only from the record.**" in text
 
     def test_bot_mode_says_the_report_is_the_posted_comment(self, mod):
         text = "\n".join(self._guidance(
@@ -2893,7 +3674,8 @@ class TestStep12Cleanup:
             "filenames outside the reviewed change",
             "per-agent", "model tier", "verdict", "which agents each file",
             "changed-file paths", "never file contents",
-            "the plugin version", "skips, and status flags",
+            "the plugin version and the plugin checkout's commit", "skips, and status flags",
+            "finding id and severity it came from",
             "triage checks", "token usage by model",
             "PR titles or authors",
             "vladolaru/pirategoat-tools-review-telemetry",

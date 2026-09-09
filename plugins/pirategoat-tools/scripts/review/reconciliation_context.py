@@ -28,20 +28,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
+    from . import atomic_io
+    from .change_purpose import checks_settling, parse_change_purpose
+    from .findings_ledger import read_reconciliation_context
+    from .manifest_sections import read_artifact_file
     from .run_paths import REVIEWERS_SUBDIR, artifact_path
     from .reviewer_names import derive_reviewer_name
     from .verdict_rules import VALID_SEVERITIES
-    from .review_document import coerce_text, load_review_document
+    from .review_document import (
+        coerce_text,
+        load_review_document,
+        normalize_bounded_text,
+    )
 except ImportError:
     _scripts_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
+    from review import atomic_io
+    from review.change_purpose import checks_settling, parse_change_purpose
+    from review.findings_ledger import read_reconciliation_context
+    from review.manifest_sections import read_artifact_file
     from review.run_paths import REVIEWERS_SUBDIR, artifact_path
     from review.reviewer_names import derive_reviewer_name
     from review.verdict_rules import VALID_SEVERITIES
-    from review.review_document import coerce_text, load_review_document
+    from review.review_document import (
+        coerce_text,
+        load_review_document,
+        normalize_bounded_text,
+    )
 
-RECONCILIATION_CONTEXT_SCHEMA = 3
+RECONCILIATION_CONTEXT_SCHEMA = 4
 
 _SEVERITY_FLOOR_MARKER_RE = re.compile(
     r"(?im)Severity-floor:[ \t]*"
@@ -349,7 +365,7 @@ def read_source_snippets(
     When a file doesn't exist in the working tree (deleted by this patch),
     falls back to reading from ``base_ref`` via ``git show``.
 
-    For files that still exist but have deletion hunks (listed in
+    For files that still exist but lost or replaced lines (listed in
     *old_side_files*), also reads the pre-change version from ``base_ref``
     and includes it as a separate ``"[pre-change] file"`` entry.  This
     ensures the reconciliator has evidence for findings about deleted code
@@ -364,10 +380,10 @@ def read_source_snippets(
             is launched from a subdirectory).
         base_ref: Git ref for old-side content (e.g., merge base). Used
             to recover snippets for files deleted by the patch.
-        old_side_files: Set of repo-relative file paths that have deletion
-            hunks (old_count > new_count). When ``base_ref`` is also
-            available, pre-change content is read and included alongside
-            the working-tree snippet.
+        old_side_files: Set of repo-relative file paths with at least one
+            hunk that removes or replaces lines (old_count > 0). When
+            ``base_ref`` is also available, pre-change content is read and
+            included alongside the working-tree snippet.
 
     Returns:
         Dict mapping original file paths to snippet text with line numbers.
@@ -445,8 +461,9 @@ def read_source_snippets(
             prefix = "[deleted] " if deleted else ""
             snippets[file_path] = prefix + "\n".join(snippet_parts)
 
-        # For surviving files with deletion hunks, also read pre-change
-        # content so the reconciliator has evidence for deleted-code findings.
+        # For surviving files that lost or replaced lines, also read
+        # pre-change content so the reconciliator has evidence for findings
+        # about the code that is gone.
         if not deleted and base_ref and _file_in_old_side(file_path, _old_side):
             old_lines = _read_git_content(file_path, base_ref, git_root)
             if old_lines:
@@ -525,8 +542,11 @@ def _parse_diff_hunks(
         - Dict mapping repo-relative file paths to lists of ``(start, end)``
           tuples.  Each hunk may contribute up to two entries (old-side
           and new-side), so the list may contain overlapping ranges.
-        - Set of file paths that have at least one deletion hunk
-          (old_count > new_count), used to trigger old-side snippet reads.
+        - Set of file paths with at least one hunk whose old side is not
+          empty (old_count > 0), used to trigger old-side snippet reads.
+          With ``--unified=0`` every old-side line of a hunk was removed
+          or replaced, so a one-for-one or addition-heavy replacement
+          counts as much as a net deletion.
         Returns ``({}, set())`` if git diff fails or times out.
     """
     try:
@@ -560,7 +580,7 @@ def _parse_diff_hunks(
                 new_start = int(m.group(3))
                 new_count = int(m.group(4)) if m.group(4) else 1
 
-                if old_count > new_count:
+                if old_count > 0:
                     files_with_deletions.add(current_file)
 
                 if old_count == 0 and new_count == 0:
@@ -742,6 +762,69 @@ def filter_in_scope_references(
     return filtered
 
 
+def validate_orchestrator_notes(value):
+    """Validate the schema-4 claim collection without repairing existing state.
+
+    Owned here, beside `RECONCILIATION_CONTEXT_SCHEMA`: the builder carries
+    registered notes across a rebuild, `reconciliation_notes.py` appends to
+    them and `findings_save.py` requires an outcome for each, so all three
+    read one grammar and a claim cannot be valid to one and not another.
+    """
+    if not isinstance(value, list):
+        raise ValueError("orchestrator_notes must be a list")
+    for index, note in enumerate(value):
+        label = f"orchestrator_notes[{index}]"
+        if not isinstance(note, dict) or set(note) != {"id", "note"}:
+            raise ValueError(f"{label} must contain exactly id and note")
+        expected_id = f"n{index + 1}"
+        if note["id"] != expected_id:
+            raise ValueError(f"{label}.id must be {expected_id}")
+        try:
+            cleaned = normalize_bounded_text(note["note"], "note")
+        except ValueError as err:
+            raise ValueError(f"{label}: {err}") from err
+        if note["note"] != cleaned:
+            raise ValueError(f"{label}.note must be clean text")
+    return value
+
+
+def registered_orchestrator_notes(output_dir: str) -> List[Dict[str, Any]]:
+    """The claims already registered against this run's context.
+
+    Step 8 rebuilds the context every time it is entered — including a
+    same-run retry after an interrupted reconciliator dispatch — and the
+    notes the orchestrator registers between build and dispatch live in the
+    file being rebuilt. Dropping them would release the save gate's
+    requirement that every note be answered (it derives that requirement
+    from this collection) and hand the next note an id already spent.
+
+    A context that does not exist yet, or one from before the notes
+    contract, has none. Malformed notes in a schema-4 context raise: only
+    the validating CLI writes them, so a collection that fails this grammar
+    is state no writer can produce, and carrying it forward silently is the
+    loss this function exists to prevent.
+    """
+    try:
+        context = read_reconciliation_context(output_dir)
+    except ValueError:
+        return []
+    if context.get("schema") != RECONCILIATION_CONTEXT_SCHEMA:
+        return []
+    return validate_orchestrator_notes(context.get("orchestrator_notes"))
+
+
+def load_host_context(output_dir: str) -> Optional[Dict[str, Any]]:
+    """Read the local-only host manifest from the run's review context.
+
+    The manifest can be large, so it stays on disk rather than crossing the
+    reconciliation subprocess argv. Its banner comes from this same snapshot.
+    Malformed, absent, or non-object values are treated as unavailable.
+    """
+    context = read_artifact_file(output_dir, "review_context") or {}
+    host_context = context.get("host_context")
+    return host_context if isinstance(host_context, dict) else None
+
+
 def main() -> int:
     """CLI entry point. Gathers all reconciliation context and writes JSON."""
     parser = argparse.ArgumentParser(
@@ -768,13 +851,6 @@ def main() -> int:
         help="Pull request ID.",
     )
     parser.add_argument(
-        "--host-banner-json", default="",
-        help=(
-            "The degraded-host banner as JSON, from the caller's own "
-            "review context. Empty means no banner applies."
-        ),
-    )
-    parser.add_argument(
         "--dispatched-agents", default=None,
         help="Comma-separated agent names from the dispatch plan. "
              "When provided, only review files for these agents are loaded. "
@@ -788,14 +864,10 @@ def main() -> int:
     changed_files = [f.strip() for f in args.changed_files.split(",") if f.strip()]
     change_purpose = args.change_purpose
     pr_id = args.pr_id
-    # The orchestrator holds review context in memory when it calls
-    # this script, so it passes the banner rather than making this script
-    # a second reader of a file it does not own. A malformed value is the
-    # caller's bug, and the traceback names it.
-    host_banner = (
-        json.loads(args.host_banner_json)
-        if args.host_banner_json.strip() else None
-    )
+    host_context = load_host_context(output_dir)
+    host_banner = (host_context or {}).get("banner")
+    if not isinstance(host_banner, dict):
+        host_banner = None
     dispatched_agents: Optional[List[str]] = None
     if args.dispatched_agents is not None:
         stripped = args.dispatched_agents.strip()
@@ -849,6 +921,20 @@ def main() -> int:
             reviews_by_agent, scope_annotations
         )
 
+        # The change purpose's tiers, with the reviewer checks that cite
+        # each Verify item — the reconciliator's pre-merge view. The record
+        # re-derives the post-merge view from the ledger.
+        parsed_purpose = parse_change_purpose(change_purpose)
+        settled = checks_settling(parsed_purpose["verify"], (
+            (stem, check)
+            for stem, review in reviews_by_agent.items()
+            for check in (review.get("checks") or [])
+            if isinstance(check, dict)
+        ))
+        verify_items = [
+            dict(item, checks=settled[item["id"]]) for item in parsed_purpose["verify"]
+        ]
+
         # Build the context object
         context: Dict[str, Any] = {
             "schema": RECONCILIATION_CONTEXT_SCHEMA,
@@ -857,8 +943,14 @@ def main() -> int:
             "scope_annotations": scope_annotations,
             "changed_files": changed_files,
             "change_purpose": change_purpose,
+            # Schema stays 4: introduced in this unreleased window, and an
+            # absent key reads as "no tiers declared" (AGENTS.md, Artifact
+            # Schemas, the in-window carve-out).
+            "verify_items": verify_items,
+            "context_items": parsed_purpose["context"],
+            "change_purpose_problems": parsed_purpose["problems"],
             "pr_id": pr_id,
-            # The degraded-host banner the caller resolved. Reviewers'
+            # The degraded-host banner from the local snapshot. Reviewers'
             # claims were scoped by its presence, and findings_save.py
             # stamps it onto the ledger.
             "host_context_banner": host_banner,
@@ -871,7 +963,16 @@ def main() -> int:
             # carrying `prefiltered`; this count is what makes that
             # obedience checkable.
             "prefiltered_out_of_scope": prefiltered,
+            # Claims the orchestrator registers between context build and
+            # reconciliator dispatch (reconciliation_notes.py). Always a
+            # list: the save gate reads it, and an absent key would be a
+            # third state between "none registered" and "unknown". Filled
+            # from the run's existing context under the lock below, so a
+            # rebuild carries the claims already registered.
+            "orchestrator_notes": [],
         }
+        if host_context is not None:
+            context["host_context"] = host_context
         # Dispatched agents, normalized to match reviews_by_agent keys
         # (e.g., "security-reviewer" → "security-review"). Present only
         # when dispatch was actually known — its absence and
@@ -879,12 +980,20 @@ def main() -> int:
         if stems is not None:
             context["dispatched_agents"] = stems
 
-        # Write to output directory
+        # Write to output directory. The registered claims are read and the
+        # context replaced under the output-directory lock the notes CLI
+        # holds, so this rebuild and a concurrent `add_note` cannot each
+        # write a file computed from a state the other has already moved
+        # past; the atomic replace keeps the artifact from being observed
+        # half-rebuilt by the reconciliator or the save gate.
         output_path = artifact_path(output_dir, "reconciliation_context")
         os.makedirs(output_dir, exist_ok=True)
         output_path.parent.mkdir(exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2, ensure_ascii=False)
+        with atomic_io.output_dir_lock(str(output_dir)):
+            context["orchestrator_notes"] = registered_orchestrator_notes(
+                output_dir
+            )
+            atomic_io.atomic_write_json(str(output_path), context)
 
         # No Markdown projection is written. `reconciliation-context.md`
         # existed for exactly one reader — the reconciliator agent — and a

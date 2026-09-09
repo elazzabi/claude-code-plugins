@@ -698,6 +698,30 @@ class TestRecordCheck:
         b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
         assert b.to_dict()["checks"] == []
 
+    def test_verifies_names_the_change_purpose_items_a_check_settles(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        b.record_check("q", "m", "r", verifies=["V2", " V1 ", "V2"])
+        assert b.to_dict()["checks"][0]["verifies"] == ["V2", "V1"]
+
+    def test_a_check_without_a_citation_carries_no_verifies_key(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        b.record_check("q", "m", "r")
+        assert "verifies" not in b.to_dict()["checks"][0]
+
+    @pytest.mark.parametrize("bad", [[], ["v2"], ["V0"], ["V2", 3], "V2", ["C1"]])
+    def test_verifies_must_be_verify_item_ids(self, bad):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        with pytest.raises(ValueError, match="verifies"):
+            b.record_check("q", "m", "r", verifies=bad)
+
+    def test_update_check_can_add_a_citation(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
+        cid = b.record_check("q", "m", "r")
+        b.update_check(cid, verifies=["V3"])
+        assert b.checks[0]["verifies"] == ["V3"]
+        b.update_check(cid, result="changed")
+        assert b.checks[0]["verifies"] == ["V3"]
+
     def test_empty_question_raises(self):
         b = ReviewOutputBuilder(pr_id="1", reviewer="a11y")
         with pytest.raises(ValueError):
@@ -1250,6 +1274,31 @@ class TestSaveDraft:
             assert "DRAFT TOTALS: findings 0" in out
             assert "DRAFT SAVED: verdict approve" in out
 
+    def test_an_approve_with_nothing_recorded_gets_a_stderr_note(self, capsys):
+        """php-tests-reviewer on wpcom PR #239373 published an approve with
+        no findings, checks, observations or positives after its first
+        builder script raised; downstream it read as a clean approve. The
+        receipt says so on stderr, where the reviewer sees it."""
+        with tempfile.TemporaryDirectory() as d:
+            b = ReviewOutputBuilder(pr_id="1", reviewer="security")
+            _write_required_assignment(d, "security")
+            _save_draft(b, d)
+            err = capsys.readouterr().err
+            assert "NOTE: verdict approve with nothing recorded" in err
+
+    @pytest.mark.parametrize("record", [
+        lambda b: b.record_check("q", "m", "r"),
+        lambda b: b.add_positive_observation("good"),
+        lambda b: b.add_observation("c.py", "FYI"),
+    ])
+    def test_any_recorded_evidence_silences_the_note(self, capsys, record):
+        with tempfile.TemporaryDirectory() as d:
+            b = ReviewOutputBuilder(pr_id="1", reviewer="security")
+            record(b)
+            _write_required_assignment(d, "security")
+            _save_draft(b, d)
+            assert "nothing recorded" not in capsys.readouterr().err
+
     _MUTATORS = {
         "add_finding": lambda b: b.add_finding(
             "low", "new", "src/a.py", "d", "r", line=2
@@ -1545,11 +1594,27 @@ class TestReviewedFileClaims:
         _write_assignment(tmp_path, "sec", claimable)
         return ReviewOutputBuilder.open(tmp_path, "1", "sec")
 
-    @pytest.mark.parametrize("bad", ["", "   ", None, 42, ["src/a.py"]])
+    @pytest.mark.parametrize("bad", ["", "   ", None, 42, [42], ("src/a.py", None)])
     def test_rejects_non_path_values(self, bad):
         b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
         with pytest.raises(ValueError):
             b.claim_files_reviewed(bad)
+
+    @pytest.mark.parametrize("batch", [["src/a.py", "src/b.py"], ("src/a.py", "src/b.py")])
+    def test_one_list_argument_is_the_batch(self, batch):
+        """Two of sixteen wpcom reviewers on PR #239373 called
+        `claim_files_reviewed([path])`; the varargs refusal aborted their
+        whole publication script and one of them retried with an empty
+        approve. The intent of a single list is unambiguous, so it is the
+        batch, not a wrong-typed path."""
+        b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
+        b.claim_files_reviewed(batch)
+        assert b.reviewed_file_claims == ["src/a.py", "src/b.py"]
+
+    def test_wrong_type_message_names_the_value(self):
+        b = ReviewOutputBuilder(pr_id="1", reviewer="sec")
+        with pytest.raises(ValueError, match=r"non-empty file path \(got 42\)"):
+            b.claim_files_reviewed(42)
 
     @pytest.mark.parametrize(
         "bad",
@@ -2611,6 +2676,12 @@ class TestTypeScriptContractLockstep:
         assert match is not None
         assert match.group(1).strip() == "number"
 
+    def test_review_check_declares_the_optional_citation(self):
+        interface = self._interface_body("ReviewCheck")
+        assert re.search(r"^\s*verifies\?:\s*string\[\];", interface, re.MULTILINE), (
+            "ReviewCheck.verifies?: string[] must be declared beside source_reviewers"
+        )
+
     def test_plugin_version_is_declared_nullable(self):
         """Absence is part of the contract, not an error state."""
         interface = self._review_document_interface()
@@ -2686,6 +2757,113 @@ class TestTypeScriptContractLockstep:
 
         meta_body = self._interface_body("ReviewMeta")
         assert top_level_fields(meta_body) == review_document._REQUIRED_META_FIELDS
+
+    @classmethod
+    def _field_types(cls, name, *, extends=""):
+        return dict(re.findall(
+            r"^ {4}(\w+\??):\s*([^;]+);",
+            cls._interface_body(name, extends=extends), re.MULTILINE,
+        ))
+
+    @staticmethod
+    def _type_alias(name):
+        schema = (PLUGIN_ROOT / "schemas" / "review-output.ts").read_text()
+        match = re.search(
+            rf"(?:export )?type {name} =\s*(.*?)(?=\n(?:export )?type |\n\n|\Z)",
+            schema, re.DOTALL,
+        )
+        assert match is not None, f"review-output.ts must declare {name}"
+        return " ".join(match.group(1).split())
+
+    @pytest.mark.parametrize("interface, expected", [
+        ("Finding", {"sources?": "FindingSource[]", "severity_note?": "string"}),
+        ("ReviewCheck", {"sources?": "ReviewSource[]"}),
+        ("FindingsLedger", {
+            "dropped_findings?": "DroppedFinding[]",
+            "dropped_checks?": "DroppedCheck[]",
+            "orchestrator_notes?": "OrchestratorNote[]",
+            "invalidated_recommendations?": "InvalidatedRecommendations[]",
+        }),
+    ], ids=["finding-provenance", "check-provenance", "ledger-audit"])
+    def test_reconciliation_extensions_remain_optional(self, interface, expected):
+        fields = self._field_types(
+            interface, extends="ReviewContent" if interface == "FindingsLedger" else "",
+        )
+        assert {key: fields.get(key) for key in expected} == expected
+
+    def test_source_identity_and_optional_stamped_severity(self):
+        assert self._field_types("ReviewSource") == {
+            "reviewer": "string", "id": "FindingId | CheckId",
+        }
+        assert self._field_types("FindingSource", extends="ReviewSource") == {
+            "severity?": "Severity",
+        }
+
+    def test_drop_reason_and_evidence_contract(self):
+        assert self._field_types("DroppedFindingSource", extends="ReviewSource") == {
+            "scope_status?": "string",
+        }
+        assert self._type_alias("DroppedFinding") == (
+            "DroppedFindingSource & ( "
+            "| { reason: 'false_positive' | 'out_of_scope'; evidence: string } "
+            "| { reason: 'prefiltered'; evidence?: string } );"
+        )
+        # A dropped check carries no stamped scope: the reader rejects
+        # scope_status there, so the contract must not offer it.
+        assert self._field_types("DroppedCheck", extends="ReviewSource") == {
+            "reason": "'void'", "evidence": "string",
+        }
+        assert set(re.findall(
+            r"'([^']+)'", self._type_alias("DroppedFinding"),
+        )) == set(critic_adjustments.DROP_REASONS_FINDING)
+        assert critic_adjustments.DROP_REASONS_CHECK == ("void",)
+
+    def test_orchestrator_note_outcomes_and_optional_stamped_note(self):
+        assert self._field_types("OrchestratorNote") == {
+            "id": "`n${number}`",
+            "outcome": "'confirmed' | 'refuted' | 'not_checked'",
+            "evidence": "string", "note?": "string",
+        }
+        assert set(re.findall(
+            r"'([^']+)'", self._field_types("OrchestratorNote")["outcome"],
+        )) == set(critic_adjustments.NOTE_OUTCOMES)
+
+    def test_invalidated_recommendations_keep_partial_priorities_and_adjustment_ids(self):
+        assert self._type_alias("ReviewRecommendations") == "ReviewContent['recommendations'];"
+        assert self._field_types("InvalidatedRecommendations") == {
+            "recommendations": "Partial<ReviewRecommendations>",
+            "invalidated_by_critic_adjustment_ids": "string[]",
+        }
+        content = self._interface_body("ReviewContent")
+        priorities = re.search(r"recommendations:\s*\{(.*?)\n {4}\};", content, re.DOTALL)
+        assert priorities is not None
+        assert set(re.findall(r"(\w+): string\[\]", priorities.group(1))) == set(
+            review_document.RECOMMENDATION_PRIORITIES
+        )
+
+    def test_request_replacements_are_optional_nullable_and_partial_by_priority(self):
+        fields = self._field_types("AdjudicationRequest")
+        assert fields.get("revised_assessment?") == "string | null"
+        assert fields.get("revised_recommendations?") == "Partial<ReviewRecommendations> | null"
+        assert fields["schema"] == "2"
+
+    def test_correct_excludes_severity_while_severity_actions_retain_it(self):
+        assert self._type_alias("FindingSeverityChangeFields") == (
+            "Pick<Finding, 'severity'> & Partial<Omit<FindingPatchFields, 'severity'>>;"
+        )
+        assert self._type_alias("FindingCorrectionFields") == (
+            "AtLeastOne<Omit<FindingPatchFields, 'severity'>> & { severity?: never };"
+        )
+        assert self._type_alias("CheckCorrectionFields") == (
+            "AtLeastOne<Pick<ReviewCheck, 'question' | 'method' | 'result'>> "
+            "& { severity?: never };"
+        )
+        proposal = self._type_alias("CriticProposalAdjustment")
+        assert "action: 'correct'; target: FindingTarget; fields: FindingCorrectionFields;" in proposal
+        assert "action: 'correct'; target: CheckTarget; fields: CheckCorrectionFields;" in proposal
+        assert "action: 'promote' | 'demote'; target: FindingTarget; fields: FindingSeverityChangeFields;" in proposal
+        provenance = self._type_alias("FindingCriticAdjustment")
+        assert "action: 'promote' | 'demote'; rationale: string; prior: FindingSeverityChangeFields" in provenance
 
     @pytest.mark.parametrize(
         "field", ["observations", "recommendations", "positive_observations"]
@@ -2874,3 +3052,12 @@ def test_missing_reviewed_file_field_names_the_envelope_gate():
     del doc["review_claimable_files"]
     with pytest.raises(ValueError, match="missing reviewed-file fields"):
         validate_review_document(doc, "security")
+
+
+def test_builder_timestamp_is_aware_utc():
+    """Every other run artifact, marker and telemetry event is aware UTC; the
+    review's own timestamp was the one naive local clock an auditor had to
+    shift by hand (run e08e: `2026-09-08T14:52:52.137095` for a 11:52Z finish)."""
+    stamp = datetime.fromisoformat(ReviewOutputBuilder("42", "security").timestamp)
+    assert stamp.tzinfo is not None and stamp.utcoffset() == timedelta(0)
+

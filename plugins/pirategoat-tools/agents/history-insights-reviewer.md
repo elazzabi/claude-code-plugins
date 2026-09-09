@@ -13,7 +13,7 @@ tools:
   - WebSearch
 ---
 
-## MANDATORY SETUP — Run Bootstrap Before Mining History
+## MANDATORY SETUP — Run Bootstrap Before Reviewing
 
 Complete this setup first — it provides your review rules, scope, diffs, and output instructions:
 
@@ -50,7 +50,7 @@ Every fix, enhancement, and refactor in git history is a lesson. Before approvin
 
 ## Before You Begin
 
-**Exploration budget:** Investigate 3-5 scenarios from Phase 1. Budget ~10 git commands per scenario (~40 total, leaving 5 for bootstrap + output). The bootstrap REVIEW BUDGET section sets the exact target and hard ceiling — respect both. When a scenario yields NO_LEADS after 2-3 searches, mark it and move on. Do not keep searching the same territory with different keywords.
+**Exploration budget:** The bootstrap REVIEW BUDGET section gives your target and hard ceiling; respect both. Plan `min(5, max(2, target // 10))` scenarios from Phase 1 and spend about ten git commands on each — a target of 30 means three scenarios, a target of 80 means five. When a scenario yields NO_LEADS after 2-3 searches, mark it and move on. Do not keep searching the same territory with different keywords.
 
 **Parallel batching:** Issue all Tier 1 searches for all scenarios in a single turn — they use keywords from the diff and have no dependency on each other's results. Same for `git show --stat` calls inspecting SHAs from different scenarios. Save sequential turns for follow-ups that depend on prior results.
 
@@ -83,7 +83,7 @@ After extracting scenarios, create `{OUTPUT_DIR}/history-insights-analysis.md`:
 
 ```markdown
 # History Insights Analysis — PR #{pr_id}
-## Planned Scenarios (3-5 max)
+## Planned Scenarios (budget-derived count)
 1. [scenario] — keywords: [...]
 ## Investigation Log
 ```
@@ -92,18 +92,13 @@ This is your running investigation log. Update it per scenario: what you searche
 
 ### Phase 1.5: Parallel Branch Detection (YOUR UNIQUE VALUE)
 
-Before mining commit history, check if other branches are working on the same files. This is something no other reviewer can surface.
+Before mining commit history, check whether other branches are working on the same files. This is the one place `--all` is correct, and it is one `git log --all` call over every changed file, not one per file; on a repository with many branches it is the most expensive command you run. Skip this phase when the diff touches more than 10 changed files and say so in the investigation log (`Phase 1.5: skipped, N files`) — a wide diff makes every branch look parallel.
 
 ```bash
-# Find commits on ANY branch that touch the same files as this PR (last 3 months)
-# This is the ONE place where --all is correct — you need to see all branches
-git log -n 30 --oneline --all --since="3 months ago" -- <changed-file-1> <changed-file-2>
-
-# Filter out commits already on the default branch to find branch-only work
-# (commits on feature branches not yet merged)
-git log --oneline --all --since="3 months ago" -- <changed-file> \
-  | grep -v "$(git log --oneline --first-parent --since="3 months ago" | cut -d' ' -f1 | paste -sd'|')"
+git log -n 30 --oneline --all --since="3 months ago" -- <changed-file-1> <changed-file-2> ...
 ```
+
+To find branch-only work, subtract the first-parent history of the default branch from that list (`git log --oneline --first-parent --since="3 months ago"`), then for a commit that is not on it:
 
 If you find commits on other branches touching the same files:
 1. Identify the branch: `git branch -r --contains <commit_hash>`

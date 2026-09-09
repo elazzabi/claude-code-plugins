@@ -72,10 +72,7 @@ _markdown_spec.loader.exec_module(_markdown_mod)
 _render_markdown = _markdown_mod.render_markdown
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 def _write_critic_snapshot(output_dir, adjustments):
@@ -155,6 +152,19 @@ def _review_json(reviewer):
         return canonical_findings_ledger()
     return canonical_review_document(reviewer)
 
+
+
+def _record_timeouts(monkeypatch, orchestration_mod):
+    """Replace the orchestrator's subprocess seam with one that succeeds
+    and records the timeout each call was given."""
+    seen = []
+
+    def fake_run_subprocess(cmd, cwd=None, timeout=60):
+        seen.append(timeout)
+        return "", True
+
+    monkeypatch.setattr(orchestration_mod, "_run_subprocess", fake_run_subprocess)
+    return seen
 
 class TestReviewerDraftFinalizationLifecycle:
     def test_last_draft_is_the_only_synthesis_input(
@@ -945,7 +955,13 @@ class TestTelemetryIntegration:
             "head_sha": current_head,
         }
         manifest = json.loads(Path(log_path).with_suffix(".manifest.json").read_text())
-        assert manifest["run"]["git"] == start["pipeline"]["git"]
+        assert manifest["run"]["git"] == {
+            "requested_range": "",
+            "base_sha": "",
+            "head_sha": current_head,
+            "base_fetch": None,
+            "scope_check": None,
+        }
         assert json.loads((out / "review-context.json").read_text()) == {
             "output": {"directory": str(out)},
         }
@@ -1204,19 +1220,96 @@ class TestStep3Orchestration:
         # Should succeed even without a git repo — subprocess failure is tolerated
         assert r.returncode == 0
 
+    def test_incremental_step_3_points_at_the_previous_runs_change_purpose(self, mod, tmp_path, monkeypatch):
+        previous = tmp_path / "previous-run"
+        (_artifact(previous, "change_purpose")).write_text("## Verify\nNone.\n")
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(json.dumps({
+            "last_reviewed_sha": "0000000", "review_count": 1,
+            "last_run_dir": str(previous),
+        }))
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert state["previous_change_purpose"] == str(_artifact(previous, "change_purpose"))
+
+    def test_incremental_step_3_without_a_previous_run_records_nothing(self, mod, tmp_path, monkeypatch):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(json.dumps({
+            "last_reviewed_sha": "0000000", "review_count": 1,
+        }))
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert "previous_change_purpose" not in state
+
+    @pytest.mark.parametrize("baseline", [
+        json.dumps({"last_reviewed_sha": "0000000", "last_run_dir": "<missing>"}),
+        json.dumps([]),
+        "not json",
+    ])
+    def test_incremental_step_3_tolerates_a_useless_baseline(self, mod, tmp_path, monkeypatch, baseline):
+        """A recorded run dir with no change purpose in it, a baseline that
+        is not an object, or one that is not JSON all mean "no pointer"."""
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / ".branch-review-baseline.json").write_text(
+            baseline.replace("<missing>", str(tmp_path / "gone"))
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_run_subprocess",
+            lambda *a, **k: ("", True),
+        )
+        monkeypatch.setitem(
+            mod._orchestrate_step_3.__globals__, "_capture_worktree_baseline",
+            lambda *_a, **_k: None,
+        )
+        state = {"resolved_params": {}}
+        mod._orchestrate_step(3, "incremental", {"target_dir": str(target), "mode": "incremental"}, state, {}, str(out))
+        assert "previous_change_purpose" not in state
+
+    def test_step_2_lets_the_pr_checkout_use_its_whole_timeout(
+        self, mod, orchestration_mod, tmp_path, monkeypatch
+    ):
+        """The workspace wrapper allows the checkout 300 s; the pipeline
+        must not kill the wrapper first, or the checkout keeps changing the
+        tree after the recovery metadata was lost."""
+        from review.workspace_setup import CHECKOUT_TIMEOUT_SECONDS
+        seen_timeouts = _record_timeouts(monkeypatch, orchestration_mod)
+        mod._orchestrate_step(
+            2, "pr", {"pr_number": "42"},
+            {"resolved_params": {}, "workspace": {}}, {}, str(tmp_path),
+        )
+        assert seen_timeouts
+        assert seen_timeouts[0] > CHECKOUT_TIMEOUT_SECONDS
+
     def test_step_3_allows_known_ecosystem_cache_refreshes_to_finish(
         self, mod, orchestration_mod, tmp_path, monkeypatch
     ):
         """The context wrapper should allow both known host caches to refresh."""
-        seen_timeouts = []
-
-        def fake_run_subprocess(cmd, cwd=None, timeout=60):
-            seen_timeouts.append(timeout)
-            return "", True
-
-        monkeypatch.setattr(
-            orchestration_mod, "_run_subprocess", fake_run_subprocess
-        )
+        seen_timeouts = _record_timeouts(monkeypatch, orchestration_mod)
         mod._orchestrate_step(
             3,
             "full",
@@ -1395,6 +1488,49 @@ class TestStep5Orchestration:
         _init_git_repo(repo)
         _add_commit(repo)
         return repo
+
+    def test_step_5_parses_the_change_purpose_into_state(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        out = tmp_path / "out"
+        run_pipeline("--step", "1", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        ctx = {
+            "git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                    "changed_files": ["a.py"], "commit_count": 1},
+            "pr_size": {"files": 1, "lines": 10, "category": "tiny"},
+        }
+        (out / "review-context.json").write_text(json.dumps(ctx))
+        purpose = _artifact(out, "change_purpose")
+        purpose.parent.mkdir(parents=True, exist_ok=True)
+        purpose.write_text(
+            "## Verify\nV1. claim — source: PR description\n"
+            "## Context\nC1. fact — source: inferred from the diff\n"
+            "## Author's description (extracted)\nquoted\n"
+        )
+        run_pipeline("--step", "5", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        state = json.loads((_artifact(out, "pipeline_state")).read_text())
+        assert state["change_purpose_items"]["structured"] is True
+        assert [i["id"] for i in state["change_purpose_items"]["verify"]] == ["V1"]
+        assert state["change_purpose_items"]["problems"] == [
+            "C1 is inferred from the diff and may not be Context"
+        ]
+
+    def test_step_5_without_a_change_purpose_records_none(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        out = tmp_path / "out"
+        run_pipeline("--step", "1", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        ctx = {
+            "git": {"merge_base": "abc", "git_range": "abc..HEAD",
+                    "changed_files": ["a.py"], "commit_count": 1},
+            "pr_size": {"files": 1, "lines": 10, "category": "tiny"},
+        }
+        (out / "review-context.json").write_text(json.dumps(ctx))
+        run_pipeline("--step", "5", "--mode", "full",
+                   "--output-dir", str(out), cwd=str(repo))
+        state = json.loads((_artifact(out, "pipeline_state")).read_text())
+        assert state["change_purpose_items"] is None
 
     def test_step_5_stores_dispatch_plan_summary(self, tmp_path):
         """Step 5 should store dispatch plan summary in state."""
@@ -1855,6 +1991,17 @@ class TestStep7Orchestration:
         result = grade_review_baseline(str(baseline_path))
         assert result.passed, f"Baseline grading failed: {result.failures}"
 
+    def test_step_7_records_the_run_directory_for_the_next_incremental_review(self, tmp_path):
+        (tmp_path / "run-config.json").write_text(json.dumps({"target_dir": str(tmp_path)}))
+        run_pipeline("--step", "1", "--mode", "incremental",
+                   "--output-dir", str(tmp_path), cwd=tmp_path)
+        ctx = {"git": {"git_range": "abc..HEAD", "base_ref": "main"}}
+        (tmp_path / "review-context.json").write_text(json.dumps(ctx))
+        run_pipeline("--step", "7", "--mode", "incremental",
+                   "--output-dir", str(tmp_path), cwd=tmp_path)
+        baseline = json.loads((tmp_path / ".branch-review-baseline.json").read_text())
+        assert baseline["last_run_dir"] == str(tmp_path)
+
     def test_step_7_requires_host_completion_before_draft_finalization(
         self, mod, tmp_path
     ):
@@ -2039,6 +2186,82 @@ class TestStep8Orchestration:
 
         assert spawned == []
         assert state["agents"]["completed"] == ["code-reviewer"]
+
+    def test_step_8_keeps_oversized_host_context_out_of_reconciliation_argv(
+        self, mod, tmp_path, monkeypatch
+    ):
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "code-reviewer", "status": "DISPATCH"}],
+        }))
+        _save_and_finalize(tmp_path, "code")
+        host_context = {
+            "version": 1,
+            "resolved": [
+                {
+                    "name": f"wordpress-{index}",
+                    "kind": "runtime-host",
+                    "path": f"/repo/wordpress-{index}",
+                    "source": "ecosystem-cache",
+                    "version": None,
+                    "notes": {},
+                }
+                for index in range(9000)
+            ],
+            "unresolved": [],
+            "banner": None,
+        }
+        (_artifact(tmp_path, "review_context")).write_text(
+            json.dumps({"host_context": host_context})
+        )
+        commands = []
+
+        def reconciliation_succeeds(cmd, *_args, **_kwargs):
+            commands.append(list(cmd))
+            (_artifact(tmp_path, "reconciliation_context")).write_text("{}")
+            return "", True
+
+        monkeypatch.setitem(
+            mod._orchestrate_step_8.__globals__,
+            "_run_subprocess",
+            reconciliation_succeeds,
+        )
+
+        mod._orchestrate_step(
+            8,
+            "full",
+            {},
+            {},
+            {"resolved_params": {}, "host_context": host_context},
+            str(tmp_path),
+        )
+
+        command = commands[-1]
+        assert sum(len(argument) for argument in command) < 10_000
+
+    def test_step_8_re_parses_the_change_purpose_the_orchestrator_may_have_edited(
+        self, mod, tmp_path, monkeypatch
+    ):
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "code-reviewer", "status": "DISPATCH"}],
+        }))
+        _save_and_finalize(tmp_path, "code")
+        purpose = _artifact(tmp_path, "change_purpose")
+        purpose.parent.mkdir(parents=True, exist_ok=True)
+        purpose.write_text("## Verify\nV1. a — source: PR description\nV2. b — source: PR description\n## Context\nNone.\n## Author's description (extracted)\nq\n")
+        commands = []
+
+        def reconciliation_succeeds(cmd, *_args, **_kwargs):
+            commands.append(list(cmd))
+            (_artifact(tmp_path, "reconciliation_context")).write_text("{}")
+            return "", True
+
+        monkeypatch.setitem(
+            mod._orchestrate_step_8.__globals__, "_run_subprocess", reconciliation_succeeds,
+        )
+        state = {"resolved_params": {}, "change_purpose_items": {"verify": [{"id": "V1"}], "context": [], "problems": [], "structured": True}}
+        mod._orchestrate_step(8, "full", {}, state, {}, str(tmp_path))
+        assert [i["id"] for i in state["change_purpose_items"]["verify"]] == ["V1", "V2"]
+        assert any("--change-purpose" in cmd for cmd in commands)
 
     def test_step_8_takes_dispatched_identities_from_the_status_gate(
         self, mod, tmp_path, monkeypatch
@@ -2953,6 +3176,8 @@ class TestStep9CoverageMeasurement:
         assert state["file_review"] == {
             "scope_reporting_agent_count": 2,
             "unscoped_files": ["package-lock.json"],
+            "noise_filtered_files": None,
+            "override_orphaned_files": None,
             "agents_receiving_inline_diff_by_file": {
                 "src/a.py": ["security"]
             },
@@ -2963,6 +3188,58 @@ class TestStep9CoverageMeasurement:
                 "src/starved.php": ["code"]
             },
         }
+
+    def test_the_planner_s_exclusions_are_measured_from_the_dispatch_plan(
+        self, mod, tmp_path
+    ):
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "security-reviewer", "status": "DISPATCH"}],
+            "changed_files": ["src/a.py", "Gemfile"],
+        }))
+
+        state = self._run_step(
+            mod, tmp_path, "src/a.py,Gemfile,package-lock.json",
+        )
+
+        assert state["file_review"]["unscoped_files"] == [
+            "Gemfile", "package-lock.json",
+        ]
+        assert state["file_review"]["noise_filtered_files"] == [
+            "package-lock.json",
+        ]
+
+    def test_no_dispatch_plan_leaves_the_exclusions_unmeasured(
+        self, mod, tmp_path
+    ):
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+
+        state = self._run_step(mod, tmp_path, "src/a.py,package-lock.json")
+
+        assert state["file_review"]["unscoped_files"] == ["package-lock.json"]
+        assert state["file_review"]["noise_filtered_files"] is None
+
+    def test_excluded_files_reach_the_record_as_accounting(
+        self, mod, tmp_path
+    ):
+        (tmp_path / "review-findings.json").write_text(
+            json.dumps(_review_json("review-reconciliator"))
+        )
+        self._summary(tmp_path, "security-reviewer", inline=["src/a.py"])
+        (_artifact(tmp_path, "dispatch_plan")).write_text(json.dumps({
+            "agents": [{"name": "security-reviewer", "status": "DISPATCH"}],
+            "changed_files": ["src/a.py", "Gemfile"],
+        }))
+
+        self._run_step(
+            mod, tmp_path, "src/a.py,Gemfile,package-lock.json",
+        )
+
+        record = (tmp_path / "review-record.md").read_text()
+        assert "1 changed file(s) matched no reviewer's domain" in record
+        assert "- `Gemfile`" in record
+        assert "1 changed file(s) were excluded from review by design" in record
+        assert "- `package-lock.json`" in record
 
     def test_stale_populations_are_cleared_not_carried(self, mod, tmp_path):
         """A re-entered step 9 in a run with nothing to measure must not
@@ -3055,6 +3332,8 @@ class TestStep9Orchestration:
         assert state.get("file_review") == {
             "scope_reporting_agent_count": 2,
             "unscoped_files": [],
+            "noise_filtered_files": None,
+            "override_orphaned_files": None,
             "agents_receiving_inline_diff_by_file": {
                 "src/a.php": ["code", "security"]
             },
@@ -3579,7 +3858,7 @@ class TestStep11Orchestration:
         assert "No workspace changes to restore" in consent.stdout
         assert "PIPELINE COMPLETE" in consent.stdout
 
-    def test_step_11_writes_pipeline_result(self, tmp_path):
+    def test_step_11_writes_pipeline_result_with_reconciliation_verification(self, tmp_path):
         """A pre-existing unbound report must be rewritten before publish."""
         run_pipeline("--step", "1", "--mode", "pr",
                    "--output-dir", str(tmp_path), "--pr-number", "42", cwd=tmp_path)
@@ -3615,6 +3894,7 @@ class TestStep11Orchestration:
             "fallback: no usable ledger verdict"
         )
         assert "report_path" in result
+        assert result["reconciliation_verification"] is None
 
     def test_step_11_leaves_the_findings_verdict_alone(self, tmp_path):
         """Rule 23's sync is gone end to end: the CLI reads the ledger's

@@ -43,6 +43,10 @@ _CRITIC_CONTRACT = _load_exact_path_module(
     _REVIEW_DIR / "critic_adjustments.py",
     "review critic adjustments contract unavailable",
 )
+_REVIEW_DOCUMENT_CONTRACT = _load_exact_path_module(
+    "review_document_contract", _REVIEW_DIR / "review_document.py",
+    "review document contract unavailable",
+)
 _SYNTHESIS_CONTRACT = _load_exact_path_module(
     "review_synthesis_lifecycle_contract",
     _REVIEW_DIR / "synthesis_lifecycle.py",
@@ -63,11 +67,17 @@ _RUN_PATHS_CONTRACT = _load_exact_path_module(
     _REVIEW_DIR / "run_paths.py",
     "review run paths contract unavailable",
 )
+_GIT_PATHS_CONTRACT = _load_exact_path_module(
+    "git_paths_contract",
+    _REVIEW_DIR.parent / "git_paths.py",
+    "git paths contract unavailable",
+)
 _REVIEWER_NAMES_CONTRACT = _load_exact_path_module(
     "review_reviewer_names_contract",
     _REVIEW_DIR / "reviewer_names.py",
     "reviewer names contract unavailable",
 )
+FULL_SHA_RE = _GIT_PATHS_CONTRACT.FULL_SHA_RE
 DEFAULT_LOG_DIR = Path(_TELEMETRY_CONTRACT.LOG_DIR)
 DEFAULT_SESSIONS_ROOT = Path("~/.claude/projects").expanduser()
 DEFAULT_REGISTRY = _REVIEW_DIR / "agent_registry.json"
@@ -146,6 +156,7 @@ _DERIVED_MARKDOWN_STATUSES = (
     _MANIFEST_SECTIONS_CONTRACT._DERIVED_MARKDOWN_STATUSES
 )
 _PIPELINE_FAMILIES = (
+    "evidence",
     "dispatch",
     "assignment",
     "lifecycle",
@@ -154,6 +165,7 @@ _PIPELINE_FAMILIES = (
     # and the decision critic produce neither, so they are measured as
     # their own family and never move a reviewer count.
     "synthesis_agents",
+    "usage_shares",
     "outcomes",
     "raw_findings",
     "final_findings",
@@ -213,6 +225,8 @@ _SUMMARY_FIELDS = (
     "final_finding_count",
 )
 _SEVERITIES = tuple(_TELEMETRY_CONTRACT._SEVERITY_FIELDS)
+_BASE_FETCH_STATUSES = _TELEMETRY_CONTRACT._BASE_FETCH_STATUSES
+_SCOPE_CHECK_STATUSES = _TELEMETRY_CONTRACT._SCOPE_CHECK_STATUSES
 # The ledger's producer owns the reconciliation shape. These fields come from
 # that producer; historical agent spelling is projected separately through the
 # canonical reviewer-names contract above.
@@ -231,12 +245,13 @@ _SUPPORTED_MANIFEST_SCHEMA = 3
 _OBSERVED_READS_SCHEMA = 2
 # `reviewed_files` is the cohort's canonical aggregate of the per-agent
 # reviewed-file counts.
-_REPORT_SCHEMA = 4
+_REPORT_SCHEMA = 5
 _SUPPORTED_MANIFEST_STATUSES = {"running", "complete"}
 _DISPATCHED_STATUSES = _DISPATCH_STATUS_CONTRACT.DISPATCHED_STATUSES
 _SUPPORTED_DISPATCH_STATUSES = (
     _DISPATCH_STATUS_CONTRACT.SUPPORTED_DISPATCH_STATUSES
 )
+_DISPATCH_SIGNALS = frozenset(_DISPATCH_STATUS_CONTRACT.DISPATCH_SIGNALS)
 # The path-segment grammar lives in run_paths, the sole authority for
 # durable review locations — not in the sharing module, which is only one
 # of its consumers.

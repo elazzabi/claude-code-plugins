@@ -45,7 +45,10 @@ if _SCRIPTS_DIR not in sys.path:
 from review.reviewer_names import derive_reviewer_name
 from review.agent.review_assignment import ASSIGNMENT_SCHEMA, derive_reviewed_files
 from review.atomic_io import atomic_write_json
+from review.change_purpose import parse_change_purpose
+from review.manifest_sections import host_identity_phrase, project_host_entry
 from review.run_paths import artifact_path
+from review.triage_sources import strip_html_comments
 from review.reviewer_lifecycle import (
     review_paths,
     scope_summary_path,
@@ -428,11 +431,15 @@ def budget_was_capped(changed_lines: int) -> bool:
     return (BUDGET_BASE + (changed_lines // BUDGET_LINES_PER_CALL)) > BUDGET_CAP
 
 
-def load_pr_intent(output_dir: str) -> Optional[str]:
+def load_pr_intent(output_dir: str, change_purpose: Optional[str] = None) -> Optional[str]:
     """Load PR intent from the run's review context.
 
-    Extracts PR title, body, and linked issues to build a concise intent
-    block that helps specialist reviewers calibrate severity.
+    Title, author, and linked issues, plus the author's description: a
+    pointer to the change purpose's "Author's description (extracted)"
+    section when the orchestrator wrote one (the sanctioned channel — it
+    dropped the template by judgement), otherwise the whole body with its
+    HTML comments removed, never cut to a length that would leave only
+    the template's checklist.
 
     Returns formatted intent string, or None if no context is available.
     """
@@ -460,11 +467,15 @@ def load_pr_intent(output_dir: str) -> Optional[str]:
     parts.append(f"PR Title: {title}")
     if author:
         parts.append(f"PR Author: {author}")
-    if body:
-        # Truncate long bodies to keep the intent section concise
-        if len(body) > 500:
-            body = body[:500] + "..."
-        parts.append(f"PR Description: {body}")
+    extracted = parse_change_purpose(change_purpose or "")["author_description"]
+    if extracted:
+        parts.append(
+            'PR Description: extracted by the orchestrator, by judgement, under '
+            'REVIEW FOCUS → "Author\'s description (extracted)"; the raw body is '
+            'not repeated here.'
+        )
+    elif body:
+        parts.append(f"PR Description: {strip_html_comments(body).strip()}")
     if linked_issues:
         parts.append(f"Linked Issues: {', '.join(linked_issues)}")
 
@@ -753,8 +764,9 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
     lines = [
         "## Host Context",
         "",
-        "Use these paths as starting points, not an exhaustive inventory. "
-        "If they do not match the code path under review, explore normally.",
+        "Read upstream code from the hosts listed here. The Host Context "
+        "Usage rules say how to cite a resolved host and what an unresolved "
+        "one means for your findings.",
         "",
     ]
     if resolved:
@@ -772,14 +784,11 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
                 "depends on upstream behavior):"
             )
             for e in runtime[:_HOST_CONTEXT_MAX_PER_KIND]:
-                version = (
-                    f" [version {_prompt_json_string(e.get('version'))}]"
-                    if e.get("version") else ""
-                )
+                identity = host_identity_phrase(project_host_entry(e), quote=_prompt_json_string)
                 lines.append(
                     f"  - name={_prompt_json_string(e.get('name'))} "
-                    f"[runtime-host]: path={_prompt_json_string(e.get('path'))}"
-                    f" (via source={_prompt_json_string(e.get('source'))}{version})"
+                    f"[runtime-host]: path={_prompt_json_string(e.get('path'))} "
+                    f"(via source={_prompt_json_string(e.get('source'))}, {identity})"
                 )
             if len(runtime) > _HOST_CONTEXT_MAX_PER_KIND:
                 extra = len(runtime) - _HOST_CONTEXT_MAX_PER_KIND
@@ -810,9 +819,10 @@ def render_host_context_section(manifest: Optional[dict]) -> str:
         sorted_unresolved = sorted(unresolved, key=lambda u: u.get("name", ""))
         for u in sorted_unresolved[:_HOST_CONTEXT_MAX_UNRESOLVED]:
             reason = u.get("reason", "unknown")
+            declared = f' (declared {_prompt_json_string(u["version"])})' if u.get("version") else ""
             lines.append(
                 f"  - name={_prompt_json_string(u.get('name'))}: "
-                f"reason={_prompt_json_string(reason)}"
+                f"reason={_prompt_json_string(reason)}{declared}"
             )
         if len(sorted_unresolved) > _HOST_CONTEXT_MAX_UNRESOLVED:
             extra = len(sorted_unresolved) - _HOST_CONTEXT_MAX_UNRESOLVED
@@ -959,9 +969,26 @@ def build_output(
     # Review Focus — the main session's distilled understanding of the change.
     # Supplements PR INTENT (author's raw metadata) with richer synthesis:
     # what changed, why, and what to focus on during review.
+    parsed_purpose = parse_change_purpose(change_purpose) if change_purpose else None
     if change_purpose:
         lines.append("=== REVIEW FOCUS (pipeline synthesis) ===")
         lines.append("Pipeline-distilled summary of what changed, why, and review focus areas.")
+        if parsed_purpose["structured"]:
+            if parsed_purpose["verify"]:
+                verify_sentence = (
+                    "`## Verify` items are load-bearing claims: when one touches your "
+                    "domain, verify it against the code and record the result with "
+                    '`builder.record_check(..., verifies=["V2"])` naming the item. '
+                )
+            else:
+                verify_sentence = "`## Verify` declares nothing load-bearing for this change. "
+            lines.append(
+                "Two tiers. " + verify_sentence
+                + "`## Context` items are facts to take as given; do not re-derive them. "
+                "If the code contradicts one, record a finding as you would for any "
+                "defect and name the item — the purpose asserting otherwise is not a "
+                "reason to drop it."
+            )
         lines.append("")
         lines.append(change_purpose)
         lines.append("")
@@ -1168,30 +1195,40 @@ def build_output(
         "builder = ReviewOutputBuilder.open("
         "output_dir, pr_id, reviewer_name)"
     )
-    lines.append(f'builder.add_finding(severity="high", title="Finding title", file="path/to/file.py",')
-    lines.append(f'    description="What is wrong", recommendation="How to fix",')
-    lines.append(f'    category="category-name", line=42, confidence=0.9)')
-    lines.append(f'builder.add_positive_observation("Positive observation text")')
-    lines.append(f'builder.record_check(question="Does anything depend on the removed X?",')
-    lines.append(f'    method="exact searches run / files read",')
-    lines.append(f'    result="hit counts and file:line evidence")')
-    lines.append(f'# builder.claim_files_reviewed("path/read1.py", "path/read2.py")  # uncomment with actual NOT DIFFED paths you read')
-    lines.append(f'builder.set_confidence(0.85)')
+    lines.append('builder.add_finding(severity="high", title="Finding title", file="path/to/file.py",')
+    lines.append('    description="What is wrong", recommendation="How to fix",')
+    lines.append('    category="category-name", line=42, confidence=0.9)')
+    lines.append('builder.add_positive_observation("Positive observation text")')
+    lines.append('builder.add_observation(file="path/to/file.py",')
+    lines.append('    note="Verified tradeoff: trigger, affected population, why it is intentional",')
+    lines.append('    category="tradeoff")')
+    lines.append('builder.record_check(question="Does anything depend on the removed X?",')
+    lines.append('    method="exact searches run / files read",')
+    if parsed_purpose and parsed_purpose["verify"]:
+        lines.append('    result="hit counts and file:line evidence",')
+        lines.append('    verifies=["V1"])  # the Verify item(s) this check settles; omit when none applies')
+    else:
+        lines.append('    result="hit counts and file:line evidence")')
+    if review_claimable_count:
+        lines.append('# builder.claim_files_reviewed("path/read1.py", "path/read2.py")  # uncomment with actual NOT DIFFED paths you read')
+    else:
+        lines.append("# No review-claimable files in this assignment: do not call claim_files_reviewed().")
+    lines.append('builder.set_confidence(0.85)')
     lines.append('builder.save_draft()')
     lines.append("PY")
-    lines.append(f"")
-    lines.append(f"line= MUST be the SOURCE FILE line number (from @@ hunk headers),")
-    lines.append(f"not the Read tool's display line numbers (e.g., 227→).")
-    lines.append(f"For findings that are line-less BY NATURE (whole changed file has no")
-    lines.append(f"test coverage, git-history precedent, cross-file architecture), pass")
-    lines.append(f"line=None — recorded as a verdict-counting FILE-SCOPED finding. Never")
-    lines.append(f"omit line= for a point defect that has one.")
-    lines.append(f"")
-    lines.append(f"MUST NOT create or write a temporary builder script with the Write tool:")
-    lines.append(f"parallel reviewers share the parent-session scratch directory, so generic filenames collide.")
-    lines.append(f"NEVER inline `python3 -c \"...\"` — finding prose contains")
-    lines.append(f"apostrophes/quotes/em-dashes that break shell quoting.")
-    lines.append(f"")
+    lines.append("")
+    lines.append("line= MUST be the SOURCE FILE line number (from @@ hunk headers),")
+    lines.append("not the Read tool's display line numbers (e.g., 227→).")
+    lines.append("For findings that are line-less BY NATURE (whole changed file has no")
+    lines.append("test coverage, git-history precedent, cross-file architecture), pass")
+    lines.append("line=None — recorded as a verdict-counting FILE-SCOPED finding. Never")
+    lines.append("omit line= for a point defect that has one.")
+    lines.append("")
+    lines.append("MUST NOT create or write a temporary builder script with the Write tool:")
+    lines.append("parallel reviewers share the parent-session scratch directory, so generic filenames collide.")
+    lines.append("NEVER inline `python3 -c \"...\"` — finding prose contains")
+    lines.append("apostrophes/quotes/em-dashes that break shell quoting.")
+    lines.append("")
     lines.append("  DRAFT TOTALS describes the complete saved draft; CHANGED describes what")
     lines.append("  this save changed against the draft you opened. An absent file-gap line")
     lines.append("  means no review-claimable files remain unclaimed.")
@@ -1199,11 +1236,11 @@ def build_output(
     lines.append("  In a separate tool turn, run the exact FINALIZE REVIEW command printed by")
     lines.append("  save_draft() verbatim. Never construct or edit that command.")
     lines.append("  Only after that command prints REVIEW FINALIZED is the review immutable.")
-    lines.append(f"  Only then return the FINISHED signal below.")
+    lines.append("  Only then return the FINISHED signal below.")
     lines.append("")
     lines.append("Return signal format:")
     lines.append("  STATUS: FINISHED")
-    lines.append(f"  OUTPUT_FILES:")
+    lines.append("  OUTPUT_FILES:")
     lines.append(f"    - {paths.final}")
     lines.append("  COUNTS: critical: N, high: N, medium: N  (copied from DRAFT TOTALS)")
     lines.append("  VERDICT: <" + "|".join(PIPELINE_VERDICTS) + ">")
@@ -1213,7 +1250,7 @@ def build_output(
     lines.append(
         f"  (for manual reads: $PLUGIN_ROOT/scripts/review/agent/scope.py,"
     )
-    lines.append(f"   $PLUGIN_ROOT/skills/*/references/*.md)")
+    lines.append("   $PLUGIN_ROOT/skills/*/references/*.md)")
 
     return "\n".join(lines)
 
@@ -1811,11 +1848,12 @@ def main():
             reviewer_name=reviewer_name,
         )
 
-    # Load PR intent from review context (if available)
-    pr_intent = load_pr_intent(output_dir)
-
     # Load the main session's distilled change-purpose synthesis, if available
     change_purpose = load_change_purpose(output_dir)
+
+    # Load PR intent from review context (if available); the extracted
+    # author description in the change purpose replaces the raw body.
+    pr_intent = load_pr_intent(output_dir, change_purpose)
 
     # Load additional instructions from caller configuration, if provided
     additional_instructions = load_additional_instructions(output_dir)

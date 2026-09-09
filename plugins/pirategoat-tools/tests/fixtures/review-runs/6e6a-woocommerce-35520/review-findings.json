@@ -1,0 +1,332 @@
+{
+  "pr_id": "66900",
+  "timestamp": "2026-09-04T11:05:25.365887",
+  "plugin_version": "1.116.0",
+  "schema": 3,
+  "verdict": "comment",
+  "summary": {
+    "total_findings": 5,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 4,
+      "low": 1,
+      "info": 0
+    },
+    "suppressed_advisory_finding_count": 0
+  },
+  "findings": [
+    {
+      "id": "f1",
+      "category": "documentation",
+      "severity": "low",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/src/Internal/Caches/CouponCodeLookupInvalidator.php",
+      "line": 44,
+      "recommendation": "<redacted>",
+      "confidence": 0.92
+    },
+    {
+      "id": "f2",
+      "category": "edge-case",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/src/Internal/Caches/CouponCodeLookupInvalidator.php",
+      "line": 134,
+      "recommendation": "<redacted>",
+      "confidence": 0.8,
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "description": "<redacted>",
+          "recommendation": "<redacted>",
+          "confidence": 0.68
+        }
+      }
+    },
+    {
+      "id": "f3",
+      "category": "missing-coverage",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php",
+      "line": null,
+      "recommendation": "<redacted>",
+      "confidence": 0.72,
+      "scope": "file"
+    },
+    {
+      "id": "f4",
+      "category": "missing-coverage",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/tests/php/src/Internal/Caches/CouponCodeLookupInvalidatorTest.php",
+      "line": null,
+      "recommendation": "<redacted>",
+      "confidence": 0.68,
+      "scope": "file"
+    },
+    {
+      "id": "f5",
+      "category": "hook-contract",
+      "severity": "medium",
+      "title": "<redacted>",
+      "description": "<redacted>",
+      "file": "plugins/woocommerce/includes/data-stores/class-wc-coupon-data-store-cpt.php",
+      "line": 233,
+      "recommendation": "<redacted>",
+      "confidence": 0.6,
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "title": "<redacted>",
+          "description": "<redacted>",
+          "recommendation": "<redacted>"
+        }
+      }
+    }
+  ],
+  "observations": [],
+  "recommendations": {
+    "immediate": [],
+    "important": [],
+    "suggestions": []
+  },
+  "positive_observations": [],
+  "checks": [
+    {
+      "id": "c1",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "api-contract-review",
+        "architecture-review",
+        "devils-advocate-review",
+        "ecosystem-integration-review"
+      ]
+    },
+    {
+      "id": "c2",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "architecture-review",
+        "patterns-review"
+      ]
+    },
+    {
+      "id": "c3",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "history-insights-review"
+      ]
+    },
+    {
+      "id": "c4",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "woo-regression-review",
+        "php-tests-review"
+      ]
+    },
+    {
+      "id": "c5",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code-review",
+        "ecosystem-integration-review",
+        "woo-regression-review",
+        "wp-architecture-review"
+      ]
+    },
+    {
+      "id": "c6",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "architecture-review",
+        "code-review",
+        "ecosystem-integration-review",
+        "patterns-review",
+        "woo-regression-review",
+        "concurrency-review"
+      ]
+    },
+    {
+      "id": "c7",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "api-contract-review",
+        "security-review"
+      ]
+    },
+    {
+      "id": "c8",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "woo-regression-review",
+        "code-review"
+      ]
+    },
+    {
+      "id": "c9",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "woo-regression-review",
+        "wp-architecture-review"
+      ]
+    },
+    {
+      "id": "c10",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code-clarity-review",
+        "ecosystem-integration-review",
+        "devils-advocate-review"
+      ]
+    },
+    {
+      "id": "c11",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "performance-review"
+      ]
+    },
+    {
+      "id": "c12",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "concurrency-review"
+      ]
+    },
+    {
+      "id": "c13",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "security-review",
+        "php-tests-review"
+      ],
+      "critic_adjustment": {
+        "action": "correct",
+        "rationale": "<redacted>",
+        "prior": {
+          "method": "<redacted>"
+        }
+      }
+    },
+    {
+      "id": "c14",
+      "question": "<redacted>",
+      "method": "<redacted>",
+      "result": "<redacted>",
+      "source_reviewers": [
+        "code-review",
+        "simplification-review"
+      ]
+    }
+  ],
+  "assessment": "<redacted>",
+  "meta": {
+    "review_duration_ms": 522732,
+    "confidence_score": 0.95,
+    "next_finding_number": 6,
+    "next_check_number": 15,
+    "reconciliation": {
+      "grouped_concern_count": 6,
+      "verified_concern_count": 5,
+      "false_positive_concern_count": 1,
+      "out_of_scope_concern_count": 0,
+      "input_finding_count": 11,
+      "contributing_agent_count": 6,
+      "reviewing_agents": [
+        "api-contract-review",
+        "architecture-review",
+        "code-clarity-review",
+        "code-review",
+        "concurrency-review",
+        "devils-advocate-review",
+        "ecosystem-integration-review",
+        "history-insights-review",
+        "patterns-review",
+        "performance-review",
+        "php-tests-review",
+        "security-review",
+        "simplification-review",
+        "woo-regression-review",
+        "wp-architecture-review"
+      ],
+      "not_applicable_agents": [],
+      "dispatched_agents": [
+        "api-contract-review",
+        "architecture-review",
+        "code-clarity-review",
+        "code-review",
+        "concurrency-review",
+        "devils-advocate-review",
+        "ecosystem-integration-review",
+        "history-insights-review",
+        "patterns-review",
+        "performance-review",
+        "php-tests-review",
+        "security-review",
+        "simplification-review",
+        "woo-regression-review",
+        "wp-architecture-review"
+      ],
+      "missing_agents": []
+    }
+  },
+  "applied_critic_adjustments": [
+    {
+      "adjustment_id": "d3be50ad98cf4593b1030b6067fdf30b",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "6b414e0af0ee48ceba013a7be98b928d",
+      "outcome": "verified"
+    },
+    {
+      "adjustment_id": "18b442b36c2e4533818093814da6c15d",
+      "outcome": "verified"
+    }
+  ],
+  "invalidated_assessments": [
+    {
+      "text": "<redacted>",
+      "invalidated_by_critic_adjustment_ids": [
+        "d3be50ad98cf4593b1030b6067fdf30b",
+        "6b414e0af0ee48ceba013a7be98b928d",
+        "18b442b36c2e4533818093814da6c15d"
+      ]
+    }
+  ]
+}

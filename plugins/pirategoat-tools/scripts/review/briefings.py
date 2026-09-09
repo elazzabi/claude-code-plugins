@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
+    from .change_purpose import CARRIED_OVER_MARKER, PROVENANCE
     from .pipeline_contract import (
         DEFAULT_AGENT_TIMEOUT,
         HOST_CODEX,
@@ -19,16 +20,20 @@ try:
         _stop_operation,
     )
     from .dispatch_status import (
+        ORPHANED_FILES_KEY,
+        ORPHANED_FILES_LEAD,
         DISPATCHED_STATUSES,
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
+    from .manifest_sections import describe_reconciliation_verification, host_identity_phrase, project_host_entry
     from .run_paths import artifact_path
     from .telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
 except ImportError:
     _scripts_parent = str(Path(__file__).resolve().parent.parent)
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
+    from review.change_purpose import CARRIED_OVER_MARKER, PROVENANCE
     from review.pipeline_contract import (
         DEFAULT_AGENT_TIMEOUT,
         HOST_CODEX,
@@ -41,12 +46,26 @@ except ImportError:
         _stop_operation,
     )
     from review.dispatch_status import (
+        ORPHANED_FILES_KEY,
+        ORPHANED_FILES_LEAD,
         DISPATCHED_STATUSES,
         SKIPPED_QUICK_MODE,
         SKIPPED_STATUSES,
     )
+    from review.manifest_sections import describe_reconciliation_verification, host_identity_phrase, project_host_entry
     from review.run_paths import artifact_path
     from review.telemetry_share import CONSENT_DISCLOSURE, REMOTE_REPO
+
+
+
+# First line of every Claude-host dispatch prompt. The orchestrator pastes
+# the fenced block verbatim as the subagent's prompt (run 6e6a: 400-char
+# prompts that were the bare command), so the imperative has to be inside
+# the block, not in the surrounding briefing prose.
+DISPATCH_PROMPT_LEAD = (
+    "Run this exact command as your FIRST tool call, before reading any file, "
+    "and follow the scope and output contract it prints:"
+)
 
 
 def _artifact_display(output_dir, key):
@@ -231,7 +250,16 @@ def _step_2_repo_setup(mode, state, context, config, output_dir):
         situation = [
             f"Automatic workspace setup for PR #{pr_number} failed: {ws_result['error']}",
         ]
-        actions = ["Manual fallback:"] + manual_fallback
+        actions = [
+            "The reason above is gh's own; act on it, and report it if you "
+            "cannot. `gh pr checkout` fetches the head, checks out the "
+            "branch, and fast-forwards an existing local branch with "
+            "`merge --ff-only`. Never `git reset --hard` in the reviewed "
+            "clone: unlike merge it overwrites untracked files silently. If "
+            "the local branch has diverged from the PR head, stop and ask "
+            "the user before moving anything.",
+            "Manual fallback:",
+        ] + manual_fallback
 
     else:
         # No result path
@@ -333,6 +361,202 @@ def _format_staleness(context):
     return lines
 
 
+def _format_non_default_base(context):
+    """Name the base when it is not the repository's default branch.
+
+    The script can state that the base is not the default branch; it
+    cannot tell a stacked pull request (base still under review) from a
+    long-lived release line. Both readings are given so the orchestrator
+    decides from the PR, and neither is asserted as fact.
+    """
+    git = context.get("git", {})
+    base_ref = git.get("base_ref")
+    default_branch = git.get("default_branch")
+    if not base_ref or not default_branch or base_ref == default_branch:
+        return []
+    # The scan establishes one fact: which merge commits brought other
+    # branches' work into the range. It cannot say every remaining commit
+    # is this branch's own (a branch cut from main and targeting a release
+    # line carries main's commits with no merge at all), so the line never
+    # claims that. Against a stale local ref the range can also carry newer
+    # commits of the base itself.
+    merges = git.get("foreign_merges")
+    if (git.get("base_fetch") or {}).get("status") != "fetched":
+        range_note = (
+            "The base fetch above failed, so the range may also hold newer commits "
+            "of the base itself; do not assume it is only this branch's own work."
+        )
+    elif merges is None:
+        range_note = (
+            "The merge scan could not run, so whether other branches' work was "
+            "merged into this range is unknown; do not assume it is only this "
+            "branch's own work."
+        )
+    elif merges:
+        range_note = (
+            "The range also holds work merged in from other branches; the "
+            "merged-in-work line below names the merge commits."
+        )
+    else:
+        range_note = (
+            "No merge commit brings other branches' work into the range; commits "
+            "the branch was cut from elsewhere would still be in it."
+        )
+    return [
+        f"**Base branch:** `{base_ref}` is not the default branch (`{default_branch}`). "
+        f"{range_note} If the base is another change still under review (a stacked "
+        "PR), findings about code on the base belong to the base's own review; if it "
+        "is a long-lived branch such as a release line, review as usual. Say which it "
+        "is in the change purpose."
+    ]
+
+
+_RESOLVE_BASE_BY_HAND = "Resolve the base by hand before trusting any range."
+_INFLATED_RANGE_ADVICE = (
+    "The local range is inflated: treat GitHub's file list as the PR's scope "
+    "in the change purpose, name the discrepancy there, and expect reviewer "
+    "assignments to carry files the PR did not touch."
+)
+_SHORT_RANGE_ADVICE = (
+    "The local range is short of the PR: files the PR touches will reach no "
+    "reviewer. Stop and restart the run from workspace setup so the checkout "
+    "and this context are rebuilt at the PR's current head; if you continue, "
+    "name the missing files in the change purpose."
+)
+
+
+def _format_base_fetch(context):
+    """One line on whether origin/<base> was refreshed before merge-base."""
+    fetch = context.get("git", {}).get("base_fetch")
+    if not fetch:
+        return []
+    ref = fetch.get("ref", "origin/<base>")
+    sha = (fetch.get("sha") or "")[:8]
+    if fetch.get("status") == "fetched":
+        if context.get("git", {}).get("merge_base"):
+            return [f"**Base:** `{ref}` fetched at `{sha}`"]
+        if fetch.get("shallow"):
+            return [
+                f"**Base:** `{ref}` fetched at `{sha}` but merge-base failed, so there "
+                "is no range. The clone is shallow, which is the usual cause: run "
+                "`git fetch --unshallow origin` (or `--deepen=<n>` with enough depth "
+                "to reach the base) and restart the run from workspace setup. If "
+                "merge-base still fails, the branch and the base share no history."
+            ]
+        return [
+            f"**Base:** `{ref}` fetched at `{sha}` but merge-base failed, so there is "
+            f"no range. The branch and the base may share no history. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    if not sha:
+        return [
+            f"**Base:** fetch of `{ref}` FAILED and the ref does not exist locally, "
+            f"so no merge-base could be computed. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    if not context.get("git", {}).get("merge_base"):
+        return [
+            f"**Base:** fetch of `{ref}` FAILED and merge-base against the local ref "
+            f"at `{sha}` also failed, so there is no range. {_RESOLVE_BASE_BY_HAND}"
+        ]
+    return [
+        f"**Base:** fetch of `{ref}` FAILED — merge-base was computed against the "
+        f"local ref at `{sha}`, which may be behind the remote. Cross-check the "
+        "file list against the PR or the remote before trusting the range."
+    ]
+
+
+def _format_path_list(paths, cap=10):
+    """Render up to `cap` paths as code spans, then a count of the rest."""
+    shown = ", ".join(_markdown_code_span(p) for p in paths[:cap])
+    rest = len(paths) - cap
+    return f"{shown} (+{rest} more)" if rest > 0 else shown
+
+
+def _format_scope_check(context):
+    """Lines comparing the local range with GitHub's file list or counts."""
+    check = context.get("git", {}).get("scope_check")
+    if not check or check.get("status") == "unavailable":
+        return []
+    github_count = check.get("github_changed_files")
+    local_count = check.get("local_changed_files")
+    if check.get("status") == "match":
+        return [f"**Scope check:** local range matches GitHub ({github_count} files)."]
+    if check.get("status") == "count_only":
+        return [
+            f"**Scope check:** file counts agree ({github_count}) but GitHub's file "
+            "list was not available and the base or head identity could not be "
+            "verified, so this is not proof of matching scope. Cross-check the file "
+            "list against the PR before trusting the range."
+        ]
+    # Each cause gets its own sentence and instruction. Extra local files
+    # mean the range holds files the PR does not; missing ones mean the
+    # local range is short of the PR; a moved head or base means the range
+    # was computed from different commits than GitHub's.
+    lines = []
+    extra = check.get("extra_local_files") or []
+    missing = check.get("missing_local_files") or []
+    lists_measured = check.get("extra_local_files") is not None
+    if extra or missing:
+        lines.append(
+            f"**Scope check:** GitHub reports {github_count} changed files; the local "
+            f"range has {local_count}, and the file sets differ."
+        )
+        if extra:
+            lines.append(
+                f"Local files not in the PR ({len(extra)}): {_format_path_list(extra)}. "
+                + _INFLATED_RANGE_ADVICE
+            )
+        if missing:
+            lines.append(
+                f"PR files missing locally ({len(missing)}): {_format_path_list(missing)}. "
+                + _SHORT_RANGE_ADVICE
+            )
+    elif github_count is not None and local_count is not None and github_count != local_count:
+        lines.append(
+            f"**Scope check:** GitHub reports {github_count} changed files; the local "
+            f"range has {local_count}. "
+            + (_INFLATED_RANGE_ADVICE if local_count > github_count else _SHORT_RANGE_ADVICE)
+        )
+    if check.get("head_matches") is False:
+        lead = "" if lines else "**Scope check:** "
+        lines.append(
+            f"{lead}The reviewed head does not match GitHub's headRefOid: the checkout "
+            "is not at the PR's current head, so the diff may predate the author's "
+            "latest push. Updating the checkout mid-run is not enough, because the "
+            "dispatch plan and this context were built from the old head; restart the "
+            "run from workspace setup, or name the reviewed commit in the change purpose."
+        )
+    if check.get("base_matches") is False:
+        lead = "" if lines else "**Scope check:** "
+        line = (
+            f"{lead}The range's merge base is not where GitHub's recorded base meets "
+            "the head: the range was computed from a different base than the PR's "
+            "(a base that merely advanced, or a fork point behind GitHub's recorded "
+            "base, does not trip this)."
+        )
+        if lists_measured and not extra and not missing:
+            line += (
+                " The file sets agree path for path, so the difference is in the "
+                "hunks the local range takes from the base."
+            )
+        lines.append(line + " The base line above says whether the fetch refreshed it.")
+    return lines
+
+
+def _format_foreign_merges(context):
+    """One line naming merge commits that bring in work from other branches."""
+    merges = context.get("git", {}).get("foreign_merges") or []
+    if not merges:
+        return []
+    shas = ", ".join(f"`{m.get('sha', '')[:8]}`" for m in merges)
+    noun = "merge commit" if len(merges) == 1 else "merge commits"
+    return [
+        f"**Merged-in work:** {len(merges)} {noun} ({shas}) bring commits that are "
+        "not on the base branch. Their files are part of this range relative to the "
+        "base; say in the change purpose whether they are intended as part of this "
+        "change."
+    ]
+
+
 def _format_domain_counts(context):
     """Compute and format domain file counts from changed files."""
     git = context.get("git", {})
@@ -396,16 +620,47 @@ def _format_linked_issues(context):
     return top_lines, bottom_lines
 
 
-def _change_purpose_handoff(output_dir):
+def _format_reconciliation_verification(state):
+    """One situation line: verified concerns beside repository reads."""
+    if not isinstance(state.get("reconciliation_verification"), dict):
+        return []
+    line = "**Reconciliation:** " + describe_reconciliation_verification(state)
+    if state["reconciliation_verification"].get("status") == "unverified":
+        line += (
+            " Treat its verifications as unevidenced rather than false: the "
+            "record's verdict line says so and the decision critic will be told "
+            "to verify every finding itself."
+        )
+    return [line]
+
+
+def _change_purpose_handoff(output_dir, mode="pr"):
     """Shared handoff instructions for writing the change-purpose artifact."""
-    return [
+    lines = [
         f"Write a brief change-purpose summary to `{_artifact_display(output_dir, 'change_purpose')}`.",
-        "Include: what the change does, why it's being made, and what to focus on during review.",
+        "Include: what the change does and why it's being made. What to verify goes under the "
+        "`## Verify` and `## Context` headings below, not in a separate focus list.",
         "Attribute intent to its source (\"the PR description states...\", \"the linked issue asks for...\") "
         "and keep author-asserted discriminators, assumptions, and likelihood claims recognizable as "
         "claims — downstream stages treat this summary as material to verify, not as established fact.",
-        "Verify the file exists before proceeding.",
+        "End the file with three headings the pipeline parses (`scripts/review/change_purpose.py`); "
+        "every reviewer's REVIEW FOCUS states the tiers and the record tables who verified what:",
+        "- `## Verify` — the claims the verdict rests on, a handful at most, one per line as "
+        "`V1. <claim> — where: <file:line> — settled by: <what evidence settles it> — source: <provenance>`. "
+        "Reviewers cite the id when they record the check that settles it. Write `None.` when nothing is load-bearing.",
+        "- `## Context` — facts reviewers take as given, one per line as `C1. <fact> — source: <provenance>`. "
+        "A fact whose source is `inferred from the diff` may never be Context: in branch mode your inferences are questions, not facts.",
+        "- `## Author's description (extracted)` — the substantive parts of the PR description (branch mode: the commit bodies) "
+        "quoted, template boilerplate dropped by your judgement. Bootstrap points every reviewer here instead of pasting the raw body.",
+        "Provenance vocabulary: " + ", ".join(f"`{p}`" for p in PROVENANCE) + ".",
     ]
+    if mode == "incremental":
+        lines.append(
+            "Incremental review: write every item fresh for this range; an item kept from the previous "
+            f"review's change purpose ends with `{CARRIED_OVER_MARKER}`."
+        )
+    lines.append("Verify the file exists before proceeding.")
+    return lines
 
 
 def _dependency_refresh_briefing(state, config, output_dir):
@@ -486,6 +741,12 @@ def _dependency_refresh_briefing(state, config, output_dir):
     return situation, actions, handoff
 
 
+def _host_entry_line(entry):
+    """One resolved runtime host with the identity the run verified against."""
+    phrase = host_identity_phrase(project_host_entry(entry))
+    return f"- `{entry.get('name')}` via {entry.get('source')}: `{entry.get('path')}` — {phrase}"
+
+
 def _step_3_gather_context(mode, state, context, config, output_dir):
     """Step 3: Gather Context — present curated briefing."""
     git = context.get("git", {})
@@ -497,6 +758,10 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
     git_range = git.get("git_range", "")
     if git_range:
         situation.append(f"**Git range:** `{git_range}`")
+    situation.extend(_format_base_fetch(context))
+    situation.extend(_format_non_default_base(context))
+    situation.extend(_format_scope_check(context))
+    situation.extend(_format_foreign_merges(context))
 
     # Commit count
     commit_count = git.get("commit_count", 0)
@@ -534,23 +799,41 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
         situation.append(f"**Diff stats:**\n```\n{diff_stats}\n```")
         situation.append("")
 
-    # Host context status — if present, show a one-line summary.
+    previous = state.get("previous_change_purpose")
+    if previous:
+        situation.append(
+            f"**Previous review's change purpose:** `{previous}` — read it before writing this one; "
+            f"carry an item forward only with `{CARRIED_OVER_MARKER}` at its end, and write everything "
+            "else fresh for this range."
+        )
+        situation.append("")
+
     host_context = context.get("host_context")
     if host_context:
         banner = host_context.get("banner") or {}
-        resolved = host_context.get("resolved", [])
-        runtime_count = sum(1 for e in resolved if e.get("kind") == "runtime-host")
-        library_root_count = sum(1 for e in resolved if e.get("kind") == "library-dep")
-        if banner.get("degraded"):
-            situation.append(
-                f"**Host context:** ⚠ degraded ({banner.get('reason')}) — "
-                f"{runtime_count} runtime-hosts, {library_root_count} dependency roots resolved."
-            )
-        else:
-            situation.append(
-                f"**Host context:** {runtime_count} runtime-hosts, "
-                f"{library_root_count} dependency roots resolved."
-            )
+        resolved = host_context.get("resolved") or []
+        runtime = sorted(
+            [e for e in resolved if isinstance(e, dict) and e.get("kind") == "runtime-host"],
+            key=lambda e: e.get("name", ""),
+        )
+        library_root_count = sum(1 for e in resolved if isinstance(e, dict) and e.get("kind") == "library-dep")
+        degraded = f"⚠ degraded ({banner.get('reason')}) — " if banner.get("degraded") else ""
+        situation.append(
+            f"**Host context:** {degraded}{len(runtime)} runtime-host(s), "
+            f"{library_root_count} dependency root(s) resolved."
+        )
+        for entry in runtime:
+            situation.append(_host_entry_line(entry))
+        for item in host_context.get("unresolved") or []:
+            if not isinstance(item, dict):
+                continue
+            declared = f" (declared {item['version']})" if item.get("version") else ""
+            situation.append(f"- `{item.get('name')}` unresolved: {item.get('reason', 'unknown')}{declared}")
+        diagnostics = host_context.get("diagnostics") or {}
+        for name in diagnostics.get("self_provided") or []:
+            situation.append(f"- `{name}` is provided by this repository and was not resolved as an upstream host.")
+        for error in diagnostics.get("config_errors") or []:
+            situation.append(f"⚠️  Host config: {error}")
 
     # Trusted-branch dependency refresh — renders only when the requester
     # opted in (run-config refresh_dependencies).
@@ -571,7 +854,7 @@ def _step_3_gather_context(mode, state, context, config, output_dir):
     if not has_unfetched:
         if handoff_lines:
             handoff_lines.append("")
-        handoff_lines.extend(_change_purpose_handoff(output_dir))
+        handoff_lines.extend(_change_purpose_handoff(output_dir, mode))
     handoff = handoff_lines or None
 
     return {
@@ -608,7 +891,7 @@ def _step_4_fetch_issues(mode, state, context, config, output_dir):
     actions.append("")
     actions.append("After fetching, you'll have enough context to write the change purpose.")
 
-    handoff = _change_purpose_handoff(output_dir)
+    handoff = _change_purpose_handoff(output_dir, mode)
 
     return {
         "phase": "SETUP",
@@ -669,6 +952,30 @@ def _step_5_dispatch_plan(mode, state, context, config, output_dir):
             situation.append(f"⚠️  {w}")
         situation.append("")
 
+    purpose = state.get("change_purpose_items")
+    if isinstance(purpose, dict):
+        problems = purpose.get("problems") or []
+        if purpose.get("structured"):
+            situation.append(
+                f"Change purpose: {len(purpose.get('verify') or [])} Verify item(s), "
+                f"{len(purpose.get('context') or [])} Context item(s)."
+            )
+        else:
+            situation.append(
+                "⚠️  Change purpose: no `## Verify` / `## Context` / "
+                "`## Author's description (extracted)` headings — reviewers get no "
+                "tiers and the record cannot table who verified what. Rewrite it in "
+                "the step-3 shape before dispatch."
+            )
+        for problem in problems:
+            situation.append(f"⚠️  Change purpose: {problem}.")
+        if problems:
+            situation.append(
+                f"Fix `{_artifact_display(od, 'change_purpose')}` before dispatch; every "
+                "reviewer's REVIEW FOCUS and the record's verify-item table are built from it."
+            )
+        situation.append("")
+
     if plan_summary:
         situation.append(
             f"Dispatch plan computed: {plan_summary.get('dispatched', 0)} agents to dispatch, "
@@ -726,10 +1033,24 @@ def _step_5_dispatch_plan(mode, state, context, config, output_dir):
     )
     actions.append("")
     actions.append(
-        f"To record a main orchestrator adjustment, edit `{_artifact_display(od, 'dispatch_plan')}`:"
+        "Record every adjustment in ONE call — it validates each name and "
+        f"transition against `{_artifact_display(od, 'dispatch_plan')}`, writes "
+        "atomically, and prints one line per adjustment that the next briefing "
+        "repeats (never edit the plan file by hand or with a script of your own):"
     )
-    actions.append('- Force-skip a dispatched agent: set status to `"SKIPPED_OVERRIDE"` with `"override_reason": "..."`')
-    actions.append('- Force-dispatch a skipped agent: set status to `"DISPATCH_OVERRIDE"` with `"override_reason": "..."`')
+    actions.append("```")
+    actions.append(
+        f'python3 {SCRIPTS_DIR}/dispatch_adjust.py --output-dir "{od}" '
+        '--skip <agent> "<why the diff makes its focus irrelevant>" '
+        '--dispatch <agent> "<what it will find that the plan missed>"'
+    )
+    actions.append("```")
+    actions.append(
+        "`--skip` moves a dispatched agent to `SKIPPED_OVERRIDE`, `--dispatch` moves a "
+        "skipped one to `DISPATCH_OVERRIDE`; both are repeatable, `--dry-run` previews, "
+        "and a refused request exits 1 naming the fix. Skip the call when the plan "
+        "stands as computed."
+    )
 
     if config and config.get("quick"):
         actions.append("")
@@ -772,6 +1093,27 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
         f"{len(dispatched)} agents ready for dispatch." if dispatched else
         "Agents will be dispatched based on the dispatch plan.",
     ]
+    # The adjustments step 5 recorded, repeated where the maintainer
+    # watching the session sees them: a silent skip looks like no skip.
+    adjustments = state.get("dispatch_adjustments")
+    if isinstance(adjustments, list):
+        if adjustments:
+            situation.append("")
+            situation.append("**Adjustments recorded at step 5:**")
+            for row in adjustments:
+                planner = row.get("planner_status") or "planner status unknown"
+                situation.append(
+                    f"- {row.get('status')} {row.get('name')} — "
+                    f"{row.get('override_reason') or 'no reason recorded'} "
+                    f"(planner: {planner})"
+                )
+                if row.get(ORPHANED_FILES_KEY):
+                    situation.append(
+                        "  " + ORPHANED_FILES_LEAD
+                        + ", ".join(f"`{path}`" for path in row[ORPHANED_FILES_KEY])
+                    )
+        else:
+            situation.append("No adjustments: the planner's plan is dispatched as computed.")
 
     codex_host = _host(config) == HOST_CODEX
     if codex_host:
@@ -855,6 +1197,8 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
                         "output contract."
                     )
                 actions.append("```")
+                if not codex_host:
+                    actions.append(DISPATCH_PROMPT_LEAD)
                 actions.append(cmd)
                 actions.append("```")
                 actions.append("")
@@ -870,6 +1214,8 @@ def _step_6_dispatch_agents(mode, state, context, config, output_dir):
                         "output contract."
                     )
                 actions.append("```")
+                if not codex_host:
+                    actions.append(DISPATCH_PROMPT_LEAD)
                 actions.append(f'python3 {SCRIPTS_DIR}/agent/bootstrap.py --agent {name} --range "{git_range}" --output-dir "{od}"')
                 actions.append("```")
                 actions.append("")
@@ -1174,25 +1520,37 @@ def _step_8_reconcile(mode, state, context, config, output_dir):
             "**2. Call `spawn_agent` with task name `review_reconciliator` "
             "for `review-reconciliator`.**",
             f"- {_codex_agent_instruction('review-reconciliator')}",
-            "- Then provide these concrete inputs:",
+            "- Then provide exactly this prompt:",
         ])
     else:
-        actions.append("**2. Dispatch `review-reconciliator`** with:")
-    actions.extend([
-        f"- **Reconciliation context:** `{_artifact_display(od, 'reconciliation_context')}` (pre-gathered: all agent findings, source snippets, scope annotations)",
-        f"- **Output builder path:** `{SCRIPTS_DIR / 'agent' / 'output.py'}`",
-        f"- Output directory: `{od}`",
-    ])
-
-    if change_purpose:
-        actions.append(
-            f"- **Change purpose (author-stated):** {change_purpose}"
-        )
-        actions.append(
-            "  Treat it as claims to verify against the diff, not context to adopt — "
-            "author-asserted discriminators and likelihood claims are review inputs, not conclusions."
-        )
-
+        actions.append("**2. Dispatch `review-reconciliator`** with exactly this prompt:")
+    actions.append("```")
+    actions.append(
+        f"Reconciliation context: {_artifact_display(od, 'reconciliation_context')}"
+    )
+    # The directory, never a file: a path labelled "builder" gets read,
+    # and the agent only ever needs the directory on sys.path.
+    actions.append(f"Plugin scripts directory: {SCRIPTS_DIR.parent}")
+    actions.append(f"Output directory: {od}")
+    actions.append(
+        "Orchestrator notes: read orchestrator_notes in the context and "
+        "answer each with an outcome and evidence."
+    )
+    actions.append("```")
+    actions.append(
+        "The prompt carries nothing else — the change purpose is already in "
+        "the context. A disagreement you noticed between reviewers, two "
+        "findings you believe describe one concern, or any fact you want "
+        "weighed goes into the context as a note, BEFORE dispatch, stated as "
+        "a claim, so the reconciliator must confirm or refute it with "
+        "evidence rather than adopt it:"
+    )
+    actions.append("```bash")
+    actions.append(
+        f'python3 {SCRIPTS_DIR}/reconciliation_notes.py --output-dir "{od}" '
+        '--note "<one claim, stated as a claim>"'
+    )
+    actions.append("```")
     actions.append("")
     actions.append(
         f"**Expected output:** `{_artifact_display(od, 'review_findings_json')}` — the "
@@ -1251,6 +1609,31 @@ def _run_wide_review_gaps(file_review):
     }
 
 
+def _split_unscoped(file_review):
+    """(unowned, excluded, orphaned): the unscoped files no domain owns but
+    the planner considered reviewable, the ones it excluded by design, and
+    the ones whose only matching reviewer the orchestrator skipped by
+    override (a dict of path to the skipped agents). When the exclusion
+    population is unmeasured everything not orphaned is unowned — the
+    honest reading, since nothing proved any of them were excluded."""
+    unscoped = file_review.get("unscoped_files")
+    unscoped = unscoped if isinstance(unscoped, list) else []
+    # Already restricted to the unscoped population by the producer
+    # (`manifest_sections._override_orphaned_files`).
+    orphaned = file_review.get("override_orphaned_files")
+    orphaned = orphaned if isinstance(orphaned, dict) else {}
+    rest = [path for path in unscoped if path not in orphaned]
+    noise = file_review.get("noise_filtered_files")
+    if not isinstance(noise, list):
+        return rest, [], orphaned
+    noise_set = set(noise)
+    return (
+        [path for path in rest if path not in noise_set],
+        [path for path in rest if path in noise_set],
+        orphaned,
+    )
+
+
 def _has_file_review_content(file_review):
     """True when the coverage section would render anything at all.
 
@@ -1274,7 +1657,8 @@ def _has_file_review_content(file_review):
 def _has_file_review_gap(file_review):
     """True when something is PROVEN uncovered, claims aside.
 
-    Files starved for every reviewer and domain-unmatched files are gaps.
+    Files starved for every reviewer and reviewable files no domain matched
+    are gaps; files the planner excluded by design are accounting.
     Inline receipt or a reviewed-file claim makes a file accounted for at
     run level; the latter remains a claim rather than proof of read. Demanding
     the verdict acknowledge "this gap" on a claims-only run converts that
@@ -1282,10 +1666,8 @@ def _has_file_review_gap(file_review):
     """
     if not isinstance(file_review, dict):
         return False
-    return bool(
-        _run_wide_review_gaps(file_review) or
-        file_review.get("unscoped_files")
-    )
+    unowned, _excluded, orphaned = _split_unscoped(file_review)
+    return bool(_run_wide_review_gaps(file_review) or unowned or orphaned)
 
 
 def _render_file_review_section(file_review):
@@ -1297,8 +1679,8 @@ def _render_file_review_section(file_review):
       earned no reviewed-file claim from any matching reviewer.
     * **unscoped** — matched no reviewer domain at all, so no agent's
       scope ever contained them.
-    * **claims** — never diffed inline, but a reviewer says it
-      reviewed them anyway. A claim, never proof of read.
+    * **claims** — never diffed inline, read from the queue by a reviewer's
+      own account — the mechanism working, recorded as a claim.
 
     They are never merged: "no one saw it" and "someone says they saw it"
     are different facts, and so are "starved by a budget" and "routed to
@@ -1310,10 +1692,10 @@ def _render_file_review_section(file_review):
         return ""
     gaps = _run_wide_review_gaps(file_review)
     claims = file_review.get("agents_claiming_review_by_file")
-    unscoped = file_review.get("unscoped_files")
     claims = claims if isinstance(claims, dict) else {}
-    unscoped = unscoped if isinstance(unscoped, list) else []
-    if not (gaps or claims or unscoped):
+    unowned, excluded, orphaned = _split_unscoped(file_review)
+    unscoped = unowned + excluded
+    if not (gaps or claims or unscoped or orphaned):
         return ""
 
     lines = ["## Review coverage", ""]
@@ -1333,26 +1715,57 @@ def _render_file_review_section(file_review):
                 f"- {_markdown_code_span(f_path)} (skipped by: {skipped_by})"
             )
         lines.append("")
-    if unscoped:
+    if orphaned:
         lines.append(
-            f"{len(unscoped)} changed file(s) matched no reviewer's domain "
-            "and were reviewed by no one — no agent's scope contained them "
-            "in any form (this counts every changed file, including "
-            "binaries and non-reviewable paths — run-level metrics count "
-            "reviewable files only, so its 'uncovered' figure can be "
-            "smaller):"
+            f"{len(orphaned)} changed file(s) matched only a reviewer the "
+            "orchestrator skipped and were reviewed by no one — the skip "
+            "removed the one agent whose scope would have contained them:"
         )
         lines.append("")
-        for f_path in sorted(unscoped):
+        for f_path, agents in sorted(orphaned.items()):
+            skipped_by = ", ".join(_markdown_code_span(agent) for agent in agents)
+            lines.append(
+                f"- {_markdown_code_span(f_path)} (skipped by override: {skipped_by})"
+            )
+        lines.append("")
+    if unowned:
+        measured = isinstance(file_review.get("noise_filtered_files"), list)
+        lines.append(
+            f"{len(unowned)} changed file(s) matched no reviewer's domain "
+            "and were reviewed by no one — no agent's scope contained them "
+            "in any form"
+            + ("" if measured else
+               " (this counts every changed file, including "
+               "binaries and non-reviewable paths — run-level metrics count "
+               "reviewable files only, so its 'uncovered' figure can be "
+               "smaller)")
+            + ":"
+        )
+        lines.append("")
+        for f_path in sorted(unowned):
+            lines.append(f"- {_markdown_code_span(f_path)}")
+        lines.append("")
+    if excluded:
+        lines.append(
+            f"{len(excluded)} changed file(s) were excluded from review by design "
+            "(the planner's noise patterns: lock files, media and binary assets, "
+            "translations, snapshots, minified or generated assets, vendored and "
+            "build paths) and matched no reviewer's domain — listed for "
+            "accounting, not as a gap:"
+        )
+        lines.append("")
+        for f_path in sorted(excluded):
             lines.append(f"- {_markdown_code_span(f_path)}")
         lines.append("")
     if claims:
-        lines.append("### Reviewed-file claims — claims, not proof of read")
+        lines.append("### Claimed from the review-claimable queue")
         lines.append("")
         lines.append(
             f"{len(claims)} changed file(s) never received their diff "
-            "inline, but an agent claims to have reviewed them from the "
-            "review-claimable queue. These claims are not proof of read:"
+            "inline: a reviewer read them from the review-claimable queue, "
+            "which is the designed path for files over the inline cap or "
+            "outside the inline budget. The pipeline records the claim, not "
+            "the read:"
         )
         lines.append("")
         for f_path, agents in sorted(claims.items()):
@@ -1393,10 +1806,20 @@ def _step_9_review_record(mode, state, context, config, output_dir):
     change_purpose = state.get("change_purpose")
     commit_messages = state.get("commit_messages", [])
 
+    # Rendered once, at step 8. The orchestrator wrote this text itself at
+    # step 4 and the reconciliation context carries it; run 3's
+    # transcript held four copies of an 8.1 KB purpose. Point, don't paste.
     if change_purpose:
-        situation.append(f"**Change purpose (author-stated — the reconciled findings, not this framing, are the source of truth):** {change_purpose}")
+        situation.append(
+            "**Change purpose:** written by you at step 4 to "
+            f"`{_artifact_display(od, 'change_purpose')}` and carried in the "
+            "reconciliation context — the reconciled findings, not that "
+            "framing, are the source of truth."
+        )
     elif commit_messages:
         situation.append(f"**Change purpose (from commits — the reconciled findings, not this framing, are the source of truth):** {'; '.join(commit_messages[:3])}")
+
+    situation.extend(_format_reconciliation_verification(state))
 
     if degradation.get("reconciliation_failed"):
         # The sanctioned LLM-authored fallback. With no ledger there is no
@@ -1451,8 +1874,11 @@ def _step_9_review_record(mode, state, context, config, output_dir):
             f"**The review record is assembled at `{_artifact_display(od, 'review_record')}`.** "
             "The pipeline wrote it from the findings ledger and this run's "
             "own measurements — findings, verified checks, the reconciler's "
-            "assessment, run notes, and the coverage measurement. Nothing "
-            "in it was authored by an agent."
+            "assessment, observations, dropped sources, answered notes, run "
+            "notes, and the coverage measurement. Nothing in it was authored "
+            "by an agent, and nothing in the ledger is missing from it: read "
+            f"the record, not `{_artifact_name('review_findings_json')}` through "
+            "a script of your own."
         )
         actions.append("")
         actions.append(
@@ -1640,6 +2066,24 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
         actions.append(f"Review document to stress-test: {critic_target}")
         actions.append(f"No structured findings available (reconciliation failed) — critique the document directly without --context.")
     actions.append(f"Output directory: {od}")
+    git = context.get("git", {})
+    head_ref = git.get("head_ref")
+    head_sha = git.get("head_sha")
+    if head_ref and head_sha:
+        actions.append(f"Checkout: {head_ref} @ {str(head_sha)[:12]}")
+    else:
+        actions.append(
+            "Checkout: unknown — verify `git rev-parse --abbrev-ref HEAD` and "
+            "`git rev-parse HEAD` yourself before reading any file."
+        )
+    verification = state.get("reconciliation_verification")
+    line = "Reconciliation verification: " + describe_reconciliation_verification(state)
+    if not isinstance(verification, dict) or verification.get("status") == "unverified":
+        line += (
+            " Verify every finding against the source yourself; the record's "
+            "verifications are not evidenced by an observed read."
+        )
+    actions.append(line)
     actions.append(f"Context: <one-line summary of PR scope, verdict, and finding count>")
     actions.append(
         "Return STAND, REVISE, or ESCALATE. Author findings first at "
@@ -1724,8 +2168,9 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     actions.append("    }")
     actions.append("  ],")
     actions.append(
-        '  "revised_assessment": "<optional post-critic assessment>"'
+        '  "revised_assessment": "<optional post-critic assessment>",'
     )
+    actions.append('  "revised_recommendations": {"immediate": [], "important": [], "suggestions": []}')
     actions.append("}")
     actions.append("```")
     actions.append(
@@ -1735,7 +2180,9 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
         "its non-empty reason. Every committed ID omitted from both lists is "
         "derived as `not_checked`. The orchestrator never edits the committed "
         "proposal. `revised_assessment` is optional: omit it when no "
-        "replacement assessment should be installed."
+        "replacement assessment should be installed. `revised_recommendations` "
+        "is likewise optional: an applying batch withdraws the reconciler's "
+        "recommendations along with its assessment, and this is where replacements go."
     )
     actions.append(
         "3) Save the request as `$TMPDIR/critic-adjudication.json`, then run "
@@ -1750,7 +2197,8 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     actions.append(
         "A successful handoff reports `RECORDED ADJUDICATION`, the derived "
         "`VERIFIED | REFUTED | NOT_CHECKED` counts, `REVISED ASSESSMENT: "
-        "present|absent`, `APPLIED | REJECTED`, and the `LEDGER VERDICT`. On "
+        "present|absent`, `REVISED RECOMMENDATIONS: present|absent`, "
+        "`APPLIED | REJECTED`, and the `LEDGER VERDICT`. On "
         "any `REJECTED:` line, correct only the temp request and resubmit it; "
         "never edit the output artifact or bypass `adjudicate`."
     )
@@ -1763,11 +2211,11 @@ def _step_10_decision_critic(mode, state, context, config, output_dir):
     )
     actions.append(
         "Never hand-edit the findings ledger either: that one write "
-        "carries provenance, invalidates the reconciler's prior assessment "
+        "carries provenance, invalidates the reconciler's prior assessment and recommendations "
         "only when an accepted operation really changes the ledger, installs "
-        "a supplied revised assessment, recounts findings, and derives the "
+        "a supplied revised assessment and recommendations, recounts findings, and derives the "
         "final ledger verdict. Refuted operations do not invalidate or "
-        "replace the assessment."
+        "replace the assessment or recommendations."
     )
     actions.append(
         f"4) Nothing else to edit. The pipeline re-assembles "
@@ -2153,6 +2601,23 @@ def _report_authoring_actions(mode, state, context, config, output_dir):
             "never restate, summarize, re-count, or edit the machine's "
             "sentences — the hedges in them are the measurement, and a "
             f"tighter paraphrase is a false claim.{gap_clause}"
+        )
+
+    actions.append("")
+    actions.append(
+        "**Coverage and scope facts come only from the record.** What the "
+        "review reached is the record's `## Review coverage` section and its "
+        "run notes; a sentence about the review's reach, coverage, or scope "
+        "that appears in the critic's findings and not there is unverified "
+        "and must not enter the report."
+    )
+    foreign = state.get("critic_prose_paths_outside_diff")
+    if isinstance(foreign, list) and foreign:
+        actions.append(
+            f"The critic's findings name {len(foreign)} path(s) not in this "
+            f"diff: {_format_path_list(foreign)}. A claim about any of them is not a fact about "
+            "this review's reach; carry it into the report only as the "
+            "critic's own verification note, never as coverage."
         )
 
     actions.append("")

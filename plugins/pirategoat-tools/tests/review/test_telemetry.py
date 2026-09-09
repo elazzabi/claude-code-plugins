@@ -40,6 +40,25 @@ from review.reviewer_lifecycle import (
 )
 
 
+def test_evidence_is_projected_only_when_finalized(mod, tmp_path):
+    out = tmp_path / "output"
+    out.mkdir()
+    telemetry = mod.ReviewTelemetry(str(out), log_dir=str(tmp_path / "logs"))
+    telemetry.start()
+    ledger_path = run_paths.artifact_path(str(out), "review_findings_json")
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(canonical_findings_ledger(["high"])))
+    telemetry.log_step(step=9, phase="SYNTHESIS", title="Reconcile")
+    running = _read_manifest(telemetry)
+    assert running["evidence"] is None
+    assert running["availability"]["evidence"] is False
+    telemetry.finalize(step=12, phase="OUTPUT", title="Complete")
+    settled = _read_manifest(telemetry)
+    assert settled["availability"]["evidence"] is True
+    assert settled["evidence"]["findings"] == [{"id": "f1", "severity": "high", "sources": None, "critic_action": None}]
+    assert '"evidence"' not in Path(telemetry.log_path).read_text()
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("review_telemetry", SCRIPT_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -83,10 +102,7 @@ def _read_manifest(telemetry):
     return json.loads(Path(telemetry.manifest_path).read_text())
 
 
-def _artifact(output_dir, key):
-    path = run_paths.artifact_path(output_dir, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+from helpers.review_fixtures import artifact_file as _artifact  # noqa: E402
 
 
 def _write_dispatch_plan(output_dir, agent_names):
@@ -244,6 +260,7 @@ class TestStart:
         assert start["run_id"] == "run-1"
         assert start["pipeline"]["session_id"] == "session-123"
         assert start["pipeline"]["plugin_version"] == "1.108.0"
+        assert start["pipeline"]["plugin_commit"] == ""
         assert start["pipeline"]["mode"] == "pr"
         assert start["pipeline"]["repo_path"] == "/repo"
         assert start["pipeline"]["repo"] == ""
@@ -694,6 +711,22 @@ class TestNoFabricatedMeasurements:
 class TestRunManifest:
     """A fail-open sidecar materializes the current run state."""
 
+    def test_host_context_is_projected_from_the_review_context_without_paths(self, telemetry, output_dir):
+        (output_dir / "review-context.json").write_text(json.dumps({
+            "host_context": {
+                "resolved": [{"name": "wordpress", "kind": "runtime-host", "path": "/Users/x/cache/wordpress",
+                              "source": "ecosystem-cache", "version": "7.2", "version_freshness": "2026-09-04T00:04:08Z",
+                              "notes": {"commit": "abc", "branch": "trunk", "declared_minimum": "7.0"}}],
+                "unresolved": [], "banner": None, "diagnostics": {"scan_roots": 3, "self_provided": []},
+            },
+        }))
+        telemetry.start(run_id="run-1")
+        manifest = _read_manifest(telemetry)
+        assert manifest["availability"]["host_context"] is True
+        assert manifest["host_context"]["resolved"][0]["commit"] == "abc"
+        assert "branch" not in manifest["host_context"]["resolved"][0]
+        assert "/Users/" not in json.dumps(manifest["host_context"])
+
     def test_start_materializes_running_manifest(self, telemetry, mod):
         log_path = telemetry.start(
             run_id="run-1",
@@ -713,7 +746,21 @@ class TestRunManifest:
         assert manifest["run"]["id"] == "run-1"
         assert manifest["run"]["session_id"] == "session-1"
         assert manifest["run"]["plugin_version"] == "1.108.0"
+        assert manifest["run"]["plugin_commit"] is None
         assert manifest["run"]["mode"] == "pr"
+
+    def test_manifest_carries_the_build_commit_beside_the_version(self, telemetry):
+        """`plugin_version` only moves at release; run 4 stamped 1.119.0
+        for the A branch tip and the cohort table could not tell that build
+        from the fifty dev-mount runs the next commits would stamp the same."""
+        telemetry.start(
+            run_id="run-1", session_id="session-1", plugin_version="1.119.0",
+            plugin_commit="194489e8", mode="pr", repo_path="/repo",
+        )
+        start = _read_events(telemetry.log_path)[0]
+        assert start["pipeline"]["plugin_commit"] == "194489e8"
+        manifest = _read_manifest(telemetry)
+        assert manifest["run"]["plugin_commit"] == "194489e8"
         assert manifest["run"]["repo_path"] == "/repo"
         assert manifest["run"]["repo"] is None
         assert manifest["run"]["target"] is None
@@ -730,6 +777,8 @@ class TestRunManifest:
             "dependency_refresh": False,
             "reviewer_markdown": False,
             "findings_markdown": False,
+            "host_context": False,
+            "evidence": False,
         }
         assert manifest["assignment"] is None
 
@@ -923,16 +972,20 @@ class TestRunManifest:
         assert "prompt" not in step["decisions"]
         assert "tool_result" not in step["decisions"]
 
-    def test_finalize_materializes_complete_sanitized_outcome(
+    def test_finalize_materializes_complete_sanitized_outcome_with_reconciliation_verification(
         self, telemetry, output_dir
     ):
-        (output_dir / "pipeline-result.json").write_text(json.dumps({
+        pipeline_result = {
             "status": "degraded",
             "verdict": "COMMENT",
             "critic_verdict": "REVISE",
+            "reconciliation_verification": {
+                "verified_concern_count": 1, "repository_reads": 2, "status": "verified",
+            },
             "review_body": "PIPELINE_RESULT_SECRET",
             "degradation_notes": ["TOOL_RESULT_SECRET"],
-        }))
+        }
+        (output_dir / "pipeline-result.json").write_text(json.dumps(pipeline_result))
         telemetry.start(run_id="run-1")
         telemetry.finalize(step=11, phase="OUTPUT", title="Present Results")
 
@@ -943,6 +996,7 @@ class TestRunManifest:
         assert manifest["outcome"]["pipeline_status"] == "degraded"
         assert manifest["outcome"]["verdict"] == "COMMENT"
         assert manifest["outcome"]["critic_verdict"] == "REVISE"
+        assert manifest["outcome"]["reconciliation_verification"] == pipeline_result["reconciliation_verification"]
         serialized = json.dumps(manifest)
         assert "PIPELINE_RESULT_SECRET" not in serialized
         assert "TOOL_RESULT_SECRET" not in serialized
@@ -1964,7 +2018,63 @@ class TestRunManifest:
             "requested_range": "resolved-base..resolved-head",
             "base_sha": "initial-base",
             "head_sha": resolved_head,
+            "base_fetch": None,
+            "scope_check": None,
         }
+
+    def test_manifest_projects_the_base_fetch_and_scope_check(self, mod, tmp_path):
+        """A dropped range-truth projection would hide a mismatched review range."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        telemetry = mod.ReviewTelemetry(str(output_dir), log_dir=str(tmp_path / "logs"))
+        telemetry.start(
+            pr_number="42", mode="pr", repo_path=str(tmp_path),
+            git_range="main..feature", base_sha="a" * 40, head_sha="b" * 40,
+        )
+        (output_dir / "review-context.json").write_text(json.dumps({
+            "git": {
+                "git_range": "main..feature",
+                "base_fetch": {"ref": "origin/main", "status": "fetched", "sha": "a" * 40, "shallow": False},
+                "scope_check": {
+                    "status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+                    "head_matches": True, "base_matches": False,
+                    "extra_local_files": ["src/a.php", "src/b.php"], "missing_local_files": [],
+                },
+            },
+        }))
+        telemetry.finalize(step=12, phase="done", title="Done")
+
+        git = json.loads(Path(telemetry.manifest_path).read_text())["run"]["git"]
+        assert git["base_fetch"] == {"status": "fetched", "sha": "a" * 40, "shallow": False}
+        assert git["scope_check"] == {
+            "status": "mismatch", "github_changed_files": 8, "local_changed_files": 91,
+            "head_matches": True, "base_matches": False,
+            "extra_local_file_count": 2, "missing_local_file_count": 0,
+        }
+        assert "origin/main" not in json.dumps(git)
+        assert "src/a.php" not in json.dumps(git)
+
+    def test_a_run_without_the_range_facts_projects_them_as_unmeasured(self, mod, tmp_path):
+        """Pre-fetch runs must remain unmeasured instead of reporting invented zeros."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        telemetry = mod.ReviewTelemetry(str(output_dir), log_dir=str(tmp_path / "logs"))
+        telemetry.start(pr_number="42", mode="pr", repo_path=str(tmp_path))
+        (output_dir / "review-context.json").write_text(json.dumps({"git": {"git_range": "main..HEAD"}}))
+        telemetry.finalize(step=12, phase="done", title="Done")
+
+        git = json.loads(Path(telemetry.manifest_path).read_text())["run"]["git"]
+        assert git["base_fetch"] is None
+        assert git["scope_check"] is None
+
+    @pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+    def test_range_fact_projection_rejects_non_string_status_without_aborting(self, mod, status):
+        """A malformed nested status must not abort manifest finalization."""
+        fetch = mod._project_base_fetch({"status": status, "sha": "a" * 40, "shallow": False})
+        scope = mod._project_scope_check({"status": status, "github_changed_files": 1})
+
+        assert fetch["status"] is None
+        assert scope["status"] is None
 
     def test_manifest_refresh_keeps_resolved_shas_over_symbolic_context_refs(
         self, telemetry, output_dir
@@ -1994,6 +2104,8 @@ class TestRunManifest:
             "requested_range": "main..HEAD",
             "base_sha": resolved_base,
             "head_sha": resolved_head,
+            "base_fetch": None,
+            "scope_check": None,
         }
 
     def test_manifest_compares_planner_and_orchestrator_dispatches(
@@ -2011,18 +2123,21 @@ class TestRunManifest:
                     "domain": "security",
                     "status": "DISPATCH",
                     "reason": "keywords matched (files: auth)",
+                    "signal": "keyword",
                 },
                 {
                     "name": "a11y-reviewer",
                     "domain": "a11y",
                     "status": "SKIPPED_TRIAGE",
                     "reason": "no UI signal",
+                    "signal": "evidence_gate",
                 },
                 {
                     "name": "code-reviewer",
                     "domain": "code",
                     "status": "DISPATCH",
                     "reason": "always dispatch (domain has files)",
+                    "signal": "always",
                 },
             ]
         }
@@ -2033,6 +2148,7 @@ class TestRunManifest:
                     "domain": "security",
                     "status": "SKIPPED_OVERRIDE",
                     "reason": "keywords matched (files: auth)",
+                    "signal": "keyword",
                     "override_reason": "change does not touch an auth boundary",
                 },
                 {
@@ -2040,6 +2156,7 @@ class TestRunManifest:
                     "domain": "a11y",
                     "status": "DISPATCH_OVERRIDE",
                     "reason": "no UI signal",
+                    "signal": "evidence_gate",
                     "override_reason": "rendered markup coverage was missed",
                 },
                 {
@@ -2047,6 +2164,7 @@ class TestRunManifest:
                     "domain": "code",
                     "status": "DISPATCH",
                     "reason": "always dispatch (domain has files)",
+                    "signal": "always",
                 },
             ]
         }
@@ -2075,6 +2193,8 @@ class TestRunManifest:
             "initial_reason": "keywords matched (files: auth)",
             "final_status": "SKIPPED_OVERRIDE",
             "final_reason": "keywords matched (files: auth)",
+            "initial_signal": "keyword",
+            "final_signal": "override",
             "planner_signals": [
                 "security-reviewer: STATUS=DISPATCH (keywords matched (files: auth))"
             ],
@@ -2087,6 +2207,8 @@ class TestRunManifest:
         added = dispatch["agents"]["a11y-reviewer"]
         assert added["initial_status"] == "SKIPPED_TRIAGE"
         assert added["final_status"] == "DISPATCH_OVERRIDE"
+        assert added["initial_signal"] == "evidence_gate"
+        assert added["final_signal"] == "override"
         assert added["adjustment_reason"] == "rendered markup coverage was missed"
         assert added["change"] == "added"
         assert added["configured_planner_checks"] == [
@@ -2096,6 +2218,8 @@ class TestRunManifest:
         ]
         assert added["model_tier"] == "opus"
         assert dispatch["agents"]["code-reviewer"]["change"] == "unchanged"
+        assert dispatch["agents"]["code-reviewer"]["initial_signal"] == "always"
+        assert dispatch["agents"]["code-reviewer"]["final_signal"] == "always"
 
     def test_repo_reviewer_model_override_reaches_dispatch_telemetry(
         self, telemetry, output_dir
@@ -4367,10 +4491,40 @@ class TestUsageManifest:
             "output_tokens"] == 5
         assert section["by_agent"] == [
             {"agent": "code-reviewer", "model": "claude-opus-5[1m]",
-             "usage": self._usage(output=5)},
+             "usage": self._usage(output=5), "tool_calls": None,
+             "repository_reads": None},
             {"agent": "security-reviewer", "model": "claude-sonnet-5",
-             "usage": self._usage(output=2)},
+             "usage": self._usage(output=2), "tool_calls": None,
+             "repository_reads": None},
         ]
+
+    def test_agent_tool_and_read_counts_are_projected_without_inventing_them(
+        self, mod, tmp_path
+    ):
+        snapshot = self._snapshot(subagent_usage=[
+            {
+                "agent": "code-reviewer",
+                "model": "claude-opus-5[1m]",
+                "usage": self._usage(output=5),
+                "tool_calls": 42,
+                "repository_reads": 7,
+            },
+            {
+                "agent": "security-reviewer",
+                "model": "claude-sonnet-5",
+                "usage": self._usage(output=2),
+                "tool_calls": None,
+                "repository_reads": 3,
+            },
+        ])
+        self._write(tmp_path, snapshot)
+
+        section = mod.manifest_sections.build_usage_manifest(str(tmp_path))
+
+        assert section["by_agent"][0]["tool_calls"] == 42
+        assert section["by_agent"][0]["repository_reads"] == 7
+        assert section["by_agent"][1]["tool_calls"] is None
+        assert section["by_agent"][1]["repository_reads"] == 3
 
     def test_unknown_schema_yields_none(self, mod, tmp_path):
         """A snapshot announcing a schema this builder does not know was
@@ -4480,7 +4634,8 @@ class TestUsageManifest:
         assert section["orchestrator_usage"] is None
         assert section["usage_by_model"] == {}
         assert section["by_agent"] == [
-            {"agent": "code-reviewer", "model": None, "usage": self._usage()},
+            {"agent": "code-reviewer", "model": None, "usage": self._usage(),
+             "tool_calls": None, "repository_reads": None},
         ]
 
     def test_non_integer_agent_counts_are_dropped(self, mod, tmp_path):

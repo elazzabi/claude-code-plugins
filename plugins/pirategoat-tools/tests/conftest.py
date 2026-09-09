@@ -20,8 +20,26 @@ SCRIPTS_DIR = TESTS_DIR.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Add tests/ so `from helpers... import ...` resolves for a module collected
+# on its own. Pytest loads this conftest before any module under it, so no
+# test file needs its own insert; a file that carries one is only masking
+# the absence of this line for whichever file is collected first without it.
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 PIPELINE_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "review" / "pipeline.py"
 PIPELINE_TOTAL_STEPS = 12
+
+# Tests commit in throwaway repositories. A developer's global
+# `commit.gpgsign` would route every one of those commits through the
+# machine's signer (1Password's `op-ssh-sign` here), which blocks waiting
+# for an authorization nobody is present to give and hangs the suite at the
+# first commit. Git reads this environment as configuration in front of the
+# global file, every subprocess the tests spawn inherits it, and no user
+# configuration is touched.
+os.environ.setdefault("GIT_CONFIG_COUNT", "1")
+os.environ.setdefault("GIT_CONFIG_KEY_0", "commit.gpgsign")
+os.environ.setdefault("GIT_CONFIG_VALUE_0", "false")
 
 
 @pytest.fixture(autouse=True, scope="session")
