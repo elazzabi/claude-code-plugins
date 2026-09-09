@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A hunk that changes a function's contract (failure behavior, return shape, side effects, ordering, validation) now puts every caller that relied on the old contract in scope, even in a file with no diff; reviewers anchor the finding at the changed hunk and clear callers through a recorded check instead of dropping the finding because the caller's own diff is empty.
-- `reliability-reviewer`'s "existing infrastructure unchanged" gate defers to the shared unchanged-caller exception instead of clearing a resilience gap on the caller's empty diff.
+- `reliability-reviewer` no longer files a catch block whose only signal is a `debug`-level log as a positive for a silent user-facing degradation, and its "existing infrastructure unchanged" gate defers to the shared unchanged-caller exception.
 
 ## [1.119.0] - 2026-09-09
 

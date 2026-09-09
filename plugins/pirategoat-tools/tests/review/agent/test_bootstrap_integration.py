@@ -1612,6 +1612,14 @@ class TestUnchangedCallerScopeContract:
         assert "unchanged caller" in gate
         assert "anchor the finding at the changed hunk" in gate
 
+    def test_reliability_observable_rule_rejects_debug_only_signal(self):
+        text = (PLUGIN_ROOT / "agents/reliability-reviewer.md").read_text()
+        rule0 = text[text.index("## RULE 0"):text.index("## Core Mission")]
+        assert "`debug`" in rule0
+        assert "not a positive observation" in rule0
+        # The rule must not assert a log-threshold fact the reviewer has
+        # not read: WooCommerce, for one, logs every level by default.
+        assert "default log threshold" not in rule0
 
 
 class TestEmpiricalProbeContract:

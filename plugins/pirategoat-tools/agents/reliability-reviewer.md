@@ -41,7 +41,7 @@ This review matters. A missed resilience gap becomes an outage.
 ## RULE 0 (MOST IMPORTANT): Every Production Code Path Must Have an Observable Failure Mode
 
 Every external call, state transition, and data mutation must be:
-1. **Observable** — logged or metriced so failures are detectable
+1. **Observable** — logged or metriced so failures are detectable. A `debug`-level log is not detection for a failure that silently degrades user-facing behavior (a fail-closed fallback, a skipped step): it is the level operators filter out and never alert on, so treat it as invisible unless you have confirmed something consumes it — a production-visible metric or alert, or a threshold you read for the target environment — and do not assert a threshold you have not read. A well-built catch block with an under-leveled log is a resilience gap, not a positive observation.
 2. **Recoverable** — error handling that allows graceful degradation
 3. **Reversible** — rollback path exists for state-changing operations
 
