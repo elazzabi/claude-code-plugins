@@ -26,6 +26,7 @@ sys.path.insert(0, str(TESTS_DIR))
 from review.verdict_rules import derive_review_state  # noqa: E402
 from review.reviewer_lifecycle import review_paths  # noqa: E402
 from review.run_paths import artifact_path  # noqa: E402
+from review.reconciliation_notes import add_note  # noqa: E402
 
 
 def _load_module():
@@ -1920,3 +1921,66 @@ class TestReviewStem:
             dispatched_agents=["repo-api-reviewer-v2-reviewer"],
         )
         assert "repo-api-reviewer-v2-review" in findings
+
+
+class TestRegisteredNotesSurviveARebuild:
+    """Step 8 rebuilds the context every time it is entered — a same-run
+    retry after an interrupted reconciliator dispatch included — and the
+    orchestrator registers its claims between the build and that dispatch.
+    A rebuild that reset them would release the save gate's requirement
+    that each be answered and hand the next claim an id already spent.
+    """
+
+    def _build(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--output-dir", str(tmp_path),
+             "--git-range", "abc123..HEAD", "--changed-files", "",
+             "--dispatched-agents", ""],
+            capture_output=True, text=True, cwd=tmp_path,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        return result
+
+    def _context(self, tmp_path):
+        return json.loads(
+            artifact_path(str(tmp_path), "reconciliation_context").read_text()
+        )
+
+    def test_a_rebuild_keeps_the_claims_and_the_next_id(self, tmp_path):
+        self._build(tmp_path)
+        first = add_note(str(tmp_path), "Findings f1 and f3 describe one concern.")
+        assert first["id"] == "n1"
+
+        self._build(tmp_path)
+
+        assert self._context(tmp_path)["orchestrator_notes"] == [first]
+        assert add_note(str(tmp_path), "A second, different claim.")["id"] == "n2"
+
+    def test_a_first_build_registers_none(self, tmp_path):
+        self._build(tmp_path)
+
+        assert self._context(tmp_path)["orchestrator_notes"] == []
+
+    def test_a_malformed_collection_fails_the_rebuild_rather_than_dropping(
+        self, tmp_path
+    ):
+        """Only the validating CLI writes notes, so a collection failing
+        that grammar is state no writer can produce. Carrying it forward
+        silently is the loss this preservation exists to prevent."""
+        self._build(tmp_path)
+        add_note(str(tmp_path), "A claim worth keeping.")
+        path = artifact_path(str(tmp_path), "reconciliation_context")
+        context = json.loads(path.read_text())
+        context["orchestrator_notes"][0]["id"] = "n7"
+        path.write_text(json.dumps(context))
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--output-dir", str(tmp_path),
+             "--git-range", "abc123..HEAD", "--changed-files", "",
+             "--dispatched-agents", ""],
+            capture_output=True, text=True, cwd=tmp_path,
+        )
+
+        assert result.returncode != 0
+        assert "orchestrator_notes[0].id must be n1" in result.stderr
+        assert json.loads(path.read_text())["orchestrator_notes"][0]["id"] == "n7"

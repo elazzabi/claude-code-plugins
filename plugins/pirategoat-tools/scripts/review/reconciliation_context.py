@@ -28,22 +28,34 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
+    from . import atomic_io
     from .change_purpose import checks_settling, parse_change_purpose
+    from .findings_ledger import read_reconciliation_context
     from .manifest_sections import read_artifact_file
     from .run_paths import REVIEWERS_SUBDIR, artifact_path
     from .reviewer_names import derive_reviewer_name
     from .verdict_rules import VALID_SEVERITIES
-    from .review_document import coerce_text, load_review_document
+    from .review_document import (
+        coerce_text,
+        load_review_document,
+        normalize_bounded_text,
+    )
 except ImportError:
     _scripts_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _scripts_parent not in sys.path:
         sys.path.insert(0, _scripts_parent)
+    from review import atomic_io
     from review.change_purpose import checks_settling, parse_change_purpose
+    from review.findings_ledger import read_reconciliation_context
     from review.manifest_sections import read_artifact_file
     from review.run_paths import REVIEWERS_SUBDIR, artifact_path
     from review.reviewer_names import derive_reviewer_name
     from review.verdict_rules import VALID_SEVERITIES
-    from review.review_document import coerce_text, load_review_document
+    from review.review_document import (
+        coerce_text,
+        load_review_document,
+        normalize_bounded_text,
+    )
 
 RECONCILIATION_CONTEXT_SCHEMA = 4
 
@@ -750,6 +762,57 @@ def filter_in_scope_references(
     return filtered
 
 
+def validate_orchestrator_notes(value):
+    """Validate the schema-4 claim collection without repairing existing state.
+
+    Owned here, beside `RECONCILIATION_CONTEXT_SCHEMA`: the builder carries
+    registered notes across a rebuild, `reconciliation_notes.py` appends to
+    them and `findings_save.py` requires an outcome for each, so all three
+    read one grammar and a claim cannot be valid to one and not another.
+    """
+    if not isinstance(value, list):
+        raise ValueError("orchestrator_notes must be a list")
+    for index, note in enumerate(value):
+        label = f"orchestrator_notes[{index}]"
+        if not isinstance(note, dict) or set(note) != {"id", "note"}:
+            raise ValueError(f"{label} must contain exactly id and note")
+        expected_id = f"n{index + 1}"
+        if note["id"] != expected_id:
+            raise ValueError(f"{label}.id must be {expected_id}")
+        try:
+            cleaned = normalize_bounded_text(note["note"], "note")
+        except ValueError as err:
+            raise ValueError(f"{label}: {err}") from err
+        if note["note"] != cleaned:
+            raise ValueError(f"{label}.note must be clean text")
+    return value
+
+
+def registered_orchestrator_notes(output_dir: str) -> List[Dict[str, Any]]:
+    """The claims already registered against this run's context.
+
+    Step 8 rebuilds the context every time it is entered — including a
+    same-run retry after an interrupted reconciliator dispatch — and the
+    notes the orchestrator registers between build and dispatch live in the
+    file being rebuilt. Dropping them would release the save gate's
+    requirement that every note be answered (it derives that requirement
+    from this collection) and hand the next note an id already spent.
+
+    A context that does not exist yet, or one from before the notes
+    contract, has none. Malformed notes in a schema-4 context raise: only
+    the validating CLI writes them, so a collection that fails this grammar
+    is state no writer can produce, and carrying it forward silently is the
+    loss this function exists to prevent.
+    """
+    try:
+        context = read_reconciliation_context(output_dir)
+    except ValueError:
+        return []
+    if context.get("schema") != RECONCILIATION_CONTEXT_SCHEMA:
+        return []
+    return validate_orchestrator_notes(context.get("orchestrator_notes"))
+
+
 def load_host_context(output_dir: str) -> Optional[Dict[str, Any]]:
     """Read the local-only host manifest from the run's review context.
 
@@ -903,7 +966,9 @@ def main() -> int:
             # Claims the orchestrator registers between context build and
             # reconciliator dispatch (reconciliation_notes.py). Always a
             # list: the save gate reads it, and an absent key would be a
-            # third state between "none registered" and "unknown".
+            # third state between "none registered" and "unknown". Filled
+            # from the run's existing context under the lock below, so a
+            # rebuild carries the claims already registered.
             "orchestrator_notes": [],
         }
         if host_context is not None:
@@ -915,12 +980,20 @@ def main() -> int:
         if stems is not None:
             context["dispatched_agents"] = stems
 
-        # Write to output directory
+        # Write to output directory. The registered claims are read and the
+        # context replaced under the output-directory lock the notes CLI
+        # holds, so this rebuild and a concurrent `add_note` cannot each
+        # write a file computed from a state the other has already moved
+        # past; the atomic replace keeps the artifact from being observed
+        # half-rebuilt by the reconciliator or the save gate.
         output_path = artifact_path(output_dir, "reconciliation_context")
         os.makedirs(output_dir, exist_ok=True)
         output_path.parent.mkdir(exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2, ensure_ascii=False)
+        with atomic_io.output_dir_lock(str(output_dir)):
+            context["orchestrator_notes"] = registered_orchestrator_notes(
+                output_dir
+            )
+            atomic_io.atomic_write_json(str(output_path), context)
 
         # No Markdown projection is written. `reconciliation-context.md`
         # existed for exactly one reader — the reconciliator agent — and a

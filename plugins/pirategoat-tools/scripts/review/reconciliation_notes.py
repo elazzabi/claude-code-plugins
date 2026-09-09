@@ -10,7 +10,8 @@ ledger that does not answer every note with an outcome and evidence, so
 a hint can no longer be adopted verbatim (run 6e6a) or lost.
 
 One writer, under the output-directory lock, appending to the context
-reconciliation_context.py wrote. Ids are monotonic within the run.
+reconciliation_context.py wrote — which carries these claims across a
+rebuild under that same lock. Ids are monotonic within the run.
 """
 
 import argparse
@@ -21,7 +22,10 @@ try:
     from . import atomic_io
     from .findings_ledger import read_reconciliation_context
     from .review_document import normalize_bounded_text
-    from .reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
+    from .reconciliation_context import (
+        RECONCILIATION_CONTEXT_SCHEMA,
+        validate_orchestrator_notes,
+    )
     from .run_paths import artifact_path
 except ImportError:
     _scripts_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,30 +34,13 @@ except ImportError:
     from review import atomic_io
     from review.findings_ledger import read_reconciliation_context
     from review.review_document import normalize_bounded_text
-    from review.reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
+    from review.reconciliation_context import (
+        RECONCILIATION_CONTEXT_SCHEMA,
+        validate_orchestrator_notes,
+    )
     from review.run_paths import artifact_path
 
 CONTEXT_FILENAME = artifact_path("", "reconciliation_context").name
-
-
-def validate_orchestrator_notes(value):
-    """Validate the schema-4 claim collection without repairing existing state."""
-    if not isinstance(value, list):
-        raise ValueError("orchestrator_notes must be a list")
-    for index, note in enumerate(value):
-        label = f"orchestrator_notes[{index}]"
-        if not isinstance(note, dict) or set(note) != {"id", "note"}:
-            raise ValueError(f"{label} must contain exactly id and note")
-        expected_id = f"n{index + 1}"
-        if note["id"] != expected_id:
-            raise ValueError(f"{label}.id must be {expected_id}")
-        try:
-            cleaned = normalize_bounded_text(note["note"], "note")
-        except ValueError as err:
-            raise ValueError(f"{label}: {err}") from err
-        if note["note"] != cleaned:
-            raise ValueError(f"{label}.note must be clean text")
-    return value
 
 
 def add_note(output_dir, text):

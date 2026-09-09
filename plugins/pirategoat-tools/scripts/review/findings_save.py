@@ -42,8 +42,10 @@ try:
         RECONCILIATION_PIPELINE_FIELDS,
         read_reconciliation_context,
     )
-    from .reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
-    from .reconciliation_notes import validate_orchestrator_notes
+    from .reconciliation_context import (
+        RECONCILIATION_CONTEXT_SCHEMA,
+        validate_orchestrator_notes,
+    )
     from .review_document import MAX_LEDGER_TEXT_LENGTH
     from .verdict_rules import REVIEW_VERDICTS, VALID_SEVERITIES
     from .run_paths import artifact_path
@@ -58,8 +60,10 @@ except ImportError:
         RECONCILIATION_PIPELINE_FIELDS,
         read_reconciliation_context,
     )
-    from review.reconciliation_context import RECONCILIATION_CONTEXT_SCHEMA
-    from review.reconciliation_notes import validate_orchestrator_notes
+    from review.reconciliation_context import (
+        RECONCILIATION_CONTEXT_SCHEMA,
+        validate_orchestrator_notes,
+    )
     from review.review_document import MAX_LEDGER_TEXT_LENGTH
     from review.verdict_rules import REVIEW_VERDICTS, VALID_SEVERITIES
     from review.run_paths import artifact_path
