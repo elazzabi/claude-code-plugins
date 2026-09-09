@@ -1558,6 +1558,70 @@ class TestVerificationMethodContract:
         assert "searched pattern is absent" in prompt
 
 
+class TestUnchangedCallerScopeContract:
+    """A hunk that changes a function's contract puts the callers that
+    relied on the old contract in scope, even in a file with no diff.
+    The scope rule lives once, in the shared protocol's STOP CHECK
+    exception; the tracing method lives in Absence Claims; the
+    reliability gate defers to both instead of clearing on its own."""
+
+    def test_protocol_has_unchanged_caller_exception(self):
+        text = (PLUGIN_ROOT / "agents/shared/reviewer-protocol.md").read_text()
+        assert "reaching an unchanged caller" in text
+        exception = text[text.index("reaching an unchanged caller"):]
+        # Anchoring: only a hunk-anchored finding survives the structural
+        # prefilter, so the rule names where the finding goes and where not.
+        assert "Anchor the finding at the changed hunk" in exception
+        assert "never at the caller" in exception
+        # The clearance is a recorded check, not free text.
+        assert "record_check" in exception
+        # An empty caller diff is not evidence of safety.
+        assert "not that it is safe" in exception
+
+    def test_absence_claims_cover_a_changed_contract(self):
+        text = (PLUGIN_ROOT / "agents/shared/reviewer-protocol.md").read_text()
+        absence = text[text.index("## Absence Claims"):]
+        assert "changed contract" in absence
+
+    def test_unchanged_caller_exception_reaches_agent_prompts(self, tmp_path):
+        protocol = (PLUGIN_ROOT / "agents/shared/reviewer-protocol.md").read_text()
+        review_rules = _mod.extract_protocol_sections(
+            protocol,
+            _mod.REVIEWER_PROTOCOL_SKIP_SECTIONS,
+        )
+        prompt = build_output(
+            agent_name="reliability-reviewer",
+            plugin_root=str(PLUGIN_ROOT),
+            status="OK",
+            review_rules=review_rules,
+            domain_rules=None,
+            scope_output="=== REVIEW SCOPE ===\nSTATUS: OK",
+            exploration_scope=None,
+            output_dir=str(tmp_path),
+            pr_number=None,
+            reviewer_name="reliability",
+            review_claimable_count=0,
+            has_php=False,
+        )
+        assert "reaching an unchanged caller" in prompt
+        assert "Anchor the finding at the changed hunk" in prompt
+
+    def test_reliability_gate_defers_to_the_shared_exception(self):
+        text = (PLUGIN_ROOT / "agents/reliability-reviewer.md").read_text()
+        gate = text[text.index("## FALSE POSITIVE GATE"):]
+        assert "unchanged caller" in gate
+        assert "anchor the finding at the changed hunk" in gate
+
+    def test_reliability_observable_rule_rejects_debug_only_signal(self):
+        text = (PLUGIN_ROOT / "agents/reliability-reviewer.md").read_text()
+        rule0 = text[text.index("## RULE 0"):text.index("## Core Mission")]
+        assert "`debug`" in rule0
+        assert "not a positive observation" in rule0
+        # The rule must not assert a log-threshold fact the reviewer has
+        # not read: WooCommerce, for one, logs every level by default.
+        assert "default log threshold" not in rule0
+
+
 class TestEmpiricalProbeContract:
     """The probe-naming convention must reach the reviewers that run code.
 
